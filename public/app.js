@@ -14,7 +14,7 @@ const els = {
   newDraftBlank: document.querySelector("#new-draft-blank"),
   toggleChanges: document.querySelector("#toggle-changes"),
   compareMode: document.querySelector("#compare-mode"),
-  compareScope: document.querySelector("#compare-scope"),
+  compareSelector: document.querySelector("#compare-selector"),
   compareSubtitle: document.querySelector("#compare-subtitle"),
   diffOutput: document.querySelector("#diff-output"),
   editorSurface: document.querySelector("#editor-surface"),
@@ -31,6 +31,30 @@ let isSaving = false;
 let showChanges = false;
 let exportPath = "";
 let draftPanePercent = Number(window.localStorage.getItem("draftPanePercent") || 62);
+let compareSelectedIds = new Set();
+let activeEditorId = "draft-content";
+
+const DEFAULT_FORMAT = {
+  fontFamily: "Segoe UI",
+  fontSize: "16"
+};
+
+const allowedFontFamilies = new Set([
+  "Segoe UI",
+  "Arial",
+  "Calibri",
+  "Georgia",
+  "Times New Roman",
+  "Courier New"
+]);
+
+const allowedFontSizes = new Set(["12", "14", "16", "18", "20", "24", "28", "32"]);
+
+const richEditors = [
+  { id: "initial-notes", el: els.initialNotes, getPage: () => state.initialNotes },
+  { id: "draft-content", el: els.draftContent, getPage: () => getSelectedDraft() },
+  { id: "draft-notes", el: els.draftNotes, getPage: () => getSelectedDraft().notes }
+];
 
 function nowIso() {
   return new Date().toISOString();
@@ -61,11 +85,15 @@ function createDraft(copyFrom) {
     title: `Draft ${index}`,
     createdAt,
     content: copyFrom?.content || "",
+    contentHtml: copyFrom?.contentHtml || textToHtml(copyFrom?.content || ""),
+    format: copyFrom?.format ? { ...normalizeFormat(copyFrom.format) } : { ...DEFAULT_FORMAT },
     notes: {
       id: makeId("notes"),
       title: `Draft ${index} Notes`,
       createdAt,
-      content: ""
+      content: "",
+      contentHtml: "",
+      format: { ...DEFAULT_FORMAT }
     }
   };
 }
@@ -81,6 +109,154 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function textToHtml(value) {
+  return escapeHtml(value).replace(/\n/g, "<br>");
+}
+
+function normalizeFormat(format = {}) {
+  const fontFamily = allowedFontFamilies.has(format.fontFamily)
+    ? format.fontFamily
+    : DEFAULT_FORMAT.fontFamily;
+  const fontSize = allowedFontSizes.has(String(format.fontSize))
+    ? String(format.fontSize)
+    : DEFAULT_FORMAT.fontSize;
+  return { fontFamily, fontSize };
+}
+
+function ensurePageFields(page) {
+  page.content = typeof page.content === "string" ? page.content : "";
+  page.contentHtml = typeof page.contentHtml === "string" ? page.contentHtml : textToHtml(page.content);
+  if (!page.content && page.contentHtml) page.content = plainTextFromHtml(page.contentHtml);
+  page.format = normalizeFormat(page.format);
+  return page;
+}
+
+function fontStyle(format) {
+  const normalized = normalizeFormat(format);
+  return `font-family: ${normalized.fontFamily}; font-size: ${normalized.fontSize}px;`;
+}
+
+function editorRecordById(editorId) {
+  return richEditors.find(editor => editor.id === editorId);
+}
+
+function pageForEditorId(editorId) {
+  return editorRecordById(editorId)?.getPage();
+}
+
+function toolbarForEditor(editorId) {
+  return document.querySelector(`[data-toolbar-for="${editorId}"]`);
+}
+
+function sanitizeStyleMarks(styleValue = "") {
+  const style = styleValue.toLowerCase();
+  return {
+    bold: /font-weight\s*:\s*(bold|[6-9]00)/.test(style),
+    italic: /font-style\s*:\s*italic/.test(style),
+    underline: /text-decoration[^;]*underline/.test(style),
+    strike: /text-decoration[^;]*(line-through|strike)/.test(style)
+  };
+}
+
+function wrapSemanticHtml(html, marks) {
+  let output = html;
+  if (marks.strike) output = `<s>${output}</s>`;
+  if (marks.underline) output = `<u>${output}</u>`;
+  if (marks.italic) output = `<em>${output}</em>`;
+  if (marks.bold) output = `<strong>${output}</strong>`;
+  return output;
+}
+
+function sanitizeRichHtml(html) {
+  const template = document.createElement("template");
+  template.innerHTML = String(html || "");
+  const blockTags = new Set(["div", "p", "blockquote", "ul", "ol", "li"]);
+
+  const sanitizeNode = node => {
+    if (node.nodeType === Node.TEXT_NODE) return escapeHtml(node.nodeValue);
+    if (node.nodeType !== Node.ELEMENT_NODE) return "";
+
+    const tag = node.tagName.toLowerCase();
+    if (tag === "br") return "<br>";
+
+    const inner = Array.from(node.childNodes).map(sanitizeNode).join("");
+    if (tag === "b" || tag === "strong") return `<strong>${inner}</strong>`;
+    if (tag === "i" || tag === "em") return `<em>${inner}</em>`;
+    if (tag === "u") return `<u>${inner}</u>`;
+    if (tag === "s" || tag === "strike" || tag === "del") return `<s>${inner}</s>`;
+    if (tag === "span") return wrapSemanticHtml(inner, sanitizeStyleMarks(node.getAttribute("style") || ""));
+    if (blockTags.has(tag)) return `<${tag}>${inner}</${tag}>`;
+    return inner;
+  };
+
+  return Array.from(template.content.childNodes).map(sanitizeNode).join("");
+}
+
+function plainTextFromHtml(html) {
+  const template = document.createElement("template");
+  template.innerHTML = sanitizeRichHtml(html);
+  return plainTextFromNode(template.content).trimEnd();
+}
+
+function plainTextFromNode(root) {
+  let output = "";
+  const blockTags = new Set(["div", "p", "blockquote", "li", "ul", "ol"]);
+
+  const walk = node => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      output += node.nodeValue.replace(/\u00a0/g, " ");
+      return;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return;
+
+    const tag = node.nodeType === Node.ELEMENT_NODE ? node.tagName.toLowerCase() : "";
+    if (tag === "br") {
+      output += "\n";
+      return;
+    }
+
+    Array.from(node.childNodes).forEach(walk);
+    if (blockTags.has(tag) && output && !output.endsWith("\n")) output += "\n";
+  };
+
+  walk(root);
+  return output.replace(/\n{3,}/g, "\n\n");
+}
+
+function editorPlainText(editorEl) {
+  return plainTextFromNode(editorEl).trimEnd();
+}
+
+function setEditorHtml(editorEl, html) {
+  const sanitized = sanitizeRichHtml(html);
+  if (editorEl.innerHTML !== sanitized) editorEl.innerHTML = sanitized;
+}
+
+function applyEditorFormat(editorEl, format) {
+  const normalized = normalizeFormat(format);
+  editorEl.style.fontFamily = normalized.fontFamily;
+  editorEl.style.fontSize = `${normalized.fontSize}px`;
+}
+
+function syncToolbarValues(editorId) {
+  const page = ensurePageFields(pageForEditorId(editorId));
+  const toolbar = toolbarForEditor(editorId);
+  if (!toolbar) return;
+
+  toolbar.querySelectorAll("[data-page-format]").forEach(control => {
+    const field = control.dataset.pageFormat;
+    control.value = page.format[field];
+  });
+}
+
+function syncRichPage(page, editorEl) {
+  ensurePageFields(page);
+  page.contentHtml = sanitizeRichHtml(editorEl.innerHTML);
+  page.content = editorPlainText(editorEl);
+  page.format = normalizeFormat(page.format);
 }
 
 function splitLines(text) {
@@ -105,25 +281,25 @@ function diffSequence(before, after) {
 
   while (i < before.length && j < after.length) {
     if (before[i].key === after[j].key) {
-      result.push({ type: "same", text: before[i].text });
+      result.push({ type: "same", text: before[i].text, marks: after[j].marks || before[i].marks || {} });
       i += 1;
       j += 1;
     } else if (rows[i + 1][j] >= rows[i][j + 1]) {
-      result.push({ type: "removed", text: before[i].text });
+      result.push({ type: "removed", text: before[i].text, marks: before[i].marks || {} });
       i += 1;
     } else {
-      result.push({ type: "added", text: after[j].text });
+      result.push({ type: "added", text: after[j].text, marks: after[j].marks || {} });
       j += 1;
     }
   }
 
   while (i < before.length) {
-    result.push({ type: "removed", text: before[i].text });
+    result.push({ type: "removed", text: before[i].text, marks: before[i].marks || {} });
     i += 1;
   }
 
   while (j < after.length) {
-    result.push({ type: "added", text: after[j].text });
+    result.push({ type: "added", text: after[j].text, marks: after[j].marks || {} });
     j += 1;
   }
 
@@ -136,18 +312,67 @@ function diffLines(beforeText, afterText) {
   return diffSequence(before, after);
 }
 
-function tokenizeText(text) {
+function tokenizeSegment(text, marks = {}) {
   const normalized = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
   const matches = normalized.match(/\n|[^\S\n]+|[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu) || [];
+  const semanticKey = marks.whitespace ? "" : `${marks.bold ? "b" : ""}${marks.italic ? "i" : ""}${marks.underline ? "u" : ""}${marks.strike ? "s" : ""}`;
   return matches.map(token => ({
-    key: token,
+    key: /^\s+$/u.test(token) ? token : `${token}|${semanticKey}`,
     text: token,
+    marks: { ...marks },
     isWhitespace: /^\s+$/u.test(token)
   }));
 }
 
-function diffText(beforeText, afterText) {
-  return diffSequence(tokenizeText(beforeText), tokenizeText(afterText));
+function semanticTokensFromHtml(html) {
+  const template = document.createElement("template");
+  template.innerHTML = sanitizeRichHtml(html);
+  const tokens = [];
+  const blockTags = new Set(["div", "p", "blockquote", "li", "ul", "ol"]);
+
+  const addNewline = marks => {
+    if (tokens.length && tokens[tokens.length - 1].text !== "\n") {
+      tokens.push(...tokenizeSegment("\n", marks));
+    }
+  };
+
+  const walk = (node, marks = {}) => {
+    if (node.nodeType === Node.TEXT_NODE) {
+      tokens.push(...tokenizeSegment(node.nodeValue.replace(/\u00a0/g, " "), marks));
+      return;
+    }
+
+    if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return;
+
+    const tag = node.nodeType === Node.ELEMENT_NODE ? node.tagName.toLowerCase() : "";
+    if (tag === "br") {
+      addNewline(marks);
+      return;
+    }
+
+    const nextMarks = {
+      bold: marks.bold || tag === "b" || tag === "strong",
+      italic: marks.italic || tag === "i" || tag === "em",
+      underline: marks.underline || tag === "u",
+      strike: marks.strike || tag === "s" || tag === "strike" || tag === "del"
+    };
+
+    Array.from(node.childNodes).forEach(child => walk(child, nextMarks));
+    if (blockTags.has(tag)) addNewline(marks);
+  };
+
+  walk(template.content);
+  while (tokens.length && tokens[tokens.length - 1].text === "\n") tokens.pop();
+  return tokens;
+}
+
+function diffRichPages(beforePage, afterPage) {
+  ensurePageFields(beforePage);
+  ensurePageFields(afterPage);
+  return diffSequence(
+    semanticTokensFromHtml(beforePage.contentHtml),
+    semanticTokensFromHtml(afterPage.contentHtml)
+  );
 }
 
 function countMeaningfulChanges(parts) {
@@ -160,10 +385,6 @@ function countMeaningfulChanges(parts) {
       return;
     }
 
-    if (!part.text.trim()) {
-      return;
-    }
-
     if (!inChange) {
       count += 1;
       inChange = true;
@@ -173,22 +394,27 @@ function countMeaningfulChanges(parts) {
   return count;
 }
 
-function pairForDraft(draftIndex) {
-  const draft = state.drafts[draftIndex];
-  if (els.compareMode.value === "first") {
-    return {
-      before: state.drafts[0],
-      after: draft,
-      label: draftIndex === 0 ? "First draft" : `${draft.title} compared to ${state.drafts[0].title}`
-    };
-  }
-
-  const previous = state.drafts[Math.max(0, draftIndex - 1)];
+function pairForIndexes(beforeIndex, afterIndex) {
+  const previous = state.drafts[beforeIndex];
+  const draft = state.drafts[afterIndex];
   return {
     before: previous,
     after: draft,
-    label: draftIndex === 0 ? "First draft" : `${draft.title} compared to ${previous.title}`
+    label: `${draft.title} compared to ${previous.title}`
   };
+}
+
+function draftIndexForId(draftId) {
+  return state.drafts.findIndex(draft => draft.id === draftId);
+}
+
+function resetCompareSelection() {
+  compareSelectedIds = new Set(state.drafts.map(draft => draft.id));
+}
+
+function pruneCompareSelection() {
+  const draftIds = new Set(state.drafts.map(draft => draft.id));
+  compareSelectedIds = new Set([...compareSelectedIds].filter(id => draftIds.has(id)));
 }
 
 function renderDraftTabs() {
@@ -203,13 +429,39 @@ function renderDraftTabs() {
   }).join("");
 }
 
+function renderCompareSelector() {
+  pruneCompareSelection();
+
+  if (!state.drafts.length) {
+    els.compareSelector.innerHTML = `<p class="compare-selector-empty">No drafts yet.</p>`;
+    return;
+  }
+
+  els.compareSelector.innerHTML = state.drafts.map(draft => {
+    const checked = compareSelectedIds.has(draft.id) ? " checked" : "";
+    return `
+      <label class="compare-choice">
+        <input type="checkbox" data-compare-draft-id="${draft.id}" aria-label="Compare ${escapeHtml(draft.title)}"${checked}>
+        <span>${escapeHtml(draft.title)}</span>
+      </label>
+    `;
+  }).join("");
+}
+
 function renderEditor() {
+  ensurePageFields(state.initialNotes);
   const draft = getSelectedDraft();
+  ensurePageFields(draft);
+  ensurePageFields(draft.notes);
   selectedDraftId = draft.id;
   els.draftTitle.value = draft.title;
-  els.draftContent.value = draft.content;
-  els.draftNotes.value = draft.notes.content;
-  els.initialNotes.value = state.initialNotes.content;
+  setEditorHtml(els.draftContent, draft.contentHtml);
+  setEditorHtml(els.draftNotes, draft.notes.contentHtml);
+  setEditorHtml(els.initialNotes, state.initialNotes.contentHtml);
+  applyEditorFormat(els.draftContent, draft.format);
+  applyEditorFormat(els.draftNotes, draft.notes.format);
+  applyEditorFormat(els.initialNotes, state.initialNotes.format);
+  richEditors.forEach(editor => syncToolbarValues(editor.id));
   els.draftNotesTitle.textContent = `${draft.title} notes`;
   els.draftCreated.textContent = `Created ${formatDate(draft.createdAt)}`;
   els.notesCreated.textContent = `Created ${formatDate(draft.notes.createdAt)}`;
@@ -227,52 +479,108 @@ function pageLinesHtml(text) {
     .join("");
 }
 
+function richPageHtml(page) {
+  ensurePageFields(page);
+  if (!page.content.trim()) {
+    return `<p class="compare-line empty-line">No draft text yet.</p>`;
+  }
+  return sanitizeRichHtml(page.contentHtml);
+}
+
+function semanticClasses(marks = {}) {
+  return [
+    marks.bold ? "semantic-bold" : "",
+    marks.italic ? "semantic-italic" : "",
+    marks.underline ? "semantic-underline" : "",
+    marks.strike ? "semantic-strike" : ""
+  ].filter(Boolean).join(" ");
+}
+
+function visibleChangedWhitespace(text) {
+  return text
+    .replace(/ /g, "·")
+    .replace(/\t/g, "⇥")
+    .replace(/\n/g, "↵\n");
+}
+
+function renderDiffToken(part) {
+  const classes = ["compare-token"];
+  if (part.type !== "same") classes.push(part.type);
+  const semanticClassName = semanticClasses(part.marks);
+  if (semanticClassName) classes.push(semanticClassName);
+  const text = part.type === "same" ? part.text : visibleChangedWhitespace(part.text);
+  return `<span class="${classes.join(" ")}">${escapeHtml(text)}</span>`;
+}
+
+function baseComparePageHtml(draft, subtitle = "Earlier draft") {
+  ensurePageFields(draft);
+  return `
+    <article class="compare-page">
+      <div class="compare-page-heading">
+        <span>${escapeHtml(subtitle)}</span>
+        <strong>${escapeHtml(draft.title)}</strong>
+      </div>
+      <div class="compare-page-body" style="${fontStyle(draft.format)}">
+        <div class="compare-rich-content">${richPageHtml(draft)}</div>
+      </div>
+    </article>
+  `;
+}
+
 function markedLaterPageHtml(pair) {
-  const diff = diffText(pair.before.content, pair.after.content);
+  const diff = diffRichPages(pair.before, pair.after);
   if (!diff.length) {
     return `<div class="compare-text empty-line">No draft text yet.</div>`;
   }
 
-  const tokens = diff.map(part => {
-    const className = part.type === "same" ? "compare-token" : `compare-token ${part.type}`;
-    return `<span class="${className}">${escapeHtml(part.text)}</span>`;
-  }).join("");
-
+  const tokens = diff.map(renderDiffToken).join("");
   return `<div class="compare-text">${tokens}</div>`;
 }
 
-function diffGroupHtml(pair) {
-  const diff = diffText(pair.before.content, pair.after.content);
+function markedComparePageHtml(pair) {
+  const diff = diffRichPages(pair.before, pair.after);
   const changedCount = countMeaningfulChanges(diff);
 
   return `
-    <section class="compare-group">
-      <div class="compare-title">
-        <strong>${escapeHtml(pair.label)}</strong>
+    <article class="compare-page later-page">
+      <div class="compare-page-heading">
+        <span>Compared page</span>
+        <strong>${escapeHtml(pair.after.title)}</strong>
+      </div>
+      <div class="compare-page-subhead">
+        <span>${escapeHtml(pair.label)}</span>
         <span>${changedCount} ${changedCount === 1 ? "change" : "changes"}</span>
       </div>
-      <div class="compare-pages">
-        <article class="compare-page">
-          <div class="compare-page-heading">
-            <span>Earlier draft</span>
-            <strong>${escapeHtml(pair.before.title)}</strong>
-          </div>
-          <div class="compare-page-body">
-            ${pageLinesHtml(pair.before.content)}
-          </div>
-        </article>
-        <article class="compare-page later-page">
-          <div class="compare-page-heading">
-            <span>Later draft with changes</span>
-            <strong>${escapeHtml(pair.after.title)}</strong>
-          </div>
-          <div class="compare-page-body">
-            ${markedLaterPageHtml(pair)}
-          </div>
-        </article>
+      <div class="compare-page-body" style="${fontStyle(pair.after.format)}">
+        ${markedLaterPageHtml(pair)}
       </div>
-    </section>
+    </article>
   `;
+}
+
+function selectedCompareIndexes() {
+  return [...compareSelectedIds]
+    .map(draftIndexForId)
+    .filter(index => index >= 0)
+    .sort((a, b) => a - b);
+}
+
+function beforeIndexForSelectedDraft(indexes, position) {
+  return els.compareMode.value === "first" ? indexes[0] : indexes[position - 1];
+}
+
+function renderComparisonStrip(indexes) {
+  const pages = [];
+
+  pages.push(baseComparePageHtml(state.drafts[indexes[0]], "Selected baseline"));
+
+  indexes.slice(1).forEach((draftIndex, offset) => {
+    const beforeIndex = beforeIndexForSelectedDraft(indexes, offset + 1);
+    const pair = pairForIndexes(beforeIndex, draftIndex);
+    pages.push(markedComparePageHtml(pair));
+  });
+
+  return `<div class="compare-strip">${pages.join("")}</div>`;
 }
 
 function renderDiff() {
@@ -282,18 +590,16 @@ function renderDiff() {
     return;
   }
 
-  const selectedIndex = state.drafts.findIndex(draft => draft.id === selectedDraftId);
-  const indexes = els.compareScope.value === "all"
-    ? state.drafts.map((_, index) => index).filter(index => index > 0)
-    : [selectedIndex > 0 ? selectedIndex : 1].filter(index => state.drafts[index]);
+  renderCompareSelector();
+  const indexes = selectedCompareIndexes();
 
   els.compareSubtitle.textContent = els.compareMode.value === "first"
-    ? "Later draft pages are marked against the first draft"
-    : "Later draft pages are marked against the previous draft";
+    ? "Selected draft pages are marked against the first selected draft"
+    : "Selected draft pages are marked against the previous selected draft";
 
   els.diffOutput.innerHTML = indexes.length
-    ? indexes.map(index => diffGroupHtml(pairForDraft(index))).join("")
-    : `<p class="empty-state">Add Draft 2 to compare it with Draft 1.</p>`;
+    ? renderComparisonStrip(indexes)
+    : `<p class="empty-state">No draft pages selected.</p>`;
 }
 
 function renderChangesVisibility() {
@@ -306,6 +612,7 @@ function renderChangesVisibility() {
 function render() {
   renderDraftTabs();
   renderEditor();
+  renderCompareSelector();
   renderChangesVisibility();
   renderDiff();
 }
@@ -313,9 +620,9 @@ function render() {
 function syncFromInputs() {
   const draft = getSelectedDraft();
   draft.title = els.draftTitle.value || "Untitled draft";
-  draft.content = els.draftContent.value;
-  draft.notes.content = els.draftNotes.value;
-  state.initialNotes.content = els.initialNotes.value;
+  syncRichPage(draft, els.draftContent);
+  syncRichPage(draft.notes, els.draftNotes);
+  syncRichPage(state.initialNotes, els.initialNotes);
 }
 
 function scheduleSave() {
@@ -360,6 +667,7 @@ async function loadState() {
   state = payload.state;
   exportPath = payload.exportPath || "";
   selectedDraftId = state.drafts[0]?.id;
+  resetCompareSelection();
   setDraftPanePercent(draftPanePercent);
   setStatus("Saved");
   render();
@@ -378,6 +686,7 @@ function addDraft(copyFromSelected) {
   syncFromInputs();
   const draft = createDraft(copyFromSelected ? getSelectedDraft() : null);
   state.drafts.push(draft);
+  compareSelectedIds.add(draft.id);
   selectedDraftId = draft.id;
   activeArea = "draft";
   render();
@@ -399,6 +708,29 @@ function resizeDraftStack(clientY) {
   setDraftPanePercent((draftPixels / rect.height) * 100);
 }
 
+function setActiveEditor(editorId) {
+  activeEditorId = editorId;
+}
+
+function applyPageFormat(editorId, field, value) {
+  const page = ensurePageFields(pageForEditorId(editorId));
+  page.format[field] = value;
+  page.format = normalizeFormat(page.format);
+  const editor = editorRecordById(editorId);
+  applyEditorFormat(editor.el, page.format);
+  syncToolbarValues(editorId);
+  scheduleSave();
+}
+
+function runEditorCommand(editorId, command) {
+  const editor = editorRecordById(editorId);
+  if (!editor) return;
+  setActiveEditor(editorId);
+  editor.el.focus();
+  document.execCommand(command, false, null);
+  scheduleSave();
+}
+
 els.storyTab.addEventListener("click", () => {
   activeArea = "story";
   renderDraftTabs();
@@ -416,22 +748,85 @@ els.newDraftCopy.addEventListener("click", () => addDraft(true));
 
 els.initialNotes.addEventListener("focus", () => {
   activeArea = "story";
+  setActiveEditor("initial-notes");
   renderDraftTabs();
 });
 
-[els.draftTitle, els.draftContent, els.draftNotes].forEach(input => {
-  input.addEventListener("focus", () => {
+[
+  { el: els.draftContent, id: "draft-content" },
+  { el: els.draftNotes, id: "draft-notes" }
+].forEach(({ el, id }) => {
+  el.addEventListener("focus", () => {
     activeArea = "draft";
+    setActiveEditor(id);
     renderDraftTabs();
   });
 });
 
-[els.draftTitle, els.draftContent, els.draftNotes, els.initialNotes].forEach(input => {
-  input.addEventListener("input", scheduleSave);
+els.draftTitle.addEventListener("focus", () => {
+  activeArea = "draft";
+  setActiveEditor("draft-content");
+  renderDraftTabs();
 });
 
-[els.compareMode, els.compareScope].forEach(input => {
-  input.addEventListener("change", renderDiff);
+richEditors.forEach(({ el, id }) => {
+  el.addEventListener("focus", () => {
+    setActiveEditor(id);
+  });
+});
+
+richEditors.forEach(({ el, id }) => {
+  el.addEventListener("input", scheduleSave);
+  el.addEventListener("keydown", event => {
+    if (event.key !== "Tab") return;
+    event.preventDefault();
+    setActiveEditor(id);
+    document.execCommand("insertText", false, "\t");
+    scheduleSave();
+  });
+  el.addEventListener("paste", event => {
+    event.preventDefault();
+    setActiveEditor(id);
+    const html = event.clipboardData.getData("text/html");
+    const text = event.clipboardData.getData("text/plain");
+    document.execCommand("insertHTML", false, html ? sanitizeRichHtml(html) : textToHtml(text));
+    scheduleSave();
+  });
+});
+
+els.draftTitle.addEventListener("input", scheduleSave);
+
+document.querySelectorAll(".editor-format-ribbon").forEach(toolbar => {
+  toolbar.addEventListener("mousedown", event => {
+    if (event.target.closest("button")) event.preventDefault();
+  });
+
+  toolbar.addEventListener("click", event => {
+    const button = event.target.closest("[data-command]");
+    if (!button) return;
+    runEditorCommand(toolbar.dataset.toolbarFor || activeEditorId, button.dataset.command);
+  });
+
+  toolbar.addEventListener("change", event => {
+    const control = event.target.closest("[data-page-format]");
+    if (!control) return;
+    applyPageFormat(toolbar.dataset.toolbarFor || activeEditorId, control.dataset.pageFormat, control.value);
+  });
+});
+
+els.compareMode.addEventListener("change", renderDiff);
+
+els.compareSelector.addEventListener("change", event => {
+  const checkbox = event.target.closest("[data-compare-draft-id]");
+  if (!checkbox) return;
+
+  if (checkbox.checked) {
+    compareSelectedIds.add(checkbox.dataset.compareDraftId);
+  } else {
+    compareSelectedIds.delete(checkbox.dataset.compareDraftId);
+  }
+
+  renderDiff();
 });
 
 els.toggleChanges.addEventListener("click", () => {

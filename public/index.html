@@ -32,13 +32,6 @@
               <option value="consecutive">Consecutive</option>
             </select>
           </label>
-          <label class="select-control" for="compare-scope">
-            View
-            <select id="compare-scope">
-              <option value="selected">Selected</option>
-              <option value="all">All drafts</option>
-            </select>
-          </label>
           <a class="link-button" href="/api/export" target="_blank" rel="noreferrer">Text file</a>
         </div>
       </nav>
@@ -53,7 +46,44 @@
               </div>
               <span class="meta" id="initial-created"></span>
             </div>
-            <textarea id="initial-notes" spellcheck="true" aria-label="Story notes"></textarea>
+            <div class="rich-editor-shell">
+              <div class="editor-hover-edge"></div>
+              <div class="editor-format-ribbon" data-toolbar-for="initial-notes" aria-label="Story notes formatting">
+                <select data-page-format="fontFamily" title="Page font" aria-label="Page font">
+                  <option>Segoe UI</option>
+                  <option>Arial</option>
+                  <option>Calibri</option>
+                  <option>Georgia</option>
+                  <option>Times New Roman</option>
+                  <option>Courier New</option>
+                </select>
+                <select data-page-format="fontSize" title="Page font size" aria-label="Page font size">
+                  <option value="12">12</option>
+                  <option value="14">14</option>
+                  <option value="16">16</option>
+                  <option value="18">18</option>
+                  <option value="20">20</option>
+                  <option value="24">24</option>
+                  <option value="28">28</option>
+                  <option value="32">32</option>
+                </select>
+                <button type="button" data-command="undo" title="Undo" aria-label="Undo">↶</button>
+                <button type="button" data-command="redo" title="Redo" aria-label="Redo">↷</button>
+                <button type="button" data-command="bold" title="Bold" aria-label="Bold"><strong>B</strong></button>
+                <button type="button" data-command="italic" title="Italic" aria-label="Italic"><em>I</em></button>
+                <button type="button" data-command="underline" title="Underline" aria-label="Underline"><u>U</u></button>
+                <button type="button" data-command="strikeThrough" title="Strikethrough" aria-label="Strikethrough"><s>S</s></button>
+                <button type="button" data-command="insertUnorderedList" title="Bulleted list" aria-label="Bulleted list">•</button>
+                <button type="button" data-command="insertOrderedList" title="Numbered list" aria-label="Numbered list">1.</button>
+                <button type="button" data-command="outdent" title="Decrease indent" aria-label="Decrease indent">⇤</button>
+                <button type="button" data-command="indent" title="Increase indent" aria-label="Increase indent">⇥</button>
+                <button type="button" data-command="justifyLeft" title="Align left" aria-label="Align left">≡</button>
+                <button type="button" data-command="justifyCenter" title="Align center" aria-label="Align center">≣</button>
+                <button type="button" data-command="justifyRight" title="Align right" aria-label="Align right">≡</button>
+                <button type="button" data-command="removeFormat" title="Clear formatting" aria-label="Clear formatting">Tx</button>
+              </div>
+              <div id="initial-notes" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" spellcheck="true" aria-label="Story notes"></div>
+            </div>
           </section>
 
           <section id="draft-stack" class="draft-stack" aria-label="Selected draft">
@@ -62,10 +92,47 @@
                 <div>
                   <label class="panel-kicker" for="draft-title">Draft</label>
                   <input id="draft-title" type="text" autocomplete="off">
-                </div>
-                <span class="meta" id="draft-created"></span>
               </div>
-              <textarea id="draft-content" spellcheck="true" aria-label="Draft text"></textarea>
+              <span class="meta" id="draft-created"></span>
+            </div>
+              <div class="rich-editor-shell">
+                <div class="editor-hover-edge"></div>
+                <div class="editor-format-ribbon" data-toolbar-for="draft-content" aria-label="Draft formatting">
+                  <select data-page-format="fontFamily" title="Page font" aria-label="Page font">
+                    <option>Segoe UI</option>
+                    <option>Arial</option>
+                    <option>Calibri</option>
+                    <option>Georgia</option>
+                    <option>Times New Roman</option>
+                    <option>Courier New</option>
+                  </select>
+                  <select data-page-format="fontSize" title="Page font size" aria-label="Page font size">
+                    <option value="12">12</option>
+                    <option value="14">14</option>
+                    <option value="16">16</option>
+                    <option value="18">18</option>
+                    <option value="20">20</option>
+                    <option value="24">24</option>
+                    <option value="28">28</option>
+                    <option value="32">32</option>
+                  </select>
+                  <button type="button" data-command="undo" title="Undo" aria-label="Undo">↶</button>
+                  <button type="button" data-command="redo" title="Redo" aria-label="Redo">↷</button>
+                  <button type="button" data-command="bold" title="Bold" aria-label="Bold"><strong>B</strong></button>
+                  <button type="button" data-command="italic" title="Italic" aria-label="Italic"><em>I</em></button>
+                  <button type="button" data-command="underline" title="Underline" aria-label="Underline"><u>U</u></button>
+                  <button type="button" data-command="strikeThrough" title="Strikethrough" aria-label="Strikethrough"><s>S</s></button>
+                  <button type="button" data-command="insertUnorderedList" title="Bulleted list" aria-label="Bulleted list">•</button>
+                  <button type="button" data-command="insertOrderedList" title="Numbered list" aria-label="Numbered list">1.</button>
+                  <button type="button" data-command="outdent" title="Decrease indent" aria-label="Decrease indent">⇤</button>
+                  <button type="button" data-command="indent" title="Increase indent" aria-label="Increase indent">⇥</button>
+                  <button type="button" data-command="justifyLeft" title="Align left" aria-label="Align left">≡</button>
+                  <button type="button" data-command="justifyCenter" title="Align center" aria-label="Align center">≣</button>
+                  <button type="button" data-command="justifyRight" title="Align right" aria-label="Align right">≡</button>
+                  <button type="button" data-command="removeFormat" title="Clear formatting" aria-label="Clear formatting">Tx</button>
+                </div>
+                <div id="draft-content" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" spellcheck="true" aria-label="Draft text"></div>
+              </div>
             </section>
 
             <div
@@ -85,7 +152,44 @@
                 </div>
                 <span class="meta" id="notes-created"></span>
               </div>
-              <textarea id="draft-notes" spellcheck="true" aria-label="Draft notes"></textarea>
+              <div class="rich-editor-shell">
+                <div class="editor-hover-edge"></div>
+                <div class="editor-format-ribbon" data-toolbar-for="draft-notes" aria-label="Draft notes formatting">
+                  <select data-page-format="fontFamily" title="Page font" aria-label="Page font">
+                    <option>Segoe UI</option>
+                    <option>Arial</option>
+                    <option>Calibri</option>
+                    <option>Georgia</option>
+                    <option>Times New Roman</option>
+                    <option>Courier New</option>
+                  </select>
+                  <select data-page-format="fontSize" title="Page font size" aria-label="Page font size">
+                    <option value="12">12</option>
+                    <option value="14">14</option>
+                    <option value="16">16</option>
+                    <option value="18">18</option>
+                    <option value="20">20</option>
+                    <option value="24">24</option>
+                    <option value="28">28</option>
+                    <option value="32">32</option>
+                  </select>
+                  <button type="button" data-command="undo" title="Undo" aria-label="Undo">↶</button>
+                  <button type="button" data-command="redo" title="Redo" aria-label="Redo">↷</button>
+                  <button type="button" data-command="bold" title="Bold" aria-label="Bold"><strong>B</strong></button>
+                  <button type="button" data-command="italic" title="Italic" aria-label="Italic"><em>I</em></button>
+                  <button type="button" data-command="underline" title="Underline" aria-label="Underline"><u>U</u></button>
+                  <button type="button" data-command="strikeThrough" title="Strikethrough" aria-label="Strikethrough"><s>S</s></button>
+                  <button type="button" data-command="insertUnorderedList" title="Bulleted list" aria-label="Bulleted list">•</button>
+                  <button type="button" data-command="insertOrderedList" title="Numbered list" aria-label="Numbered list">1.</button>
+                  <button type="button" data-command="outdent" title="Decrease indent" aria-label="Decrease indent">⇤</button>
+                  <button type="button" data-command="indent" title="Increase indent" aria-label="Increase indent">⇥</button>
+                  <button type="button" data-command="justifyLeft" title="Align left" aria-label="Align left">≡</button>
+                  <button type="button" data-command="justifyCenter" title="Align center" aria-label="Align center">≣</button>
+                  <button type="button" data-command="justifyRight" title="Align right" aria-label="Align right">≡</button>
+                  <button type="button" data-command="removeFormat" title="Clear formatting" aria-label="Clear formatting">Tx</button>
+                </div>
+                <div id="draft-notes" class="rich-editor" contenteditable="true" role="textbox" aria-multiline="true" spellcheck="true" aria-label="Draft notes"></div>
+              </div>
             </section>
           </section>
         </section>
@@ -102,6 +206,7 @@
             <span><i class="legend-removed"></i>Deleted</span>
             <span><i class="legend-same"></i>Unchanged</span>
           </div>
+          <div id="compare-selector" class="compare-selector" aria-label="Drafts to compare"></div>
           <div id="diff-output" class="diff-output"></div>
         </aside>
       </section>

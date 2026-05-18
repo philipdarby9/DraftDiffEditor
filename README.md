@@ -1,6 +1,6 @@
 # Draft Diff Editor
 
-A local-first writing editor for tracking drafts, draft notes, and line-by-line changes between versions.
+A local-first rich text writing editor for tracking drafts, draft notes, and semantic changes between versions.
 
 ## Run
 
@@ -16,8 +16,11 @@ Then open `http://localhost:4173`.
 - Opens as a Notepad-style editor with a ribbon, horizontal draft tabs, Story Notes on the left, and the selected draft plus draft notes on the right.
 - Adds a blank draft with the `+` tab or a new draft copied from the selected draft.
 - Lets the draft notes panel be resized with the divider between the draft and notes.
-- Shows comparisons as side-by-side draft pages, with the later draft page marking individual word and phrase changes inline.
-- Compares either every draft to the first draft or each draft to the previous draft.
+- Gives each writing page a hover ribbon for page font settings and inline formatting.
+- Stores page font settings separately for each story, draft, and notes page.
+- Lets you choose specific drafts to compare.
+- Shows selected comparisons as a fixed-size horizontal strip of draft pages, with later drafts marking words, phrases, spaces, tabs, bold, and italic changes inline.
+- Compares selected drafts either to the first selected draft or to the previous selected draft.
 - Saves the working project to `data/project.json`.
 - Updates the companion document at `data/draft-history.txt` on every save, on tab close, and when the server exits.
 

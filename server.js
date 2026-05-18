@@ -31,6 +31,72 @@ function asText(value) {
   return typeof value === "string" ? value : "";
 }
 
+const DEFAULT_FORMAT = {
+  fontFamily: "Segoe UI",
+  fontSize: "16"
+};
+
+const allowedFontFamilies = new Set([
+  "Segoe UI",
+  "Arial",
+  "Calibri",
+  "Georgia",
+  "Times New Roman",
+  "Courier New"
+]);
+
+const allowedFontSizes = new Set(["12", "14", "16", "18", "20", "24", "28", "32"]);
+
+function escapeHtml(value) {
+  return asText(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#039;");
+}
+
+function textToHtml(value) {
+  return escapeHtml(value).replace(/\n/g, "<br>");
+}
+
+function htmlToText(value) {
+  return asText(value)
+    .replace(/<\s*br\s*\/?>/gi, "\n")
+    .replace(/<\/\s*(div|p|li|blockquote|h[1-6])\s*>/gi, "\n")
+    .replace(/<[^>]*>/g, "")
+    .replace(/&nbsp;/g, " ")
+    .replace(/&amp;/g, "&")
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#039;/g, "'")
+    .replace(/\n{3,}/g, "\n\n")
+    .trimEnd();
+}
+
+function normalizeFormat(format) {
+  const fontFamily = allowedFontFamilies.has(format?.fontFamily)
+    ? format.fontFamily
+    : DEFAULT_FORMAT.fontFamily;
+  const fontSize = allowedFontSizes.has(String(format?.fontSize))
+    ? String(format.fontSize)
+    : DEFAULT_FORMAT.fontSize;
+  return { fontFamily, fontSize };
+}
+
+function normalizePage(page, fallback) {
+  const content = asText(page?.content) || htmlToText(page?.contentHtml);
+  return {
+    id: page?.id || fallback.id,
+    title: page?.title || fallback.title,
+    createdAt: page?.createdAt || fallback.createdAt,
+    content,
+    contentHtml: asText(page?.contentHtml) || textToHtml(content),
+    format: normalizeFormat(page?.format)
+  };
+}
+
 function createDraft(index, content = "") {
   const createdAt = nowIso();
   return {
@@ -38,11 +104,15 @@ function createDraft(index, content = "") {
     title: `Draft ${index}`,
     createdAt,
     content,
+    contentHtml: textToHtml(content),
+    format: { ...DEFAULT_FORMAT },
     notes: {
       id: id("notes"),
       title: `Draft ${index} Notes`,
       createdAt,
-      content: ""
+      content: "",
+      contentHtml: "",
+      format: { ...DEFAULT_FORMAT }
     }
   };
 }
@@ -55,9 +125,11 @@ function defaultState() {
     updatedAt: createdAt,
     initialNotes: {
       id: "initial-notes",
-      title: "Initial Notes",
+      title: "Story Notes",
       createdAt,
-      content: ""
+      content: "",
+      contentHtml: "",
+      format: { ...DEFAULT_FORMAT }
     },
     drafts: [createDraft(1)]
   };
@@ -73,26 +145,29 @@ function normalizeState(input, options = {}) {
     version: 1,
     createdAt,
     updatedAt: options.touch ? nowIso() : raw.updatedAt || createdAt,
-    initialNotes: {
+    initialNotes: normalizePage(raw.initialNotes, {
       id: raw.initialNotes?.id || "initial-notes",
-      title: raw.initialNotes?.title || "Initial Notes",
+      title: raw.initialNotes?.title || "Story Notes",
       createdAt: raw.initialNotes?.createdAt || createdAt,
-      content: asText(raw.initialNotes?.content)
-    },
+      content: ""
+    }),
     drafts: drafts.map((draft, index) => {
       const draftNumber = index + 1;
       const draftCreatedAt = draft?.createdAt || nowIso();
-      return {
+      const normalizedDraft = normalizePage(draft, {
         id: draft?.id || id("draft"),
         title: draft?.title || `Draft ${draftNumber}`,
         createdAt: draftCreatedAt,
-        content: asText(draft?.content),
-        notes: {
+        content: ""
+      });
+      return {
+        ...normalizedDraft,
+        notes: normalizePage(draft?.notes, {
           id: draft?.notes?.id || id("notes"),
           title: draft?.notes?.title || `Draft ${draftNumber} Notes`,
           createdAt: draft?.notes?.createdAt || draftCreatedAt,
-          content: asText(draft?.notes?.content)
-        }
+          content: ""
+        })
       };
     })
   };
