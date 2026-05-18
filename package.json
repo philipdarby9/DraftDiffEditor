@@ -1,0 +1,13 @@
+{
+  "name": "draft-diff-editor",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A local writing editor for managing drafts, notes, comparisons, and a companion text export.",
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

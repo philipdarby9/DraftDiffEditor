@@ -1,0 +1,112 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Draft Diff Editor</title>
+    <link rel="stylesheet" href="/styles.css">
+  </head>
+  <body>
+    <main class="app-shell">
+      <header class="titlebar">
+        <div>
+          <h1>Draft Diff Editor</h1>
+          <p id="save-status">Loading...</p>
+        </div>
+      </header>
+
+      <nav class="ribbon" aria-label="Editor ribbon">
+        <div class="tab-strip" aria-label="Pages">
+          <button id="story-tab" class="page-tab story-tab" type="button">Story Notes</button>
+          <div id="draft-tabs" class="draft-tabs"></div>
+          <button id="new-draft-blank" class="add-tab" type="button" title="Add draft" aria-label="Add draft">+</button>
+        </div>
+
+        <div class="ribbon-actions">
+          <button id="new-draft-copy" type="button">Copy draft</button>
+          <button id="toggle-changes" type="button" aria-pressed="false">Show changes</button>
+          <label class="select-control" for="compare-mode">
+            Compare
+            <select id="compare-mode">
+              <option value="first">To first</option>
+              <option value="consecutive">Consecutive</option>
+            </select>
+          </label>
+          <label class="select-control" for="compare-scope">
+            View
+            <select id="compare-scope">
+              <option value="selected">Selected</option>
+              <option value="all">All drafts</option>
+            </select>
+          </label>
+          <a class="link-button" href="/api/export" target="_blank" rel="noreferrer">Text file</a>
+        </div>
+      </nav>
+
+      <section id="editor-surface" class="editor-surface">
+        <section class="page-canvas" aria-label="Writing pages">
+          <section class="story-panel editor-panel" aria-label="Story notes">
+            <div class="panel-heading">
+              <div>
+                <span class="panel-kicker">Page</span>
+                <h2>Story notes</h2>
+              </div>
+              <span class="meta" id="initial-created"></span>
+            </div>
+            <textarea id="initial-notes" spellcheck="true" aria-label="Story notes"></textarea>
+          </section>
+
+          <section id="draft-stack" class="draft-stack" aria-label="Selected draft">
+            <section class="draft-panel editor-panel">
+              <div class="panel-heading">
+                <div>
+                  <label class="panel-kicker" for="draft-title">Draft</label>
+                  <input id="draft-title" type="text" autocomplete="off">
+                </div>
+                <span class="meta" id="draft-created"></span>
+              </div>
+              <textarea id="draft-content" spellcheck="true" aria-label="Draft text"></textarea>
+            </section>
+
+            <div
+              id="notes-resizer"
+              class="notes-resizer"
+              role="separator"
+              aria-orientation="horizontal"
+              aria-label="Resize draft notes panel"
+              tabindex="0"
+            ></div>
+
+            <section class="notes-panel editor-panel">
+              <div class="panel-heading">
+                <div>
+                  <span class="panel-kicker">Notes</span>
+                  <h2 id="draft-notes-title">Draft notes</h2>
+                </div>
+                <span class="meta" id="notes-created"></span>
+              </div>
+              <textarea id="draft-notes" spellcheck="true" aria-label="Draft notes"></textarea>
+            </section>
+          </section>
+        </section>
+
+        <aside id="changes-panel" class="changes-panel" aria-label="Draft comparison" hidden>
+          <div class="changes-heading">
+            <div>
+              <h2>Draft comparison</h2>
+              <span id="compare-subtitle"></span>
+            </div>
+          </div>
+          <div class="legend" aria-label="Diff legend">
+            <span><i class="legend-added"></i>Added</span>
+            <span><i class="legend-removed"></i>Deleted</span>
+            <span><i class="legend-same"></i>Unchanged</span>
+          </div>
+          <div id="diff-output" class="diff-output"></div>
+        </aside>
+      </section>
+    </main>
+
+    <script src="/app.js"></script>
+  </body>
+</html>
