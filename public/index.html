@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Draft Diff Editor</title>
-    <link rel="stylesheet" href="/styles.css?v=server-file-menu-shortcuts-2026-05-19">
+    <link rel="stylesheet" href="/styles.css?v=server-all-drafts-toggle-2026-05-20">
   </head>
   <body>
     <main class="app-shell">
@@ -57,6 +57,13 @@
             <button class="tab-label" type="button" data-story-focus aria-label="Project notes">
               <span class="tab-label-full">Project notes</span>
               <span class="tab-label-short" aria-hidden="true">PN</span>
+            </button>
+          </div>
+          <div id="all-drafts-tab" class="page-tab all-drafts-tab">
+            <input id="all-drafts-toggle" type="checkbox" data-display-all-drafts aria-label="Display all drafts">
+            <button class="tab-label" type="button" data-all-drafts-toggle aria-label="All drafts">
+              <span class="tab-label-full">All drafts</span>
+              <span class="tab-label-short" aria-hidden="true">All</span>
             </button>
           </div>
           <div id="draft-tabs" class="draft-tabs"></div>
@@ -118,6 +125,6 @@
       </section>
     </main>
 
-    <script src="/app.js?v=server-file-menu-shortcuts-2026-05-19"></script>
+    <script src="/app.js?v=server-all-drafts-toggle-2026-05-20"></script>
   </body>
 </html>

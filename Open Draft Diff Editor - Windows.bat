@@ -2,7 +2,7 @@
 setlocal
 
 set "APP_DIR=C:\Users\phili\OneDrive\Documents\DraftDiffEditor"
-set "SERVER_BUILD=server-file-menu-shortcuts-2026-05-19"
+set "SERVER_BUILD=server-all-drafts-toggle-2026-05-20"
 
 cd /d "%APP_DIR%" || (
   echo Could not find Draft Diff Editor at:

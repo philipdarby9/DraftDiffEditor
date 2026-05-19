@@ -15,9 +15,9 @@ const PORT = Number(process.env.PORT || 4173);
 const PROJECT_NOTES_TITLE = "Project notes";
 const FORMAT_DEFAULT_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
-const SERVER_BUILD = "server-file-menu-shortcuts-2026-05-19";
+const SERVER_BUILD = "server-all-drafts-toggle-2026-05-20";
 const AUTO_EXIT_ON_IDLE = process.env.DRAFT_DIFF_AUTO_EXIT === "1";
-const CLIENT_IDLE_EXIT_MS = 15_000;
+const CLIENT_IDLE_EXIT_MS = 5 * 60_000;
 const STARTUP_IDLE_EXIT_MS = 120_000;
 
 let lastClientSeenAt = 0;
@@ -73,19 +73,69 @@ function textToHtml(value) {
   return escapeHtml(value).replace(/\n/g, "<br>");
 }
 
-function htmlToText(value) {
+function hasParagraphHtml(value) {
+  return /<\s*p(?:\s|>|\/)/i.test(asText(value));
+}
+
+function decodeHtmlText(value) {
   return asText(value)
-    .replace(/<\s*br\s*\/?>/gi, "\n")
-    .replace(/<\/\s*(div|p|li|blockquote|h[1-6])\s*>/gi, "\n")
-    .replace(/<[^>]*>/g, "")
     .replace(/&nbsp;/g, " ")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
     .replace(/&quot;/g, '"')
-    .replace(/&#039;/g, "'")
-    .replace(/\n{3,}/g, "\n\n")
-    .trimEnd();
+    .replace(/&#039;/g, "'");
+}
+
+function htmlToText(value) {
+  const source = asText(value);
+  const blockTags = new Set(["div", "p", "li", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol"]);
+  const paragraphTags = new Set(["p", "blockquote"]);
+  let output = "";
+  let lastIndex = 0;
+
+  const ensureTrailingNewlines = count => {
+    if (!output) return;
+    const trailing = output.match(/\n*$/u)?.[0].length || 0;
+    if (trailing < count) output += "\n".repeat(count - trailing);
+  };
+
+  const appendDecodedSegment = (segment, hasAdjacentTag) => {
+    let text = decodeHtmlText(segment);
+    if (hasAdjacentTag && text.includes("\n")) {
+      if (!text.trim()) return;
+      text = text
+        .replace(/^[ \t]*\n[ \t]*/u, "")
+        .replace(/[ \t]*\n[ \t]*$/u, "");
+    }
+
+    output += text;
+  };
+
+  source.replace(/<[^>]*>/g, (tagText, offset) => {
+    appendDecodedSegment(source.slice(lastIndex, offset), true);
+    const tagMatch = /^<\s*\/?\s*([a-z0-9]+)/i.exec(tagText);
+    const tagName = tagMatch?.[1]?.toLowerCase() || "";
+    const isClosingTag = /^<\s*\//.test(tagText);
+
+    if (tagName === "br") {
+      output += "\n";
+    } else if (paragraphTags.has(tagName)) {
+      ensureTrailingNewlines(isClosingTag ? 2 : 1);
+    } else if (blockTags.has(tagName)) {
+      ensureTrailingNewlines(1);
+    }
+
+    lastIndex = offset + tagText.length;
+    return tagText;
+  });
+
+  appendDecodedSegment(source.slice(lastIndex), lastIndex > 0);
+  return output.trimEnd();
+}
+
+function lineBreakCount(value) {
+  return (asText(value).match(/\n/g) || []).length;
 }
 
 function normalizeFormat(format) {
@@ -106,13 +156,19 @@ function upgradeLegacyDefaultFormat(format, shouldUpgrade) {
 }
 
 function normalizePage(page, fallback, options = {}) {
-  const content = asText(page?.content) || htmlToText(page?.contentHtml);
+  const providedContentHtml = asText(page?.contentHtml);
+  const providedContent = asText(page?.content);
+  const htmlContent = providedContentHtml ? htmlToText(providedContentHtml) : "";
+  const shouldPreservePlainTextLines = providedContent &&
+    !hasParagraphHtml(providedContentHtml) &&
+    lineBreakCount(providedContent) > lineBreakCount(htmlContent);
+  const content = shouldPreservePlainTextLines ? providedContent : htmlContent || providedContent;
   return {
     id: page?.id || fallback.id,
     title: page?.title || fallback.title,
     createdAt: page?.createdAt || fallback.createdAt,
     content,
-    contentHtml: asText(page?.contentHtml) || textToHtml(content),
+    contentHtml: shouldPreservePlainTextLines ? textToHtml(content) : providedContentHtml || textToHtml(content),
     format: upgradeLegacyDefaultFormat(page?.format, options.upgradeLegacyDefaultFont)
   };
 }

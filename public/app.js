@@ -13,6 +13,8 @@ const els = {
   fileOpenInput: document.querySelector("#file-open-input"),
   storyTab: document.querySelector("#story-tab"),
   storyDisplayToggle: document.querySelector("#story-display-toggle"),
+  allDraftsTab: document.querySelector("#all-drafts-tab"),
+  allDraftsToggle: document.querySelector("#all-drafts-toggle"),
   draftTabs: document.querySelector("#draft-tabs"),
   pageCanvas: document.querySelector("#page-canvas"),
   newDraftCopy: document.querySelector("#new-draft-copy"),
@@ -530,6 +532,14 @@ function textToHtml(value) {
   return escapeHtml(value).replace(/\n/g, "<br>");
 }
 
+function hasParagraphHtml(value) {
+  return /<\s*p(?:\s|>|\/)/i.test(String(value || ""));
+}
+
+function lineBreakCount(value) {
+  return (String(value || "").match(/\n/g) || []).length;
+}
+
 function normalizeFormat(format = {}) {
   const fontFamily = allowedFontFamilies.has(format.fontFamily)
     ? format.fontFamily
@@ -685,7 +695,14 @@ function editableHistoryTarget(target) {
 function ensurePageFields(page) {
   page.content = typeof page.content === "string" ? page.content : "";
   page.contentHtml = typeof page.contentHtml === "string" ? page.contentHtml : textToHtml(page.content);
-  if (!page.content && page.contentHtml) page.content = plainTextFromHtml(page.contentHtml);
+  if (page.contentHtml) {
+    const htmlContent = plainTextFromHtml(page.contentHtml);
+    if (!hasParagraphHtml(page.contentHtml) && page.content && lineBreakCount(page.content) > lineBreakCount(htmlContent)) {
+      page.contentHtml = textToHtml(page.content);
+    } else {
+      page.content = htmlContent;
+    }
+  }
   page.format = normalizeFormat(page.format);
   return page;
 }
@@ -753,6 +770,10 @@ function allPageItems() {
 
 function displayKeys() {
   return [STORY_KEY, ...state.drafts.map(draft => draftContentKey(draft.id))];
+}
+
+function draftDisplayKeys() {
+  return state.drafts.map(draft => draftContentKey(draft.id));
 }
 
 function defaultDisplayKeys() {
@@ -878,6 +899,26 @@ function displayPage(key, shouldDisplay = true) {
   } else {
     displayedPageKeys.delete(key);
   }
+  ensureDisplaySelection();
+}
+
+function selectedDraftDisplayCount() {
+  return draftDisplayKeys().filter(key => displayedPageKeys.has(key)).length;
+}
+
+function allDraftsSelected() {
+  return Boolean(state?.drafts?.length) && selectedDraftDisplayCount() === state.drafts.length;
+}
+
+function displayAllDrafts(shouldDisplay = true) {
+  hasStoredDisplaySelection = true;
+  draftDisplayKeys().forEach(key => {
+    if (shouldDisplay) {
+      displayedPageKeys.add(key);
+    } else {
+      displayedPageKeys.delete(key);
+    }
+  });
   ensureDisplaySelection();
 }
 
@@ -1181,10 +1222,31 @@ function plainTextFromHtml(html) {
 function plainTextFromNode(root) {
   let output = "";
   const blockTags = new Set(["div", "p", "blockquote", "li", "ul", "ol"]);
+  const paragraphTags = new Set(["p", "blockquote"]);
+
+  const ensureTrailingNewlines = count => {
+    if (!output) return;
+    const trailing = output.match(/\n*$/u)?.[0].length || 0;
+    if (trailing < count) output += "\n".repeat(count - trailing);
+  };
+
+  const normalizedTextNodeValue = node => {
+    let text = node.nodeValue.replace(/\u00a0/g, " ");
+    if (!text.includes("\n")) return text;
+
+    const siblings = node.parentNode ? Array.from(node.parentNode.childNodes) : [];
+    const hasElementSibling = siblings.some(sibling => sibling.nodeType === Node.ELEMENT_NODE);
+    if (!hasElementSibling) return text;
+    if (!text.trim()) return "";
+
+    return text
+      .replace(/^[ \t]*\n[ \t]*/u, "")
+      .replace(/[ \t]*\n[ \t]*$/u, "");
+  };
 
   const walk = node => {
     if (node.nodeType === Node.TEXT_NODE) {
-      output += node.nodeValue.replace(/\u00a0/g, " ");
+      output += normalizedTextNodeValue(node);
       return;
     }
 
@@ -1196,12 +1258,17 @@ function plainTextFromNode(root) {
       return;
     }
 
+    if (blockTags.has(tag)) ensureTrailingNewlines(1);
     Array.from(node.childNodes).forEach(walk);
-    if (blockTags.has(tag) && output && !output.endsWith("\n")) output += "\n";
+    if (paragraphTags.has(tag)) {
+      ensureTrailingNewlines(2);
+    } else if (blockTags.has(tag)) {
+      ensureTrailingNewlines(1);
+    }
   };
 
   walk(root);
-  return output.replace(/\n{3,}/g, "\n\n");
+  return output;
 }
 
 function editorPlainText(editorEl) {
@@ -1413,6 +1480,378 @@ function splitLines(text) {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 }
 
+function isDiffSequenceWordText(text) {
+  return /^[\p{L}\p{N}]+$/u.test(text || "");
+}
+
+function isDiffSequenceWhitespaceText(text) {
+  return /^\s+$/u.test(text || "");
+}
+
+function previousSameWordIndex(parts, index) {
+  for (let current = index - 1; current >= 0; current -= 1) {
+    if (parts[current].type === "same" && isDiffSequenceWordText(parts[current].text)) return current;
+  }
+
+  return -1;
+}
+
+function nextSameWordIndex(parts, index) {
+  for (let current = index + 1; current < parts.length; current += 1) {
+    if (parts[current].type === "same" && isDiffSequenceWordText(parts[current].text)) return current;
+    if (parts[current].type !== "same") return -1;
+  }
+
+  return -1;
+}
+
+function changedWordCounts(parts, start, end) {
+  const counts = { added: 0, removed: 0 };
+
+  for (let index = start; index < end; index += 1) {
+    const part = parts[index];
+    if ((part.type === "added" || part.type === "removed") && isDiffSequenceWordText(part.text)) {
+      counts[part.type] += 1;
+    }
+  }
+
+  return counts;
+}
+
+function shouldCoalesceReplacementSegment(segment) {
+  const counts = changedWordCounts(segment, 0, segment.length);
+  return counts.added >= 2 && counts.removed >= 2 && counts.added + counts.removed <= 12;
+}
+
+function isChangedDiffPart(part) {
+  return part?.type === "added" || part?.type === "removed";
+}
+
+function sameWordCount(parts) {
+  return parts.filter(part => part.type === "same" && isDiffSequenceWordText(part.text)).length;
+}
+
+function wordTokenCount(parts) {
+  return parts.filter(part => isDiffSequenceWordText(part.text)).length;
+}
+
+function coerceDiffPartType(part, type) {
+  return {
+    ...part,
+    type,
+    beforeIndex: type === "removed" ? part.beforeIndex : undefined,
+    afterIndex: type === "added" ? part.afterIndex : undefined
+  };
+}
+
+function coalesceReplacementSegment(segment) {
+  const removed = [];
+  const added = [];
+  const neutral = [];
+  let sawRemoved = false;
+  let sawAdded = false;
+
+  segment.forEach(part => {
+    if (part.type === "removed") {
+      removed.push(part);
+      if (isDiffSequenceWordText(part.text)) sawRemoved = true;
+      return;
+    }
+
+    if (part.type === "added") {
+      added.push(part);
+      if (isDiffSequenceWordText(part.text)) sawAdded = true;
+      return;
+    }
+
+    if (part.type === "same" && isDiffSequenceWhitespaceText(part.text)) {
+      if (sawRemoved) removed.push(coerceDiffPartType(part, "removed"));
+      if (sawAdded) added.push(coerceDiffPartType(part, "added"));
+      return;
+    }
+
+    neutral.push(part);
+  });
+
+  return [...removed, ...added, ...neutral];
+}
+
+function coalesceInterleavedReplacementWindow(segment) {
+  const removed = [];
+  const added = [];
+
+  segment.forEach(part => {
+    if (part.type === "removed") {
+      removed.push(part);
+      return;
+    }
+
+    if (part.type === "added") {
+      added.push(part);
+      return;
+    }
+
+    if (part.type !== "same") return;
+
+    removed.push(coerceDiffPartType(part, "removed"));
+    added.push(coerceDiffPartType(part, "added"));
+  });
+
+  return [...removed, ...added];
+}
+
+function shouldCoalesceInterleavedReplacementWindow(segment) {
+  const counts = changedWordCounts(segment, 0, segment.length);
+  const anchors = sameWordCount(segment);
+  if (counts.added < 3 || counts.removed < 3) return false;
+
+  const words = wordTokenCount(segment);
+  if (words > 18) return false;
+
+  const changedWords = counts.added + counts.removed;
+  if (!anchors) return changedWords / words >= 0.75;
+
+  if (anchors > 5) return false;
+  return changedWords / words >= 0.55;
+}
+
+function coalesceInterleavedReplacementSubsegment(segment) {
+  const firstChanged = segment.findIndex(isChangedDiffPart);
+  if (firstChanged < 0) return segment;
+
+  let lastChanged = -1;
+  for (let index = segment.length - 1; index >= firstChanged; index -= 1) {
+    if (isChangedDiffPart(segment[index])) {
+      lastChanged = index;
+      break;
+    }
+  }
+
+  const replacementWindow = segment.slice(firstChanged, lastChanged + 1);
+  if (!shouldCoalesceInterleavedReplacementWindow(replacementWindow)) return segment;
+
+  return [
+    ...segment.slice(0, firstChanged),
+    ...coalesceInterleavedReplacementWindow(replacementWindow),
+    ...segment.slice(lastChanged + 1)
+  ];
+}
+
+function coalesceInterleavedReplacementSegments(parts) {
+  const coalesced = [];
+  let start = 0;
+
+  for (let index = 0; index <= parts.length; index += 1) {
+    const isBoundary = index === parts.length || parts[index].text === "\n";
+    if (!isBoundary) continue;
+
+    coalesced.push(...coalesceInterleavedReplacementSubsegment(parts.slice(start, index)));
+    if (index < parts.length) coalesced.push(parts[index]);
+    start = index + 1;
+  }
+
+  return coalesced;
+}
+
+function coalesceReplacementSubsegments(segment) {
+  const coalesced = [];
+  let start = 0;
+
+  for (let index = 0; index <= segment.length; index += 1) {
+    const isBoundary = index === segment.length || segment[index].text === "\n";
+    if (!isBoundary) continue;
+
+    const subsegment = segment.slice(start, index);
+    if (shouldCoalesceReplacementSegment(subsegment)) {
+      coalesced.push(...coalesceReplacementSegment(subsegment));
+    } else {
+      coalesced.push(...subsegment);
+    }
+
+    if (index < segment.length) coalesced.push(segment[index]);
+    start = index + 1;
+  }
+
+  return coalesced;
+}
+
+function coalesceReplacementSegments(parts) {
+  const coalesced = [];
+  let index = 0;
+
+  while (index < parts.length) {
+    const part = parts[index];
+
+    if (part.type !== "same" || !isDiffSequenceWordText(part.text)) {
+      const segmentStart = index;
+      while (
+        index < parts.length &&
+        !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
+      ) {
+        index += 1;
+      }
+
+      coalesced.push(...coalesceReplacementSubsegments(parts.slice(segmentStart, index)));
+      continue;
+    }
+
+    coalesced.push(part);
+    index += 1;
+
+    const segmentStart = index;
+    while (
+      index < parts.length &&
+      !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
+    ) {
+      index += 1;
+    }
+
+    const segment = parts.slice(segmentStart, index);
+    coalesced.push(...coalesceReplacementSubsegments(segment));
+  }
+
+  return coalesced;
+}
+
+function diffPartKey(part) {
+  const marks = part?.marks || {};
+  return [
+    part?.text || "",
+    marks.bold ? "b" : "",
+    marks.italic ? "i" : "",
+    marks.underline ? "u" : "",
+    marks.strike ? "s" : ""
+  ].join("|");
+}
+
+function diffChangedTokenRun(before, after) {
+  const rows = Array.from({ length: before.length + 1 }, () => Array(after.length + 1).fill(0));
+
+  for (let i = before.length - 1; i >= 0; i -= 1) {
+    for (let j = after.length - 1; j >= 0; j -= 1) {
+      rows[i][j] = diffPartKey(before[i]) === diffPartKey(after[j])
+        ? rows[i + 1][j + 1] + 1
+        : Math.max(rows[i + 1][j], rows[i][j + 1]);
+    }
+  }
+
+  const result = [];
+  let i = 0;
+  let j = 0;
+
+  while (i < before.length && j < after.length) {
+    if (diffPartKey(before[i]) === diffPartKey(after[j])) {
+      result.push({
+        ...after[j],
+        type: "same",
+        beforeIndex: before[i].beforeIndex,
+        afterIndex: after[j].afterIndex
+      });
+      i += 1;
+      j += 1;
+    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
+      result.push(before[i]);
+      i += 1;
+    } else {
+      result.push(after[j]);
+      j += 1;
+    }
+  }
+
+  while (i < before.length) {
+    result.push(before[i]);
+    i += 1;
+  }
+
+  while (j < after.length) {
+    result.push(after[j]);
+    j += 1;
+  }
+
+  return result;
+}
+
+function shouldRestoreChangedTokenRun(segment) {
+  const changedParts = segment.filter(part => part.type === "added" || part.type === "removed");
+  if (!changedParts.some(part => part.type === "added")) return false;
+  if (!changedParts.some(part => part.type === "removed")) return false;
+  if (segment.some(part => part.type === "same")) return false;
+  return changedParts.every(part => !isDiffSequenceWordText(part.text));
+}
+
+function restoreIdenticalChangedTokens(parts) {
+  const restored = [];
+  let index = 0;
+
+  while (index < parts.length) {
+    if (parts[index].type === "same") {
+      restored.push(parts[index]);
+      index += 1;
+      continue;
+    }
+
+    const segmentStart = index;
+    while (
+      index < parts.length &&
+      parts[index].type !== "same"
+    ) {
+      index += 1;
+    }
+
+    const segment = parts.slice(segmentStart, index);
+    if (!shouldRestoreChangedTokenRun(segment)) {
+      restored.push(...segment);
+      continue;
+    }
+
+    restored.push(...diffChangedTokenRun(
+      segment.filter(part => part.type === "removed"),
+      segment.filter(part => part.type === "added")
+    ));
+  }
+
+  return restored;
+}
+
+function shouldAbsorbWeakReplacementAnchor(parts, index) {
+  const part = parts[index];
+  if (part?.type !== "same" || !isDiffSequenceWordText(part.text)) return false;
+
+  const previousIndex = previousSameWordIndex(parts, index);
+  const followingIndex = nextSameWordIndex(parts, index);
+  if (previousIndex < 0 || followingIndex < 0) return false;
+
+  const counts = changedWordCounts(parts, previousIndex + 1, index);
+  return counts.added >= 2 && counts.removed >= 2 && counts.added + counts.removed <= 10;
+}
+
+function cleanupWeakReplacementAnchors(parts) {
+  const absorbIndexes = new Set();
+
+  parts.forEach((part, index) => {
+    if (!shouldAbsorbWeakReplacementAnchor(parts, index)) return;
+    absorbIndexes.add(index);
+
+    for (let current = index + 1; current < parts.length; current += 1) {
+      if (parts[current].type !== "same" || !isDiffSequenceWhitespaceText(parts[current].text)) break;
+      absorbIndexes.add(current);
+    }
+  });
+
+  const absorbedParts = absorbIndexes.size ? parts.map((part, index) => {
+    if (!absorbIndexes.has(index)) return part;
+    return {
+      ...part,
+      type: "added",
+      beforeIndex: undefined
+    };
+  }) : parts;
+
+  return restoreIdenticalChangedTokens(coalesceReplacementSegments(
+    coalesceInterleavedReplacementSegments(absorbedParts)
+  ));
+}
+
 function diffSequence(before, after) {
   const rows = Array.from({ length: before.length + 1 }, () => Array(after.length + 1).fill(0));
 
@@ -1432,10 +1871,10 @@ function diffSequence(before, after) {
     if (before[i].key === after[j].key) {
       result.push({
         type: "same",
-        text: before[i].text,
+        text: after[j].text,
         marks: after[j].marks || before[i].marks || {},
-        beforeIndex: i,
-        afterIndex: j
+        beforeIndex: before[i].index ?? i,
+        afterIndex: after[j].index ?? j
       });
       i += 1;
       j += 1;
@@ -1444,7 +1883,7 @@ function diffSequence(before, after) {
         type: "removed",
         text: before[i].text,
         marks: before[i].marks || {},
-        beforeIndex: i
+        beforeIndex: before[i].index ?? i
       });
       i += 1;
     } else {
@@ -1452,7 +1891,7 @@ function diffSequence(before, after) {
         type: "added",
         text: after[j].text,
         marks: after[j].marks || {},
-        afterIndex: j
+        afterIndex: after[j].index ?? j
       });
       j += 1;
     }
@@ -1463,7 +1902,7 @@ function diffSequence(before, after) {
       type: "removed",
       text: before[i].text,
       marks: before[i].marks || {},
-      beforeIndex: i
+      beforeIndex: before[i].index ?? i
     });
     i += 1;
   }
@@ -1473,12 +1912,12 @@ function diffSequence(before, after) {
       type: "added",
       text: after[j].text,
       marks: after[j].marks || {},
-      afterIndex: j
+      afterIndex: after[j].index ?? j
     });
     j += 1;
   }
 
-  return result;
+  return cleanupWeakReplacementAnchors(result);
 }
 
 function tokenizeSegment(text, marks = {}) {
@@ -1486,7 +1925,9 @@ function tokenizeSegment(text, marks = {}) {
   const matches = normalized.match(/\n|[^\S\n]+|[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu) || [];
   const semanticKey = marks.whitespace ? "" : `${marks.bold ? "b" : ""}${marks.italic ? "i" : ""}${marks.underline ? "u" : ""}${marks.strike ? "s" : ""}`;
   return matches.map(token => ({
-    key: /^\s+$/u.test(token) ? token : `${token}|${semanticKey}`,
+    key: /^\s+$/u.test(token)
+      ? token
+      : `${token}|${semanticKey}`,
     text: token,
     marks: { ...marks },
     isWhitespace: /^\s+$/u.test(token)
@@ -1498,16 +1939,45 @@ function semanticTokensFromHtml(html) {
   template.innerHTML = sanitizeRichHtml(html);
   const tokens = [];
   const blockTags = new Set(["div", "p", "blockquote", "li", "ul", "ol"]);
+  const paragraphTags = new Set(["p", "blockquote"]);
 
-  const addNewline = marks => {
-    if (tokens.length && tokens[tokens.length - 1].text !== "\n") {
+  const addNewline = (marks, options = {}) => {
+    if (!tokens.length) return;
+
+    if (options.preserveBlankLine) {
       tokens.push(...tokenizeSegment("\n", marks));
+      return;
     }
+
+    const count = options.count || 1;
+    let trailing = 0;
+    for (let index = tokens.length - 1; index >= 0 && tokens[index].text === "\n"; index -= 1) {
+      trailing += 1;
+    }
+
+    while (trailing < count) {
+      tokens.push(...tokenizeSegment("\n", marks));
+      trailing += 1;
+    }
+  };
+
+  const normalizedTextNodeValue = node => {
+    let text = node.nodeValue.replace(/\u00a0/g, " ");
+    if (!text.includes("\n")) return text;
+
+    const siblings = node.parentNode ? Array.from(node.parentNode.childNodes) : [];
+    const hasElementSibling = siblings.some(sibling => sibling.nodeType === Node.ELEMENT_NODE);
+    if (!hasElementSibling) return text;
+    if (!text.trim()) return "";
+
+    return text
+      .replace(/^[ \t]*\n[ \t]*/u, "")
+      .replace(/[ \t]*\n[ \t]*$/u, "");
   };
 
   const walk = (node, marks = {}) => {
     if (node.nodeType === Node.TEXT_NODE) {
-      tokens.push(...tokenizeSegment(node.nodeValue.replace(/\u00a0/g, " "), marks));
+      tokens.push(...tokenizeSegment(normalizedTextNodeValue(node), marks));
       return;
     }
 
@@ -1515,7 +1985,7 @@ function semanticTokensFromHtml(html) {
 
     const tag = node.nodeType === Node.ELEMENT_NODE ? node.tagName.toLowerCase() : "";
     if (tag === "br") {
-      addNewline(marks);
+      addNewline(marks, { preserveBlankLine: true });
       return;
     }
 
@@ -1527,21 +1997,420 @@ function semanticTokensFromHtml(html) {
     };
 
     Array.from(node.childNodes).forEach(child => walk(child, nextMarks));
-    if (blockTags.has(tag)) addNewline(marks);
+    if (paragraphTags.has(tag)) {
+      addNewline(marks, { count: 2 });
+    } else if (blockTags.has(tag)) {
+      addNewline(marks);
+    }
   };
 
   walk(template.content);
   while (tokens.length && tokens[tokens.length - 1].text === "\n") tokens.pop();
-  return tokens;
+  return tokens.map((token, index) => ({ ...token, index }));
+}
+
+const DIFF_COMMON_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from",
+  "had", "has", "have", "he", "her", "his", "i", "in", "is", "it", "its", "me",
+  "my", "not", "of", "on", "or", "our", "she", "so", "that", "the", "their",
+  "them", "then", "there", "they", "this", "to", "was", "we", "were", "with",
+  "you", "your"
+]);
+
+const DIFF_CLAUSE_STARTERS = new Set([
+  "and", "but", "or", "so", "then", "yet", "though", "although", "because",
+  "while", "when", "where", "who", "which", "that", "one", "two", "some",
+  "couple", "another", "other", "others", "going", "no", "i", "he", "she",
+  "they", "we", "it", "the", "there", "this"
+]);
+
+const DIFF_BOUNDARY_CONJUNCTIONS = new Set([
+  "and", "but", "or", "so", "yet"
+]);
+
+const DIFF_LONG_COMMA_CLAUSE_MIN_TERMS = 4;
+const DIFF_LONG_CONJUNCTION_CLAUSE_MIN_TERMS = 4;
+
+function isDiffWordToken(token) {
+  return /^[\p{L}\p{N}]+$/u.test(token?.text || "");
+}
+
+function diffTermForToken(token) {
+  return String(token?.text || "").toLowerCase();
+}
+
+function comparableDiffTerm(term) {
+  return String(term || "").replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+}
+
+function diffTermsMatch(left, right) {
+  if (left === right) return true;
+
+  const normalizedLeft = comparableDiffTerm(left);
+  const normalizedRight = comparableDiffTerm(right);
+  return Boolean(
+    normalizedLeft &&
+    normalizedRight &&
+    normalizedLeft === normalizedRight
+  );
+}
+
+function meaningfulTermsForTokens(tokens) {
+  const terms = tokens
+    .filter(isDiffWordToken)
+    .map(diffTermForToken)
+    .filter(term => term.length > 1 && !DIFF_COMMON_WORDS.has(term));
+
+  if (terms.length) return terms;
+
+  return tokens
+    .filter(isDiffWordToken)
+    .map(diffTermForToken)
+    .filter(term => term.length > 1);
+}
+
+function isDiffClauseDashToken(token) {
+  const text = token?.text || "";
+  return text === "\u2014" || text === "\u2013";
+}
+
+function splitDiffBlocks(tokens) {
+  const blocks = [];
+  let current = [];
+  let pendingSentenceBoundary = false;
+  const closingPunctuation = new Set([")", "]", "}", "\"", "'", "”", "’"]);
+
+  const flush = () => {
+    if (!current.length) return;
+    if (current.some(token => String(token.text || "").trim() || token.text === "\n")) {
+      blocks.push(current);
+    }
+    current = [];
+    pendingSentenceBoundary = false;
+  };
+
+  const shouldSplitAfterComma = index => {
+    let nextWord = "";
+    const clauseTokens = [];
+
+    for (let nextIndex = index + 1; nextIndex < tokens.length; nextIndex += 1) {
+      const nextToken = tokens[nextIndex];
+      if (nextToken.text === "\n") return true;
+      if (/[.!?:;]/u.test(nextToken.text || "") || nextToken.text === "," || isDiffClauseDashToken(nextToken)) break;
+      clauseTokens.push(nextToken);
+      if (/^\s+$/u.test(nextToken.text || "")) continue;
+      if (!isDiffWordToken(nextToken)) break;
+      if (!nextWord) nextWord = diffTermForToken(nextToken);
+    }
+
+    return Boolean(
+      nextWord &&
+      (
+        DIFF_CLAUSE_STARTERS.has(nextWord) ||
+        meaningfulTermsForTokens(clauseTokens).length >= DIFF_LONG_COMMA_CLAUSE_MIN_TERMS
+      )
+    );
+  };
+
+  const shouldSplitAfterConjunction = index => {
+    if (!isDiffWordToken(tokens[index])) return false;
+    if (!DIFF_BOUNDARY_CONJUNCTIONS.has(diffTermForToken(tokens[index]))) return false;
+
+    let nextWord = "";
+    const clauseTokens = [];
+
+    for (let nextIndex = index + 1; nextIndex < tokens.length; nextIndex += 1) {
+      const nextToken = tokens[nextIndex];
+      if (nextToken.text === "\n") break;
+      if (/[.!?:;]/u.test(nextToken.text || "") || nextToken.text === "," || isDiffClauseDashToken(nextToken)) break;
+      clauseTokens.push(nextToken);
+      if (/^\s+$/u.test(nextToken.text || "")) continue;
+      if (!isDiffWordToken(nextToken)) break;
+      if (!nextWord) nextWord = diffTermForToken(nextToken);
+    }
+
+    return Boolean(
+      nextWord &&
+      meaningfulTermsForTokens(clauseTokens).length >= DIFF_LONG_CONJUNCTION_CLAUSE_MIN_TERMS
+    );
+  };
+
+  tokens.forEach((token, index) => {
+    const isWhitespace = /^\s+$/u.test(token.text || "");
+    if (token.text === "(" && current.some(currentToken => String(currentToken.text || "").trim())) flush();
+    if (pendingSentenceBoundary && !isWhitespace && !closingPunctuation.has(token.text)) flush();
+
+    current.push(token);
+
+    if (token.text === "\n") {
+      flush();
+    } else if (
+      /[.!?:;]/u.test(token.text || "") ||
+      isDiffClauseDashToken(token) ||
+      (token.text === "," && shouldSplitAfterComma(index)) ||
+      shouldSplitAfterConjunction(index)
+    ) {
+      pendingSentenceBoundary = true;
+    }
+  });
+
+  flush();
+  return blocks;
+}
+
+function blockSimilarity(beforeBlock, afterBlock) {
+  const beforeTerms = meaningfulTermsForTokens(beforeBlock);
+  const afterTerms = meaningfulTermsForTokens(afterBlock);
+  if (!beforeTerms.length || !afterTerms.length) return 0;
+
+  const availableBeforeTerms = [...beforeTerms];
+
+  let shared = 0;
+  afterTerms.forEach(term => {
+    const matchedIndex = availableBeforeTerms.findIndex(beforeTerm => diffTermsMatch(beforeTerm, term));
+    if (matchedIndex < 0) return;
+    shared += 1;
+    availableBeforeTerms.splice(matchedIndex, 1);
+  });
+
+  if (!shared) return 0;
+
+  return (2 * shared) / (beforeTerms.length + afterTerms.length);
+}
+
+function shouldAlignBlocks(beforeBlock, afterBlock) {
+  const beforeTerms = meaningfulTermsForTokens(beforeBlock);
+  const afterTerms = meaningfulTermsForTokens(afterBlock);
+  const shorterLength = Math.min(beforeTerms.length, afterTerms.length);
+  if (!shorterLength) return false;
+
+  const similarity = blockSimilarity(beforeBlock, afterBlock);
+  const threshold = shorterLength <= 2 ? 0.5 : shorterLength <= 3 ? 0.42 : 0.38;
+  return similarity >= threshold;
+}
+
+function alignDiffBlocks(beforeBlocks, afterBlocks) {
+  const rows = Array.from(
+    { length: beforeBlocks.length + 1 },
+    () => Array(afterBlocks.length + 1).fill(0)
+  );
+  const similarities = Array.from(
+    { length: beforeBlocks.length },
+    () => Array(afterBlocks.length).fill(0)
+  );
+
+  for (let i = beforeBlocks.length - 1; i >= 0; i -= 1) {
+    for (let j = afterBlocks.length - 1; j >= 0; j -= 1) {
+      const similarity = shouldAlignBlocks(beforeBlocks[i], afterBlocks[j])
+        ? blockSimilarity(beforeBlocks[i], afterBlocks[j])
+        : 0;
+      similarities[i][j] = similarity;
+      rows[i][j] = Math.max(
+        rows[i + 1][j],
+        rows[i][j + 1],
+        similarity ? similarity + rows[i + 1][j + 1] : 0
+      );
+    }
+  }
+
+  const pairs = [];
+  let i = 0;
+  let j = 0;
+  while (i < beforeBlocks.length && j < afterBlocks.length) {
+    const similarity = similarities[i][j];
+    const matchScore = similarity ? similarity + rows[i + 1][j + 1] : -1;
+    if (similarity && matchScore >= rows[i + 1][j] && matchScore >= rows[i][j + 1]) {
+      pairs.push([i, j]);
+      i += 1;
+      j += 1;
+    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
+      i += 1;
+    } else {
+      j += 1;
+    }
+  }
+
+  return pairs;
+}
+
+function flattenDiffBlockRange(blocks, start, end) {
+  return blocks.slice(start, end).flat();
+}
+
+function diffBlockRangeSimilarity(beforeBlocks, afterBlocks, range) {
+  return blockSimilarity(
+    flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd),
+    flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd)
+  );
+}
+
+function shouldExpandDiffBlockRange(currentSimilarity, candidateSimilarity) {
+  const improvement = candidateSimilarity - currentSimilarity;
+  if (candidateSimilarity >= 0.9 && improvement >= 0.02) return true;
+  if (candidateSimilarity >= 0.68 && improvement >= 0.05) return true;
+  return currentSimilarity < 0.62 && improvement >= 0.1;
+}
+
+function diffBlockHasMeaningfulTerms(block) {
+  return meaningfulTermsForTokens(block).length > 0;
+}
+
+function previousDiffExpansionStart(blocks, start, limit) {
+  let candidateStart = start - 1;
+  while (candidateStart > limit && !diffBlockHasMeaningfulTerms(blocks[candidateStart])) {
+    candidateStart -= 1;
+  }
+  return candidateStart;
+}
+
+function nextDiffExpansionEnd(blocks, end, limit) {
+  let candidateEnd = end + 1;
+  while (candidateEnd < limit && !diffBlockHasMeaningfulTerms(blocks[candidateEnd - 1])) {
+    candidateEnd += 1;
+  }
+  return candidateEnd;
+}
+
+function expandDiffBlockPairs(pairs, beforeBlocks, afterBlocks) {
+  const ranges = pairs.map(([beforeIndex, afterIndex]) => ({
+    beforeStart: beforeIndex,
+    beforeEnd: beforeIndex + 1,
+    afterStart: afterIndex,
+    afterEnd: afterIndex + 1
+  }));
+
+  let changed = true;
+  let guard = beforeBlocks.length + afterBlocks.length;
+
+  while (changed && guard > 0) {
+    changed = false;
+    guard -= 1;
+
+    ranges.forEach((range, index) => {
+      const prevBeforeLimit = index > 0 ? ranges[index - 1].beforeEnd : 0;
+      const prevAfterLimit = index > 0 ? ranges[index - 1].afterEnd : 0;
+      const nextBeforeLimit = index + 1 < ranges.length ? ranges[index + 1].beforeStart : beforeBlocks.length;
+      const nextAfterLimit = index + 1 < ranges.length ? ranges[index + 1].afterStart : afterBlocks.length;
+      const currentSimilarity = diffBlockRangeSimilarity(beforeBlocks, afterBlocks, range);
+      let bestRange = null;
+      let bestSimilarity = currentSimilarity;
+
+      const candidates = [];
+      if (range.beforeStart > prevBeforeLimit) {
+        candidates.push({
+          ...range,
+          beforeStart: previousDiffExpansionStart(beforeBlocks, range.beforeStart, prevBeforeLimit)
+        });
+      }
+      if (range.afterStart > prevAfterLimit) {
+        candidates.push({
+          ...range,
+          afterStart: previousDiffExpansionStart(afterBlocks, range.afterStart, prevAfterLimit)
+        });
+      }
+      if (range.beforeEnd < nextBeforeLimit) {
+        candidates.push({
+          ...range,
+          beforeEnd: nextDiffExpansionEnd(beforeBlocks, range.beforeEnd, nextBeforeLimit)
+        });
+      }
+      if (range.afterEnd < nextAfterLimit) {
+        candidates.push({
+          ...range,
+          afterEnd: nextDiffExpansionEnd(afterBlocks, range.afterEnd, nextAfterLimit)
+        });
+      }
+
+      candidates.forEach(candidate => {
+        const candidateSimilarity = diffBlockRangeSimilarity(beforeBlocks, afterBlocks, candidate);
+        if (
+          candidateSimilarity > bestSimilarity &&
+          shouldExpandDiffBlockRange(currentSimilarity, candidateSimilarity)
+        ) {
+          bestRange = candidate;
+          bestSimilarity = candidateSimilarity;
+        }
+      });
+
+      if (bestRange) {
+        range.beforeStart = bestRange.beforeStart;
+        range.beforeEnd = bestRange.beforeEnd;
+        range.afterStart = bestRange.afterStart;
+        range.afterEnd = bestRange.afterEnd;
+        changed = true;
+      }
+    });
+  }
+
+  return ranges;
+}
+
+function diffUnmatchedBlock(tokens, type) {
+  return tokens.map(token => ({
+    type,
+    text: token.text,
+    marks: token.marks || {},
+    beforeIndex: type === "removed" ? token.index : undefined,
+    afterIndex: type === "added" ? token.index : undefined
+  }));
+}
+
+function diffBlocksHaveSameTokens(beforeBlock, afterBlock) {
+  if (beforeBlock.length !== afterBlock.length) return false;
+  return beforeBlock.every((token, index) => token.key === afterBlock[index].key);
+}
+
+function appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeStart, beforeEnd, afterStart, afterEnd) {
+  let beforeIndex = beforeStart;
+  let afterIndex = afterStart;
+
+  while (beforeIndex < beforeEnd || afterIndex < afterEnd) {
+    if (
+      beforeIndex < beforeEnd &&
+      afterIndex < afterEnd &&
+      diffBlocksHaveSameTokens(beforeBlocks[beforeIndex], afterBlocks[afterIndex])
+    ) {
+      parts.push(...diffSequence(beforeBlocks[beforeIndex], afterBlocks[afterIndex]));
+      beforeIndex += 1;
+      afterIndex += 1;
+      continue;
+    }
+
+    if (beforeIndex < beforeEnd) {
+      parts.push(...diffUnmatchedBlock(beforeBlocks[beforeIndex], "removed"));
+      beforeIndex += 1;
+      continue;
+    }
+
+    parts.push(...diffUnmatchedBlock(afterBlocks[afterIndex], "added"));
+    afterIndex += 1;
+  }
 }
 
 function diffRichPages(beforePage, afterPage) {
   ensurePageFields(beforePage);
   ensurePageFields(afterPage);
-  return diffSequence(
-    semanticTokensFromHtml(beforePage.contentHtml),
-    semanticTokensFromHtml(afterPage.contentHtml)
-  );
+  const beforeBlocks = splitDiffBlocks(semanticTokensFromHtml(beforePage.contentHtml));
+  const afterBlocks = splitDiffBlocks(semanticTokensFromHtml(afterPage.contentHtml));
+  const pairs = expandDiffBlockPairs(alignDiffBlocks(beforeBlocks, afterBlocks), beforeBlocks, afterBlocks);
+  const parts = [];
+  let beforeIndex = 0;
+  let afterIndex = 0;
+
+  pairs.forEach(range => {
+    appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, range.beforeStart, afterIndex, range.afterStart);
+
+    parts.push(...diffSequence(
+      flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd),
+      flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd)
+    ));
+    beforeIndex = range.beforeEnd;
+    afterIndex = range.afterEnd;
+  });
+
+  appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, beforeBlocks.length, afterIndex, afterBlocks.length);
+
+  return restoreIdenticalChangedTokens(parts);
 }
 
 function countMeaningfulChanges(parts) {
@@ -1590,6 +2459,20 @@ function renderDraftTabs() {
   els.storyDisplayToggle.checked = showChanges ? false : displayedPageKeys.has(STORY_KEY);
   els.storyDisplayToggle.disabled = showChanges;
   els.storyDisplayToggle.setAttribute("aria-label", showChanges ? "Project notes are not compared" : "Display Project notes");
+  const selectedDrafts = selectedDraftDisplayCount();
+  const hasDrafts = Boolean(state.drafts.length);
+  const allSelected = hasDrafts && selectedDrafts === state.drafts.length;
+  const partiallySelected = selectedDrafts > 0 && !allSelected;
+
+  if (els.allDraftsTab && els.allDraftsToggle) {
+    els.allDraftsTab.classList.toggle("is-partial", partiallySelected);
+    els.allDraftsToggle.checked = allSelected;
+    els.allDraftsToggle.indeterminate = partiallySelected;
+    els.allDraftsToggle.disabled = !hasDrafts;
+    els.allDraftsToggle.setAttribute("aria-label", showChanges ? "Compare all drafts" : "Display all drafts");
+    els.allDraftsToggle.setAttribute("aria-checked", partiallySelected ? "mixed" : String(allSelected));
+  }
+
   els.draftTabs.innerHTML = state.drafts.map((draft, index) => {
     const active = draft.id === selectedDraftId && activeArea !== "story" ? " active" : "";
     const checked = displayedPageKeys.has(draftContentKey(draft.id)) ? " checked" : "";
@@ -2765,6 +3648,22 @@ els.storyDisplayToggle.addEventListener("change", event => {
 
   syncFromInputs();
   displayPage(STORY_KEY, event.target.checked);
+  render();
+  scheduleSave();
+});
+
+els.allDraftsTab.addEventListener("click", event => {
+  if (event.target === els.allDraftsToggle) return;
+  if (!event.target.closest("[data-all-drafts-toggle]")) return;
+  syncFromInputs();
+  displayAllDrafts(!allDraftsSelected());
+  render();
+  scheduleSave();
+});
+
+els.allDraftsToggle.addEventListener("change", event => {
+  syncFromInputs();
+  displayAllDrafts(event.target.checked);
   render();
   scheduleSave();
 });
