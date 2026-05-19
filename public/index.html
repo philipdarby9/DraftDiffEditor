@@ -9,13 +9,13 @@
   <body>
     <main class="app-shell">
       <header class="titlebar">
-        <div>
-          <h1>
-            <span>Draft Diff Editor</span>
-            <strong id="project-title">draft-history.txt</strong>
-          </h1>
-          <p id="save-status">Loading...</p>
-        </div>
+        <span class="titlebar-app">Draft Diff Editor</span>
+        <span class="titlebar-separator" aria-hidden="true">·</span>
+        <strong id="project-title" class="titlebar-file">draft-history.txt</strong>
+        <p id="save-status" class="titlebar-status">
+          <span class="status-dot" aria-hidden="true"></span>
+          <span class="status-text">Loading...</span>
+        </p>
       </header>
 
       <nav class="ribbon" aria-label="Editor ribbon">
@@ -23,19 +23,20 @@
           <details id="file-menu" class="file-menu">
             <summary>File</summary>
             <div class="file-menu-panel">
-              <button id="file-new" type="button">New</button>
-              <button id="file-open" type="button">Open...</button>
-              <button id="file-save-as" type="button">Save as...</button>
+              <button id="file-new" type="button"><span class="menu-check">✓</span><span>New</span><span class="menu-shortcut">⌘N</span></button>
+              <button id="file-open" type="button"><span class="menu-check">✓</span><span>Open…</span><span class="menu-shortcut">⌘O</span></button>
+              <span class="menu-divider" aria-hidden="true"></span>
+              <button id="file-save-as" type="button"><span class="menu-check">✓</span><span>Save as…</span><span class="menu-shortcut">⌘⇧S</span></button>
             </div>
           </details>
           <details id="view-menu" class="file-menu">
             <summary>View</summary>
             <div class="file-menu-panel">
               <div id="pages-on-screen" class="view-options" aria-label="Pages on screen">
-                <button type="button" data-pages-on-screen="1">1 on screen</button>
-                <button type="button" data-pages-on-screen="2" aria-pressed="true">2 on screen</button>
-                <button type="button" data-pages-on-screen="3">3 on screen</button>
-                <button type="button" data-pages-on-screen="4">4 on screen</button>
+                <button type="button" data-pages-on-screen="1"><span class="menu-check">✓</span><span>1 on screen</span><span class="menu-shortcut">⌘1</span></button>
+                <button type="button" data-pages-on-screen="2" aria-pressed="true"><span class="menu-check">✓</span><span>2 on screen</span><span class="menu-shortcut">⌘2</span></button>
+                <button type="button" data-pages-on-screen="3"><span class="menu-check">✓</span><span>3 on screen</span><span class="menu-shortcut">⌘3</span></button>
+                <button type="button" data-pages-on-screen="4"><span class="menu-check">✓</span><span>4 on screen</span><span class="menu-shortcut">⌘4</span></button>
               </div>
             </div>
           </details>
@@ -45,8 +46,9 @@
         <div class="tab-strip" aria-label="Pages">
           <div id="story-tab" class="page-tab story-tab">
             <input id="story-display-toggle" type="checkbox" data-display-story aria-label="Display Story Notes">
-            <button class="tab-label" type="button" data-story-focus>
-              <span>Story Notes</span>
+            <button class="tab-label" type="button" data-story-focus aria-label="Story Notes">
+              <span class="tab-label-full">Story Notes</span>
+              <span class="tab-label-short" aria-hidden="true">SN</span>
             </button>
           </div>
           <div id="draft-tabs" class="draft-tabs"></div>
@@ -54,8 +56,21 @@
         </div>
 
         <div class="ribbon-actions">
-          <button id="new-draft-copy" type="button">Copy draft</button>
-          <button id="toggle-changes" type="button" aria-pressed="false">Show changes</button>
+          <button id="new-draft-copy" type="button" title="Duplicate the focused draft as a new draft">
+            <svg class="action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <rect x="3" y="3" width="9" height="9" rx="1.5"></rect>
+              <path d="M5.5 5.5h-1A1.5 1.5 0 0 0 3 7v6.5A1.5 1.5 0 0 0 4.5 15H11a1.5 1.5 0 0 0 1.5-1.5v-1"></path>
+            </svg>
+            <span>Copy draft</span>
+          </button>
+          <button id="toggle-changes" type="button" aria-pressed="false">
+            <svg class="action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M3 4h10M3 8h6M3 12h10"></path>
+              <path d="M11.5 7L14 8.5l-2.5 1.5"></path>
+            </svg>
+            <span class="toggle-changes-label">Show changes</span>
+          </button>
+          <span class="action-divider" aria-hidden="true"></span>
           <label class="select-control" for="compare-mode">
             Compare
             <select id="compare-mode">
@@ -63,7 +78,15 @@
               <option value="consecutive">Consecutive</option>
             </select>
           </label>
-          <a class="link-button" href="/api/export" target="_blank" rel="noreferrer">Text file</a>
+          <span class="action-divider" aria-hidden="true"></span>
+          <a class="link-button" href="/api/export" target="_blank" rel="noreferrer" title="Open the companion text file in a new tab">
+            <svg class="action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+              <path d="M9 2H4.5A1.5 1.5 0 0 0 3 3.5v9A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5V6"></path>
+              <path d="M9 2v3.5A.5.5 0 0 0 9.5 6H13"></path>
+              <path d="M9 2l4 4"></path>
+            </svg>
+            <span>Text file</span>
+          </a>
         </div>
       </nav>
 
@@ -71,18 +94,19 @@
         <section id="page-canvas" class="page-canvas" aria-label="Writing pages"></section>
 
         <aside id="changes-panel" class="changes-panel" aria-label="Draft comparison" hidden>
-          <div class="changes-heading">
-            <div>
-              <h2>Draft comparison</h2>
-              <span id="compare-subtitle"></span>
+          <div class="compare-bar">
+            <h2>
+              <span class="compare-kicker">DRAFT&nbsp;COMPARISON</span>
+              <span id="compare-subtitle">To first draft</span>
+            </h2>
+            <div class="legend" aria-label="Diff legend">
+              <span class="legend-item"><span class="legend-swatch add">added</span></span>
+              <span class="legend-item"><span class="legend-swatch del">deleted</span></span>
+              <span class="legend-item"><span class="legend-swatch same">unchanged</span></span>
+              <span class="legend-item"><span class="legend-swatch ws">·whitespace·</span></span>
             </div>
+            <div id="compare-selector" class="compare-selector" aria-label="Drafts to compare"></div>
           </div>
-          <div class="legend" aria-label="Diff legend">
-            <span><i class="legend-added"></i>Added</span>
-            <span><i class="legend-removed"></i>Deleted</span>
-            <span><i class="legend-same"></i>Unchanged</span>
-          </div>
-          <div id="compare-selector" class="compare-selector" aria-label="Drafts to compare"></div>
           <div id="diff-output" class="diff-output"></div>
         </aside>
       </section>

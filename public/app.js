@@ -57,16 +57,37 @@ const DEFAULT_FORMAT = {
   fontSize: "16"
 };
 
-const allowedFontFamilies = new Set([
+const FONT_FAMILY_OPTIONS = [
   "Segoe UI",
   "Arial",
   "Calibri",
   "Georgia",
   "Times New Roman",
   "Courier New"
-]);
+];
 
-const allowedFontSizes = new Set(["12", "14", "16", "18", "20", "24", "28", "32"]);
+const FONT_SIZE_OPTIONS = ["12", "14", "16", "18", "20", "24", "28", "32"];
+
+const allowedFontFamilies = new Set(FONT_FAMILY_OPTIONS);
+const allowedFontSizes = new Set(FONT_SIZE_OPTIONS);
+
+const toolbarIcons = {
+  undo: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 7h7.5a2.5 2.5 0 0 1 0 5H8"></path><path d="M5.5 4.5 3 7l2.5 2.5"></path></svg>',
+  redo: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 7H5.5a2.5 2.5 0 0 0 0 5H8"></path><path d="M10.5 4.5 13 7l-2.5 2.5"></path></svg>',
+  bold: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3h4a2.25 2.25 0 1 1 0 4.5H5zM5 7.5h4.5a2.5 2.5 0 1 1 0 5H5z"></path></svg>',
+  italic: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 3h-4M9.5 13h-4M9.5 3l-3 10"></path></svg>',
+  underline: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3v5a3.5 3.5 0 0 0 7 0V3"></path><path d="M3.5 13.5h9"></path></svg>',
+  strike: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 8h11"></path><path d="M5 5.5a2.5 2.5 0 0 1 5 0"></path><path d="M11 10.5a2.5 2.5 0 0 1-5 0"></path></svg>',
+  unorderedList: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="4.5" r="0.8" fill="currentColor"></circle><circle cx="3.5" cy="8" r="0.8" fill="currentColor"></circle><circle cx="3.5" cy="11.5" r="0.8" fill="currentColor"></circle><path d="M6 4.5h7M6 8h7M6 11.5h7"></path></svg>',
+  orderedList: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4.5h7M6 8h7M6 11.5h7"></path><path d="M2.5 3v3M2 3h1M2 6h1.5M2 8.5h1.5M2 8.5a.75.75 0 0 1 1.5 0c0 .75-1.5.75-1.5 1.5h1.5"></path><path d="M2 11h1.5M2 12.5h1.5M2 12.5a.75.75 0 0 1 .75-.75M2 14h1.5"></path></svg>',
+  outdent: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M7 7h6M7 9h6M3 12.5h10"></path><path d="M5 7 3 8.5 5 10"></path></svg>',
+  indent: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M7 7h6M7 9h6M3 12.5h10"></path><path d="m3 7 2 1.5L3 10"></path></svg>',
+  alignLeft: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M3 7h7M3 10.5h10M3 13.5h7"></path></svg>',
+  alignCenter: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M5 7h6M3 10.5h10M5 13.5h6"></path></svg>',
+  alignRight: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M6 7h7M3 10.5h10M6 13.5h7"></path></svg>',
+  clear: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 12.5h8"></path><path d="M5.5 3.5H10l-1.5 7h-2zM3 13l3-3"></path></svg>',
+  format: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h10"></path><path d="M5.5 3v3M10.5 6.5v3M7.5 10v3"></path></svg>'
+};
 
 function nowIso() {
   return new Date().toISOString();
@@ -169,6 +190,24 @@ function projectViewStateKey(fileName = projectFileName, projectState = state) {
 
 function clampPagesOnScreen(value) {
   return Math.min(4, Math.max(1, Number(value) || DEFAULT_PAGES_ON_SCREEN));
+}
+
+function selectedDisplayPageCount() {
+  if (!state) return 0;
+  const validKeys = new Set(displayKeys());
+  return [...displayedPageKeys].filter(key => validKeys.has(key)).length;
+}
+
+function normalizePagesOnScreenForSelection(value) {
+  const requestedPagesOnScreen = clampPagesOnScreen(value);
+  const selectedCount = selectedDisplayPageCount();
+  if (selectedCount === 0) return 1;
+  return Math.min(requestedPagesOnScreen, selectedCount);
+}
+
+function syncPagesOnScreenToDisplaySelection() {
+  const normalizedPagesOnScreen = normalizePagesOnScreenForSelection(pagesOnScreen);
+  if (normalizedPagesOnScreen !== pagesOnScreen) setPagesOnScreen(normalizedPagesOnScreen);
 }
 
 function saveFileViewStates() {
@@ -282,10 +321,21 @@ function closeFileMenu() {
   if (els.fileMenu) els.fileMenu.open = false;
 }
 
+function closeTopMenus(exceptMenu = null) {
+  [els.fileMenu, els.viewMenu].forEach(menu => {
+    if (menu && menu !== exceptMenu) menu.open = false;
+  });
+}
+
 function setStatus(text) {
-  const fallbackName = fileNameFromPath(exportPath);
-  const saveLabel = projectFileName || fallbackName;
-  els.saveStatus.textContent = saveLabel ? `${text} - ${saveLabel}` : text;
+  const statusText = String(text || "").replace(/^Saved\s+/, "Saved · ");
+  const statusTextEl = els.saveStatus.querySelector(".status-text");
+  if (statusTextEl) {
+    statusTextEl.textContent = statusText;
+  } else {
+    els.saveStatus.textContent = statusText;
+  }
+  els.saveStatus.classList.toggle("is-saving", /saving|unsaved/i.test(text));
 }
 
 function escapeHtml(value) {
@@ -502,6 +552,7 @@ function ensureDisplaySelection() {
   saveDisplaySelection();
   saveCollapsedNotes();
   saveNotesPanePercents();
+  syncPagesOnScreenToDisplaySelection();
 }
 
 function displayPage(key, shouldDisplay = true) {
@@ -520,9 +571,9 @@ function activeDisplayKey() {
 }
 
 function setPagesOnScreen(value) {
-  pagesOnScreen = clampPagesOnScreen(value);
-  const outerPadding = 20;
-  const pageGap = 10;
+  pagesOnScreen = normalizePagesOnScreenForSelection(value);
+  const outerPadding = 0;
+  const pageGap = 0;
   const widthOffset = outerPadding + pageGap * (pagesOnScreen - 1);
   document.documentElement.style.setProperty(
     "--page-width",
@@ -850,6 +901,19 @@ function syncToolbarValues(editorKey) {
     const field = control.dataset.pageFormat;
     control.value = page.format[field];
   });
+  toolbar.querySelectorAll("[data-page-format-picker]").forEach(picker => {
+    const field = picker.dataset.pageFormatPicker;
+    const value = page.format[field];
+    const valueText = picker.querySelector("[data-format-value]");
+    const toggle = picker.querySelector("[data-format-toggle]");
+
+    picker.dataset.value = value;
+    if (valueText) valueText.textContent = value;
+    if (toggle) toggle.setAttribute("aria-label", `${toggle.title}: ${value}`);
+    picker.querySelectorAll("[data-format-option]").forEach(option => {
+      option.setAttribute("aria-selected", String(option.dataset.formatOption === value));
+    });
+  });
 }
 
 function syncRichPage(page, editorEl) {
@@ -988,6 +1052,14 @@ function countMeaningfulChanges(parts) {
   return count;
 }
 
+function diffTokenStats(parts) {
+  return parts.reduce((stats, part) => {
+    if (part.type === "added" && part.text.trim()) stats.adds += 1;
+    if (part.type === "removed" && part.text.trim()) stats.dels += 1;
+    return stats;
+  }, { adds: 0, dels: 0 });
+}
+
 function pairForIndexes(beforeIndex, afterIndex) {
   const previous = state.drafts[beforeIndex];
   const draft = state.drafts[afterIndex];
@@ -1015,94 +1087,218 @@ function renderDraftTabs() {
   els.storyTab.classList.toggle("active", activeArea === "story");
   els.storyDisplayToggle.checked = displayedPageKeys.has(STORY_KEY);
   els.storyDisplayToggle.disabled = showChanges;
-  els.draftTabs.innerHTML = state.drafts.map(draft => {
+  els.draftTabs.innerHTML = state.drafts.map((draft, index) => {
     const active = draft.id === selectedDraftId && activeArea !== "story" ? " active" : "";
     const checked = displayedPageKeys.has(draftContentKey(draft.id)) ? " checked" : "";
     const disabled = showChanges ? " disabled" : "";
+    const draftNumber = String(index + 1);
     const deleteButton = canDeleteDraft(draft)
-      ? `<button class="delete-draft-tab" type="button" data-delete-draft-id="${draft.id}" title="Delete empty draft" aria-label="Delete ${escapeHtml(draft.title)}">×</button>`
+      ? `
+        <button class="delete-draft-tab" type="button" data-delete-draft-id="${draft.id}" title="Delete empty draft" aria-label="Delete ${escapeHtml(draft.title)}">
+          <svg viewBox="0 0 12 12" aria-hidden="true">
+            <path d="M3 3l6 6M9 3L3 9"></path>
+          </svg>
+        </button>
+      `
       : "";
     return `
       <div class="page-tab draft-tab${active}" data-draft-tab-id="${draft.id}">
         <input type="checkbox" data-display-draft-id="${draft.id}" aria-label="Display ${escapeHtml(draft.title)}"${checked}${disabled}>
-        <button class="tab-label" type="button" data-draft-id="${draft.id}">
-          <span>${escapeHtml(draft.title)}</span>
+        <button class="tab-label" type="button" data-draft-id="${draft.id}" aria-label="${escapeHtml(draft.title)}">
+          <span class="tab-label-full">${escapeHtml(draft.title)}</span>
+          <span class="tab-label-short" aria-hidden="true">${escapeHtml(draftNumber)}</span>
         </button>
         ${deleteButton}
       </div>
     `;
   }).join("");
+  updateTabDensity();
+}
+
+function updateTabDensity() {
+  const strip = els.storyTab?.closest(".tab-strip");
+  if (!strip || !state) return;
+
+  strip.classList.remove("compact-tabs", "scrollable-tabs");
+  const needsCompactLabels = strip.scrollWidth > strip.clientWidth + 1;
+  strip.classList.toggle("compact-tabs", needsCompactLabels);
+  strip.classList.toggle("scrollable-tabs", strip.scrollWidth > strip.clientWidth + 1);
+}
+
+function scrollTabsToEnd() {
+  const strip = els.storyTab?.closest(".tab-strip");
+  if (!strip) return;
+
+  window.requestAnimationFrame(() => {
+    updateTabDensity();
+    strip.scrollTo({ left: strip.scrollWidth, behavior: "auto" });
+  });
+}
+
+function formatPickerHtml(field, label, values, className) {
+  const defaultValue = DEFAULT_FORMAT[field];
+  const options = values.map(value => `
+    <button
+      class="fr-picker-option"
+      type="button"
+      role="option"
+      data-format-option="${escapeHtml(value)}"
+      aria-selected="${String(value === defaultValue)}"
+    >${escapeHtml(value)}</button>
+  `).join("");
+
+  return `
+    <div class="fr-picker ${className}" data-page-format-picker="${escapeHtml(field)}" data-value="${escapeHtml(defaultValue)}">
+      <button
+        class="fr-picker-button"
+        type="button"
+        data-format-toggle
+        title="${escapeHtml(label)}"
+        aria-label="${escapeHtml(label)}: ${escapeHtml(defaultValue)}"
+        aria-haspopup="listbox"
+        aria-expanded="false"
+      >
+        <span data-format-value>${escapeHtml(defaultValue)}</span>
+      </button>
+      <div class="fr-picker-menu" role="listbox" aria-label="${escapeHtml(label)}">
+        ${options}
+      </div>
+    </div>
+  `;
 }
 
 function formatRibbonHtml(pageKey, label, options = {}) {
   return `
-    <div class="editor-format-ribbon" data-toolbar-for="${escapeHtml(pageKey)}" aria-label="${escapeHtml(label)} formatting">
-      <select data-page-format="fontFamily" title="Page font" aria-label="Page font">
-        <option>Segoe UI</option>
-        <option>Arial</option>
-        <option>Calibri</option>
-        <option>Georgia</option>
-        <option>Times New Roman</option>
-        <option>Courier New</option>
-      </select>
-      <select data-page-format="fontSize" title="Page font size" aria-label="Page font size">
-        <option value="12">12</option>
-        <option value="14">14</option>
-        <option value="16">16</option>
-        <option value="18">18</option>
-        <option value="20">20</option>
-        <option value="24">24</option>
-        <option value="28">28</option>
-        <option value="32">32</option>
-      </select>
-      <button type="button" data-command="undo" title="Undo" aria-label="Undo">↶</button>
-      <button type="button" data-command="redo" title="Redo" aria-label="Redo">↷</button>
-      <button type="button" data-command="bold" title="Bold" aria-label="Bold"><strong>B</strong></button>
-      <button type="button" data-command="italic" title="Italic" aria-label="Italic"><em>I</em></button>
-      <button type="button" data-command="underline" title="Underline" aria-label="Underline"><u>U</u></button>
-      <button type="button" data-command="strikeThrough" title="Strikethrough" aria-label="Strikethrough"><s>S</s></button>
-      <button type="button" data-command="insertUnorderedList" title="Bulleted list" aria-label="Bulleted list">•</button>
-      <button type="button" data-command="insertOrderedList" title="Numbered list" aria-label="Numbered list">1.</button>
-      <button type="button" data-command="outdent" title="Decrease indent" aria-label="Decrease indent">⇤</button>
-      <button type="button" data-command="indent" title="Increase indent" aria-label="Increase indent">⇥</button>
-      <button type="button" data-command="justifyLeft" title="Align left" aria-label="Align left">≡</button>
-      <button type="button" data-command="justifyCenter" title="Align center" aria-label="Align center">≣</button>
-      <button type="button" data-command="justifyRight" title="Align right" aria-label="Align right">≡</button>
-      <button type="button" data-command="removeFormat" title="Clear formatting" aria-label="Clear formatting">Tx</button>
+    <div
+      id="format-ribbon-${escapeHtml(pageKey)}"
+      class="editor-format-ribbon"
+      data-toolbar-for="${escapeHtml(pageKey)}"
+      aria-label="${escapeHtml(label)} formatting"
+      aria-hidden="true"
+    >
+      <div class="fr-group">
+        ${formatPickerHtml("fontFamily", "Page font", FONT_FAMILY_OPTIONS, "family")}
+        ${formatPickerHtml("fontSize", "Page font size", FONT_SIZE_OPTIONS, "size")}
+      </div>
+      <div class="fr-group">
+        <button class="fr-btn" type="button" data-command="undo" title="Undo" aria-label="Undo">${toolbarIcons.undo}</button>
+        <button class="fr-btn" type="button" data-command="redo" title="Redo" aria-label="Redo">${toolbarIcons.redo}</button>
+      </div>
+      <div class="fr-group">
+        <button class="fr-btn" type="button" data-command="bold" title="Bold" aria-label="Bold">${toolbarIcons.bold}</button>
+        <button class="fr-btn" type="button" data-command="italic" title="Italic" aria-label="Italic">${toolbarIcons.italic}</button>
+        <button class="fr-btn" type="button" data-command="underline" title="Underline" aria-label="Underline">${toolbarIcons.underline}</button>
+        <button class="fr-btn" type="button" data-command="strikeThrough" title="Strikethrough" aria-label="Strikethrough">${toolbarIcons.strike}</button>
+      </div>
+      <div class="fr-group">
+        <button class="fr-btn" type="button" data-command="insertUnorderedList" title="Bulleted list" aria-label="Bulleted list">${toolbarIcons.unorderedList}</button>
+        <button class="fr-btn" type="button" data-command="insertOrderedList" title="Numbered list" aria-label="Numbered list">${toolbarIcons.orderedList}</button>
+        <button class="fr-btn" type="button" data-command="outdent" title="Decrease indent" aria-label="Decrease indent">${toolbarIcons.outdent}</button>
+        <button class="fr-btn" type="button" data-command="indent" title="Increase indent" aria-label="Increase indent">${toolbarIcons.indent}</button>
+      </div>
+      <div class="fr-group">
+        <button class="fr-btn" type="button" data-command="justifyLeft" title="Align left" aria-label="Align left">${toolbarIcons.alignLeft}</button>
+        <button class="fr-btn" type="button" data-command="justifyCenter" title="Align center" aria-label="Align center">${toolbarIcons.alignCenter}</button>
+        <button class="fr-btn" type="button" data-command="justifyRight" title="Align right" aria-label="Align right">${toolbarIcons.alignRight}</button>
+      </div>
+      <div class="fr-group">
+        <button class="fr-btn" type="button" data-command="removeFormat" title="Clear formatting" aria-label="Clear formatting">${toolbarIcons.clear}</button>
+      </div>
     </div>
   `;
 }
 
 function editorPanelHtml(item, options = {}) {
   const page = ensurePageFields(item.page);
-  const titleControl = item.editableTitle
+  const isNotesPanel = Boolean(options.notesDraftId);
+  const hasToolbar = !options.collapsed;
+  const ribbonId = `format-ribbon-${item.key}`;
+  const titleRow = item.editableTitle
     ? `
-      <label class="panel-kicker" for="title-${escapeHtml(item.key)}">${escapeHtml(item.kicker)}</label>
-      <input
-        id="title-${escapeHtml(item.key)}"
-        class="draft-title-input"
-        data-title-draft-id="${escapeHtml(item.draft.id)}"
-        type="text"
-        autocomplete="off"
-        value="${escapeHtml(item.draft.title)}"
-      >
+      <div class="panel-title-row">
+        <input
+          id="title-${escapeHtml(item.key)}"
+          class="draft-title-input"
+          data-title-draft-id="${escapeHtml(item.draft.id)}"
+          type="text"
+          autocomplete="off"
+          aria-label="${escapeHtml(item.kicker)} title"
+          value="${escapeHtml(item.draft.title)}"
+        >
+      </div>
     `
     : `
-      <span class="panel-kicker">${escapeHtml(item.kicker)}</span>
-      <h2>${escapeHtml(item.title)}</h2>
+      <div class="panel-title-row">
+        <h2>${escapeHtml(item.title)}</h2>
+      </div>
   `;
+  const headingContent = isNotesPanel
+    ? `<span class="panel-kicker">Notes</span>`
+    : titleRow;
   const standaloneClass = options.standalone === false ? "" : " display-page";
   const collapsedClass = options.collapsed ? " notes-collapsed" : "";
-  const headingClass = options.notesDraftId ? "panel-heading notes-toggle-heading" : "panel-heading";
-  const headingAttributes = options.notesDraftId
+  const headingClass = isNotesPanel ? "panel-heading notes-toggle-heading" : "panel-heading";
+  const headingAttributes = isNotesPanel
     ? ` data-toggle-notes="${escapeHtml(options.notesDraftId)}" role="button" tabindex="0" aria-expanded="${String(!options.collapsed)}" title="${options.collapsed ? "Show notes" : "Collapse notes"}"`
     : "";
+  const notesCaret = isNotesPanel
+    ? `
+      <span class="notes-caret" aria-hidden="true">
+        <svg viewBox="0 0 12 12">
+          <path d="M3 7.5 6 4.5l3 3"></path>
+        </svg>
+      </span>
+    `
+    : "";
+  const notesHint = isNotesPanel
+    ? `<span class="notes-collapse-hint">${options.collapsed ? "Click to expand" : "Click to collapse"}</span>`
+    : "";
+  const formatButton = hasToolbar
+    ? `
+      <button
+        class="panel-format-toggle"
+        type="button"
+        data-ribbon-toggle="${escapeHtml(item.key)}"
+        aria-expanded="false"
+        aria-controls="${escapeHtml(ribbonId)}"
+        title="Formatting"
+        aria-label="Show ${escapeHtml(item.title)} formatting"
+      >${toolbarIcons.format}</button>
+    `
+    : "";
+  const headingInner = isNotesPanel
+    ? `
+      <div class="notes-heading-main">
+        ${notesCaret}
+        ${headingContent}
+      </div>
+      ${formatButton}
+      <span class="meta" title="Created ${formatDate(item.createdAt)}">${formatDate(item.createdAt)}</span>
+      ${notesHint}
+    `
+    : `
+      ${headingContent}
+      ${formatButton}
+      <span class="meta" title="Created ${formatDate(item.createdAt)}">${formatDate(item.createdAt)}</span>
+    `;
+  const placeholder = item.type === "story"
+    ? "Story notes..."
+    : (item.type === "notes" ? "Draft notes..." : "Start drafting...");
+  const pageToolbar = hasToolbar
+    ? formatRibbonHtml(item.key, item.title, options)
+    : "";
+  const ribbonRegion = `
+    <div class="editor-ribbon-region" data-ribbon-region="${escapeHtml(item.key)}">
+      <div class="${headingClass}"${headingAttributes}>
+        ${headingInner}
+      </div>
+      ${pageToolbar}
+    </div>
+  `;
   const editorShell = options.collapsed
     ? ""
     : `
       <div class="rich-editor-shell">
-        <div class="editor-hover-edge" aria-hidden="true"></div>
-        ${formatRibbonHtml(item.key, item.title, options)}
         <div
           class="rich-editor"
           contenteditable="true"
@@ -1111,16 +1307,14 @@ function editorPanelHtml(item, options = {}) {
           spellcheck="true"
           aria-label="${escapeHtml(item.ariaLabel)}"
           data-editor-key="${escapeHtml(item.key)}"
+          data-empty="${escapeHtml(placeholder)}"
         ></div>
       </div>
     `;
 
   return `
     <section class="editor-panel${standaloneClass} ${escapeHtml(item.type)}-display-page${collapsedClass}" data-page-key="${escapeHtml(item.key)}" aria-label="${escapeHtml(item.ariaLabel)}">
-      <div class="${headingClass}"${headingAttributes}>
-        <div>${titleControl}</div>
-        <span class="meta" title="Created ${formatDate(item.createdAt)}">${formatDate(item.createdAt)}</span>
-      </div>
+      ${ribbonRegion}
       ${editorShell}
     </section>
   `;
@@ -1246,13 +1440,16 @@ function renderDiffToken(part) {
   return `<span class="${classes.join(" ")}">${escapeHtml(text)}</span>`;
 }
 
-function baseComparePageHtml(draft, subtitle = "Earlier draft") {
+function baseComparePageHtml(draft, subtitle = "BASELINE") {
   ensurePageFields(draft);
   return `
-    <article class="compare-page">
-      <div class="compare-page-heading">
-        <span>${escapeHtml(subtitle)}</span>
-        <strong>${escapeHtml(draft.title)}</strong>
+    <article class="compare-page is-baseline">
+      <div class="compare-page-header">
+        <div class="kicker">${escapeHtml(subtitle)}</div>
+        <div class="title-row">
+          <div class="title">${escapeHtml(draft.title)}</div>
+        </div>
+        <div class="meta">${formatDate(draft.createdAt)}</div>
       </div>
       <div class="compare-page-body" style="${fontStyle(draft.format)}">
         <div class="compare-rich-content">${richPageHtml(draft)}</div>
@@ -1261,8 +1458,7 @@ function baseComparePageHtml(draft, subtitle = "Earlier draft") {
   `;
 }
 
-function markedLaterPageHtml(pair) {
-  const diff = diffRichPages(pair.before, pair.after);
+function markedLaterPageHtml(pair, diff = diffRichPages(pair.before, pair.after)) {
   if (!diff.length) {
     return `<div class="compare-text empty-line">No draft text yet.</div>`;
   }
@@ -1273,20 +1469,26 @@ function markedLaterPageHtml(pair) {
 
 function markedComparePageHtml(pair) {
   const diff = diffRichPages(pair.before, pair.after);
-  const changedCount = countMeaningfulChanges(diff);
+  const stats = diffTokenStats(diff);
 
   return `
     <article class="compare-page later-page">
-      <div class="compare-page-heading">
-        <span>Compared page</span>
-        <strong>${escapeHtml(pair.after.title)}</strong>
-      </div>
-      <div class="compare-page-subhead">
-        <span>${escapeHtml(pair.label)}</span>
-        <span>${changedCount} ${changedCount === 1 ? "change" : "changes"}</span>
+      <div class="compare-page-header">
+        <div class="kicker">CHANGES</div>
+        <div class="title-row">
+          <div class="title">${escapeHtml(pair.after.title)}</div>
+          <div class="vs">vs ${escapeHtml(pair.before.title)}</div>
+        </div>
+        <div class="meta">
+          <div>${formatDate(pair.after.createdAt)}</div>
+          <div class="compare-stats">
+            <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
+            <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
+          </div>
+        </div>
       </div>
       <div class="compare-page-body" style="${fontStyle(pair.after.format)}">
-        ${markedLaterPageHtml(pair)}
+        ${markedLaterPageHtml(pair, diff)}
       </div>
     </article>
   `;
@@ -1306,7 +1508,7 @@ function beforeIndexForSelectedDraft(indexes, position) {
 function renderComparisonStrip(indexes) {
   const pages = [];
 
-  pages.push(baseComparePageHtml(state.drafts[indexes[0]], "Selected baseline"));
+  pages.push(baseComparePageHtml(state.drafts[indexes[0]], "BASELINE"));
 
   indexes.slice(1).forEach((draftIndex, offset) => {
     const beforeIndex = beforeIndexForSelectedDraft(indexes, offset + 1);
@@ -1315,7 +1517,7 @@ function renderComparisonStrip(indexes) {
   });
 
   const visiblePages = Math.min(4, Math.max(1, pages.length));
-  const gapTotal = (visiblePages - 1) * 12;
+  const gapTotal = 0;
   const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: ${gapTotal}px;`;
   return `<div class="compare-strip" style="${style}">${pages.join("")}</div>`;
 }
@@ -1324,19 +1526,35 @@ function renderCompareSelector() {
   pruneCompareSelection();
 
   if (!state.drafts.length) {
+    els.compareSelector.classList.remove("compact-compare", "scrollable-compare");
     els.compareSelector.innerHTML = `<p class="compare-selector-empty">No drafts yet.</p>`;
     return;
   }
 
-  els.compareSelector.innerHTML = state.drafts.map(draft => {
+  els.compareSelector.innerHTML = [
+    `<span class="compare-selector-label">Drafts</span>`,
+    ...state.drafts.map((draft, index) => {
     const checked = compareSelectedIds.has(draft.id) ? " checked" : "";
+    const draftNumber = String(index + 1);
     return `
       <label class="compare-choice">
         <input type="checkbox" data-compare-draft-id="${draft.id}" aria-label="Compare ${escapeHtml(draft.title)}"${checked}>
-        <span>${escapeHtml(draft.title)}</span>
+        <span class="compare-label-full">${escapeHtml(draft.title)}</span>
+        <span class="compare-label-short" aria-hidden="true">${escapeHtml(draftNumber)}</span>
       </label>
     `;
-  }).join("");
+    })
+  ].join("");
+  updateCompareSelectorDensity();
+}
+
+function updateCompareSelectorDensity() {
+  if (!els.compareSelector || !state || !els.compareSelector.clientWidth) return;
+
+  els.compareSelector.classList.remove("compact-compare", "scrollable-compare");
+  const needsCompactLabels = els.compareSelector.scrollWidth > els.compareSelector.clientWidth + 1;
+  els.compareSelector.classList.toggle("compact-compare", needsCompactLabels);
+  els.compareSelector.classList.toggle("scrollable-compare", els.compareSelector.scrollWidth > els.compareSelector.clientWidth + 1);
 }
 
 function renderDiff() {
@@ -1349,9 +1567,10 @@ function renderDiff() {
   renderCompareSelector();
   const indexes = selectedCompareIndexes();
 
+  const baseline = state.drafts[indexes[0]];
   els.compareSubtitle.textContent = els.compareMode.value === "first"
-    ? "Selected draft pages are marked against the first selected draft"
-    : "Selected draft pages are marked against the previous selected draft";
+    ? (baseline ? `Against ${baseline.title}` : "No baseline")
+    : "Consecutive";
 
   els.diffOutput.innerHTML = indexes.length
     ? renderComparisonStrip(indexes)
@@ -1362,7 +1581,12 @@ function renderChangesVisibility() {
   els.editorSurface.classList.toggle("compare-open", showChanges);
   els.changesPanel.hidden = !showChanges;
   els.toggleChanges.setAttribute("aria-pressed", String(showChanges));
-  els.toggleChanges.textContent = showChanges ? "Hide changes" : "Show changes";
+  const label = els.toggleChanges.querySelector(".toggle-changes-label");
+  if (label) {
+    label.textContent = showChanges ? "Hide changes" : "Show changes";
+  } else {
+    els.toggleChanges.textContent = showChanges ? "Hide changes" : "Show changes";
+  }
 }
 
 function render() {
@@ -1632,7 +1856,7 @@ async function loadState() {
   projectFileWritesEnabled = false;
   updateProjectTitle();
   restoreViewStateForProject();
-  setStatus("Saved");
+  setStatus(`Saved ${formatDate(state.updatedAt)}`);
   render();
 }
 
@@ -1683,6 +1907,7 @@ function addDraft(copyFromSelected) {
   displayPage(draftContentKey(draft.id), true);
   render();
   scheduleSave();
+  scrollTabsToEnd();
   focusPageEditor(draftContentKey(draft.id));
 }
 
@@ -1706,6 +1931,112 @@ function runEditorCommand(editorKey, command) {
   editorEl.focus();
   document.execCommand(command, false, null);
   scheduleSave();
+}
+
+function setRibbonRegionOpen(region, open) {
+  region.classList.toggle("ribbon-open", open);
+
+  const toggle = region.querySelector("[data-ribbon-toggle]");
+  const toolbar = region.querySelector(".editor-format-ribbon");
+  if (toggle) toggle.setAttribute("aria-expanded", String(open));
+  if (toolbar) toolbar.setAttribute("aria-hidden", String(!open));
+}
+
+function toggleEditorRibbon(toggle) {
+  const region = toggle.closest(".editor-ribbon-region");
+  if (!region) return;
+
+  const shouldOpen = !region.classList.contains("ribbon-open");
+  setRibbonRegionOpen(region, shouldOpen);
+
+  if (shouldOpen) {
+    syncToolbarValues(region.dataset.ribbonRegion);
+  } else {
+    closeFormatPickers();
+  }
+}
+
+function closeFormatPickers(exceptPicker = null) {
+  const affectedToolbars = new Set();
+
+  els.pageCanvas.querySelectorAll(".fr-picker.is-open").forEach(picker => {
+    if (picker === exceptPicker) return;
+    picker.classList.remove("is-open");
+    picker.querySelector("[data-format-toggle]")?.setAttribute("aria-expanded", "false");
+    clearFormatPickerPosition(picker);
+    const toolbar = picker.closest("[data-toolbar-for]");
+    if (toolbar) affectedToolbars.add(toolbar);
+  });
+
+  affectedToolbars.forEach(updateToolbarPickerState);
+}
+
+function clearFormatPickerPosition(picker) {
+  const menu = picker.querySelector(".fr-picker-menu");
+  if (!menu) return;
+
+  menu.style.removeProperty("left");
+  menu.style.removeProperty("top");
+  menu.style.removeProperty("min-width");
+}
+
+function updateToolbarPickerState(toolbar) {
+  toolbar.classList.toggle("has-open-picker", Boolean(toolbar.querySelector(".fr-picker.is-open")));
+}
+
+function positionFormatPickerMenu(picker) {
+  const toggle = picker.querySelector("[data-format-toggle]");
+  const menu = picker.querySelector(".fr-picker-menu");
+  if (!toggle || !menu || !picker.classList.contains("is-open")) return;
+
+  const viewportWidth = document.documentElement.clientWidth;
+  const viewportHeight = document.documentElement.clientHeight;
+  const margin = 6;
+  const gap = 5;
+  const toggleRect = toggle.getBoundingClientRect();
+
+  menu.style.minWidth = `${Math.ceil(toggleRect.width)}px`;
+
+  const menuRect = menu.getBoundingClientRect();
+  const menuWidth = menuRect.width;
+  const menuHeight = menuRect.height;
+  const left = Math.max(margin, Math.min(toggleRect.left, viewportWidth - menuWidth - margin));
+  const belowTop = toggleRect.bottom + gap;
+  const aboveTop = toggleRect.top - menuHeight - gap;
+  const top = belowTop + menuHeight <= viewportHeight - margin || aboveTop < margin
+    ? Math.max(margin, Math.min(belowTop, viewportHeight - menuHeight - margin))
+    : aboveTop;
+
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.top = `${Math.round(top)}px`;
+}
+
+function positionOpenFormatPickers() {
+  els.pageCanvas.querySelectorAll(".fr-picker.is-open").forEach(positionFormatPickerMenu);
+}
+
+function toggleFormatPicker(toggle) {
+  const picker = toggle.closest("[data-page-format-picker]");
+  if (!picker) return;
+
+  const shouldOpen = !picker.classList.contains("is-open");
+  const toolbar = picker.closest("[data-toolbar-for]");
+  closeFormatPickers(picker);
+  picker.classList.toggle("is-open", shouldOpen);
+  toggle.setAttribute("aria-expanded", String(shouldOpen));
+
+  if (!shouldOpen) clearFormatPickerPosition(picker);
+  if (toolbar) updateToolbarPickerState(toolbar);
+  if (shouldOpen) positionFormatPickerMenu(picker);
+}
+
+function chooseFormatOption(option) {
+  const picker = option.closest("[data-page-format-picker]");
+  const toolbar = option.closest("[data-toolbar-for]");
+  if (!picker || !toolbar) return;
+
+  applyPageFormat(toolbar.dataset.toolbarFor || activeEditorKey, picker.dataset.pageFormatPicker, option.dataset.formatOption);
+  closeFormatPickers();
 }
 
 function toggleNotes(draftId) {
@@ -1840,7 +2171,9 @@ els.pageCanvas.addEventListener("input", event => {
 });
 
 els.pageCanvas.addEventListener("keydown", event => {
-  const notesHeading = event.target.closest(".notes-toggle-heading[data-toggle-notes]");
+  if (event.target.closest("[data-ribbon-toggle]")) return;
+
+  const notesHeading = event.target.closest("[data-toggle-notes]");
   if (notesHeading && (event.key === "Enter" || event.key === " ")) {
     event.preventDefault();
     toggleNotes(notesHeading.dataset.toggleNotes);
@@ -1893,9 +2226,27 @@ els.pageCanvas.addEventListener("mousedown", event => {
 });
 
 els.pageCanvas.addEventListener("click", event => {
+  const ribbonToggle = event.target.closest("[data-ribbon-toggle]");
+  if (ribbonToggle) {
+    toggleEditorRibbon(ribbonToggle);
+    return;
+  }
+
   const notesToggle = event.target.closest("[data-toggle-notes]");
   if (notesToggle) {
     toggleNotes(notesToggle.dataset.toggleNotes);
+    return;
+  }
+
+  const formatToggle = event.target.closest("[data-format-toggle]");
+  if (formatToggle) {
+    toggleFormatPicker(formatToggle);
+    return;
+  }
+
+  const formatOption = event.target.closest("[data-format-option]");
+  if (formatOption) {
+    chooseFormatOption(formatOption);
     return;
   }
 
@@ -1953,6 +2304,31 @@ els.toggleChanges.addEventListener("click", () => {
   renderChangesVisibility();
   renderDiff();
 });
+
+document.addEventListener("click", event => {
+  const topMenu =
+    event.target instanceof Element ? event.target.closest("#file-menu, #view-menu") : null;
+  if (topMenu) {
+    closeTopMenus(topMenu);
+  } else {
+    closeTopMenus();
+  }
+
+  if (event.target instanceof Element && event.target.closest(".fr-picker")) return;
+  closeFormatPickers();
+});
+
+document.addEventListener("keydown", event => {
+  if (event.key === "Escape") {
+    closeTopMenus();
+    closeFormatPickers();
+  }
+});
+
+document.addEventListener("scroll", positionOpenFormatPickers, true);
+window.addEventListener("resize", positionOpenFormatPickers);
+window.addEventListener("resize", updateTabDensity);
+window.addEventListener("resize", updateCompareSelectorDensity);
 
 window.addEventListener("beforeunload", () => {
   if (!state) return;
