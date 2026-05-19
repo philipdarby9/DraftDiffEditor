@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Draft Diff Editor</title>
-    <link rel="stylesheet" href="/styles.css">
+    <link rel="stylesheet" href="/styles.css?v=server-file-menu-shortcuts-2026-05-19">
   </head>
   <body>
     <main class="app-shell">
@@ -24,9 +24,10 @@
             <summary>File</summary>
             <div class="file-menu-panel">
               <button id="file-new" type="button"><span class="menu-check">✓</span><span>New</span><span class="menu-shortcut" data-shortcut="new">Ctrl+N</span></button>
-              <button id="file-open" type="button"><span class="menu-check">✓</span><span>Open…</span><span class="menu-shortcut" data-shortcut="open">Ctrl+O</span></button>
+              <button id="file-open" type="button"><span class="menu-check">✓</span><span>Open</span><span class="menu-shortcut" data-shortcut="open">Ctrl+O</span></button>
+              <button id="file-open-location" type="button"><span class="menu-check" aria-hidden="true"></span><span>Open file location</span><span class="menu-shortcut" data-shortcut="openLocation">Ctrl+Alt+O</span></button>
               <span class="menu-divider" aria-hidden="true"></span>
-              <button id="file-save-as" type="button"><span class="menu-check">✓</span><span>Save as…</span><span class="menu-shortcut" data-shortcut="saveAs">Ctrl+Shift+S</span></button>
+              <button id="file-save-as" type="button"><span class="menu-check">✓</span><span>Save as</span><span class="menu-shortcut" data-shortcut="saveAs">Ctrl+Shift+S</span></button>
             </div>
           </details>
           <details id="edit-menu" class="file-menu">
@@ -117,6 +118,6 @@
       </section>
     </main>
 
-    <script src="/app.js"></script>
+    <script src="/app.js?v=server-file-menu-shortcuts-2026-05-19"></script>
   </body>
 </html>

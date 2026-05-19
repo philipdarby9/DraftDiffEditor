@@ -252,17 +252,6 @@ textarea,
   list-style: none;
 }
 
-.file-menu summary::after {
-  content: "";
-  width: 0;
-  height: 0;
-  border-left: 3.5px solid transparent;
-  border-right: 3.5px solid transparent;
-  border-top: 4px solid var(--fg-subtle);
-  margin-left: 2px;
-  transform: translateY(1px);
-}
-
 .file-menu summary::-webkit-details-marker {
   display: none;
 }

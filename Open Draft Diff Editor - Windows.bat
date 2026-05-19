@@ -1,10 +1,15 @@
 @echo off
 setlocal
 
-set "APP_DIR=%~dp0"
-set "URL=http://localhost:4173/"
+set "APP_DIR=C:\Users\phili\OneDrive\Documents\DraftDiffEditor"
+set "SERVER_BUILD=server-file-menu-shortcuts-2026-05-19"
 
-cd /d "%APP_DIR%"
+cd /d "%APP_DIR%" || (
+  echo Could not find Draft Diff Editor at:
+  echo %APP_DIR%
+  pause
+  exit /b 1
+)
 
 where node >nul 2>nul
 if errorlevel 1 (
@@ -15,26 +20,40 @@ if errorlevel 1 (
   exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing '%URL%' -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }" >nul 2>nul
-if not errorlevel 1 (
-  start "" "%URL%"
-  exit /b 0
+for /L %%P in (4174,1,4183) do (
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $info = Invoke-RestMethod -Uri 'http://localhost:%%P/api/server-info' -TimeoutSec 1; if ($info.build -eq '%SERVER_BUILD%') { exit 0 } else { exit 2 } } catch { exit 2 }" >nul 2>nul
+  if not errorlevel 1 (
+    start "" "http://localhost:%%P/"
+    exit /b 0
+  )
 )
 
-echo Starting Draft Diff Editor...
-start "Draft Diff Editor Server" /D "%APP_DIR%" cmd /k node server.js
+for /L %%P in (4174,1,4183) do (
+  netstat -ano | findstr /R /C:":%%P .*LISTENING" >nul
+  if errorlevel 1 (
+    set "APP_PORT=%%P"
+    goto found_port
+  )
+)
+
+echo No free local port found between 4174 and 4183.
+pause
+exit /b 1
+
+:found_port
+set "URL=http://localhost:%APP_PORT%/"
+
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$env:PORT='%APP_PORT%'; $env:DRAFT_DIFF_AUTO_EXIT='1'; Start-Process -WindowStyle Hidden -FilePath 'node' -ArgumentList 'server.js' -WorkingDirectory '%APP_DIR%'"
 
 for /L %%I in (1,1,40) do (
-  powershell -NoProfile -ExecutionPolicy Bypass -Command "try { Invoke-WebRequest -UseBasicParsing '%URL%' -TimeoutSec 2 | Out-Null; exit 0 } catch { exit 1 }" >nul 2>nul
+  powershell -NoProfile -ExecutionPolicy Bypass -Command "try { $info = Invoke-RestMethod -Uri '%URL%api/server-info' -TimeoutSec 1; if ($info.build -eq '%SERVER_BUILD%') { exit 0 } else { exit 1 } } catch { exit 1 }" >nul 2>nul
   if not errorlevel 1 (
     start "" "%URL%"
-    echo Draft Diff Editor is running at %URL%
-    echo Close the "Draft Diff Editor Server" window to stop the local server.
     exit /b 0
   )
   timeout /t 1 /nobreak >nul
 )
 
-echo The app did not start. Check the server window for details.
+echo Draft Diff Editor did not start.
 pause
 exit /b 1

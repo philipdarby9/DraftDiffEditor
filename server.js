@@ -1,6 +1,7 @@
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
+const { spawn } = require("node:child_process");
 const { URL } = require("node:url");
 
 const ROOT = __dirname;
@@ -8,10 +9,18 @@ const PUBLIC_DIR = path.join(ROOT, "public");
 const DATA_DIR = path.join(ROOT, "data");
 const STATE_FILE = path.join(DATA_DIR, "project.json");
 const EXPORT_FILE = path.join(DATA_DIR, "draft-history.txt");
+const TEXT_FILE_LINK_FILE = path.join(DATA_DIR, "text-file-link.json");
+const TEXT_FILE_STATES_FILE = path.join(DATA_DIR, "text-file-states.json");
 const PORT = Number(process.env.PORT || 4173);
 const PROJECT_NOTES_TITLE = "Project notes";
 const FORMAT_DEFAULT_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
+const SERVER_BUILD = "server-file-menu-shortcuts-2026-05-19";
+const AUTO_EXIT_ON_IDLE = process.env.DRAFT_DIFF_AUTO_EXIT === "1";
+const CLIENT_IDLE_EXIT_MS = 15_000;
+const STARTUP_IDLE_EXIT_MS = 120_000;
+
+let lastClientSeenAt = 0;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -224,11 +233,89 @@ function ensureDataDir() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+function readTextFileLink() {
+  ensureDataDir();
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(TEXT_FILE_LINK_FILE, "utf8"));
+    const filePath = typeof parsed?.filePath === "string" ? parsed.filePath : "";
+    return filePath ? path.resolve(filePath) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeTextFileLink(filePath) {
+  ensureDataDir();
+
+  if (!filePath) {
+    try {
+      fs.rmSync(TEXT_FILE_LINK_FILE, { force: true });
+    } catch {}
+    return null;
+  }
+
+  const resolvedPath = path.resolve(filePath);
+  fs.writeFileSync(TEXT_FILE_LINK_FILE, `${JSON.stringify({ filePath: resolvedPath }, null, 2)}\n`, "utf8");
+  return resolvedPath;
+}
+
+function textFileStateKey(filePath) {
+  const resolvedPath = path.resolve(filePath);
+  return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
+}
+
+function readTextFileStates() {
+  ensureDataDir();
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(TEXT_FILE_STATES_FILE, "utf8"));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeTextFileStates(states) {
+  ensureDataDir();
+  fs.writeFileSync(TEXT_FILE_STATES_FILE, `${JSON.stringify(states, null, 2)}\n`, "utf8");
+}
+
+function readTextFileState(filePath) {
+  if (!filePath) return null;
+
+  const entry = readTextFileStates()[textFileStateKey(filePath)];
+  if (!entry?.state) return null;
+
+  return normalizeState(entry.state);
+}
+
+function writeTextFileState(filePath, state) {
+  if (!filePath || !state) return;
+
+  const resolvedPath = path.resolve(filePath);
+  const states = readTextFileStates();
+  states[textFileStateKey(resolvedPath)] = {
+    filePath: resolvedPath,
+    updatedAt: nowIso(),
+    state: normalizeState(state)
+  };
+  writeTextFileStates(states);
+}
+
 function writeAll(state) {
   ensureDataDir();
   const normalized = normalizeState(state, { touch: true });
+  const exportText = formatExport(normalized);
   fs.writeFileSync(STATE_FILE, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
-  fs.writeFileSync(EXPORT_FILE, formatExport(normalized), "utf8");
+  fs.writeFileSync(EXPORT_FILE, exportText, "utf8");
+
+  const linkedTextPath = readTextFileLink();
+  if (linkedTextPath) {
+    fs.writeFileSync(linkedTextPath, exportText, "utf8");
+    writeTextFileState(linkedTextPath, normalized);
+  }
+
   return normalized;
 }
 
@@ -259,6 +346,28 @@ function sendJson(res, statusCode, payload) {
   res.end(body);
 }
 
+function markClientActive() {
+  if (AUTO_EXIT_ON_IDLE) lastClientSeenAt = Date.now();
+}
+
+function maybeExitWhenIdle(startedAt) {
+  if (!AUTO_EXIT_ON_IDLE) return;
+
+  const now = Date.now();
+  const idleMs = lastClientSeenAt ? now - lastClientSeenAt : now - startedAt;
+  const limitMs = lastClientSeenAt ? CLIENT_IDLE_EXIT_MS : STARTUP_IDLE_EXIT_MS;
+
+  if (idleMs < limitMs) return;
+
+  flushOnExit();
+  server.close(() => process.exit(0));
+  windowlessExitFallback();
+}
+
+function windowlessExitFallback() {
+  setTimeout(() => process.exit(0), 1500).unref();
+}
+
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let body = "";
@@ -281,34 +390,205 @@ function safeStaticPath(pathname) {
   return filePath.startsWith(PUBLIC_DIR) ? filePath : null;
 }
 
+function currentTextFilePath() {
+  return readTextFileLink() || EXPORT_FILE;
+}
+
+function parseStatePayload(body) {
+  const payload = JSON.parse(body || "{}");
+  if (payload?.state && typeof payload.state === "object") {
+    return {
+      state: payload.state,
+      fileName: payload.fileName
+    };
+  }
+
+  return {
+    state: payload,
+    fileName: null
+  };
+}
+
+function powershellString(value) {
+  return `'${String(value).replaceAll("'", "''")}'`;
+}
+
+function runPowerShell(command) {
+  return new Promise((resolve, reject) => {
+    const child = spawn("powershell.exe", [
+      "-NoProfile",
+      "-STA",
+      "-ExecutionPolicy",
+      "Bypass",
+      "-Command",
+      command
+    ], {
+      windowsHide: true
+    });
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", chunk => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", chunk => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", code => {
+      if (code === 0) {
+        resolve(stdout.trim());
+      } else {
+        reject(new Error(stderr.trim() || `PowerShell exited with code ${code}.`));
+      }
+    });
+  });
+}
+
+function existingDirectory(filePath) {
+  const directoryPath = path.dirname(filePath);
+  return fs.existsSync(directoryPath) ? directoryPath : DATA_DIR;
+}
+
+function windowsFileDialogCommand(dialogType, initialDirectory, initialFileName = "") {
+  const dialogClass = dialogType === "save"
+    ? "System.Windows.Forms.SaveFileDialog"
+    : "System.Windows.Forms.OpenFileDialog";
+  const dialogOptions = dialogType === "save"
+    ? [
+        "$dialog.OverwritePrompt = $true",
+        "$dialog.AddExtension = $true",
+        "$dialog.DefaultExt = 'txt'",
+        `$dialog.FileName = ${powershellString(initialFileName)}`
+      ]
+    : [
+        "$dialog.Multiselect = $false"
+      ];
+
+  return [
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -AssemblyName System.Drawing",
+    "[System.Windows.Forms.Application]::EnableVisualStyles()",
+    "$owner = New-Object System.Windows.Forms.Form",
+    "$owner.TopMost = $true",
+    "$owner.ShowInTaskbar = $false",
+    "$owner.StartPosition = 'CenterScreen'",
+    "$owner.Size = New-Object System.Drawing.Size(1, 1)",
+    "$owner.Opacity = 0",
+    "$owner.Show()",
+    "$owner.Activate()",
+    `$dialog = New-Object ${dialogClass}`,
+    "$dialog.Filter = 'Text files (*.txt)|*.txt|All files (*.*)|*.*'",
+    "$dialog.CheckPathExists = $true",
+    `$dialog.InitialDirectory = ${powershellString(initialDirectory)}`,
+    ...dialogOptions,
+    "$result = $dialog.ShowDialog($owner)",
+    "$owner.Close()",
+    "$owner.Dispose()",
+    "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Write($dialog.FileName) }"
+  ].join("; ");
+}
+
+async function chooseTextFileToOpen() {
+  const initialDirectory = existingDirectory(readTextFileLink() || EXPORT_FILE);
+  const command = windowsFileDialogCommand("open", initialDirectory);
+  return runPowerShell(command);
+}
+
+async function chooseTextFileToSave(suggestedName) {
+  const linkedPath = readTextFileLink();
+  const initialDirectory = existingDirectory(linkedPath || EXPORT_FILE);
+  const initialFileName = path.basename(linkedPath || suggestedName || EXPORT_FILE);
+  const command = windowsFileDialogCommand("save", initialDirectory, initialFileName);
+  return runPowerShell(command);
+}
+
+function openFileLocation(filePath) {
+  const targetPath = path.resolve(filePath);
+  const targetExists = fs.existsSync(targetPath);
+  const isFile = targetExists && fs.statSync(targetPath).isFile();
+  const directoryPath = isFile ? path.dirname(targetPath) : targetPath;
+
+  let command = "";
+  let args = [];
+
+  if (process.platform === "win32") {
+    command = "explorer.exe";
+    args = isFile ? [`/select,${targetPath}`] : [directoryPath];
+  } else if (process.platform === "darwin") {
+    command = "open";
+    args = isFile ? ["-R", targetPath] : [directoryPath];
+  } else {
+    command = "xdg-open";
+    args = [directoryPath];
+  }
+
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      detached: true,
+      stdio: "ignore"
+    });
+
+    child.once("error", reject);
+    child.once("spawn", () => {
+      child.unref();
+      resolve({ filePath: targetPath, directoryPath, command, args });
+    });
+  });
+}
+
 async function handleApi(req, res, pathname) {
+  if (req.method === "GET" && pathname === "/api/server-info") {
+    sendJson(res, 200, {
+      ok: true,
+      build: SERVER_BUILD
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/ping") {
+    markClientActive();
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
   if (req.method === "GET" && pathname === "/api/state") {
+    markClientActive();
     const state = readState();
+    const linkedTextPath = readTextFileLink();
     sendJson(res, 200, {
       state,
       exportPath: EXPORT_FILE,
-      statePath: STATE_FILE
+      statePath: STATE_FILE,
+      linkedTextPath,
+      linkedTextFileName: linkedTextPath ? path.basename(linkedTextPath) : null
     });
     return;
   }
 
   if (req.method === "PUT" && pathname === "/api/state") {
+    markClientActive();
     const body = await readBody(req);
-    const nextState = JSON.parse(body || "{}");
-    const state = writeAll(nextState);
+    const payload = parseStatePayload(body);
+    const state = writeAll(payload.state);
+    const linkedTextPath = readTextFileLink();
     sendJson(res, 200, {
       ok: true,
       state,
       exportPath: EXPORT_FILE,
-      statePath: STATE_FILE
+      statePath: STATE_FILE,
+      linkedTextPath,
+      linkedTextFileName: linkedTextPath ? path.basename(linkedTextPath) : null
     });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/close") {
+    markClientActive();
     const body = await readBody(req);
     if (body) {
-      writeAll(JSON.parse(body));
+      const payload = parseStatePayload(body);
+      writeAll(payload.state);
     } else {
       writeAll(readState());
     }
@@ -325,6 +605,74 @@ async function handleApi(req, res, pathname) {
       "content-length": Buffer.byteLength(body)
     });
     res.end(body);
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/open-text-file") {
+    markClientActive();
+    const filePath = await chooseTextFileToOpen();
+    if (!filePath) {
+      sendJson(res, 200, { ok: false, cancelled: true });
+      return;
+    }
+
+    writeTextFileLink(filePath);
+    sendJson(res, 200, {
+      ok: true,
+      filePath,
+      fileName: path.basename(filePath),
+      text: fs.readFileSync(filePath, "utf8"),
+      storedState: readTextFileState(filePath)
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/save-as-text-file") {
+    markClientActive();
+    const body = await readBody(req);
+    const payload = parseStatePayload(body);
+    const normalized = normalizeState(payload.state, { touch: true });
+    const filePath = await chooseTextFileToSave(payload.fileName);
+    if (!filePath) {
+      sendJson(res, 200, { ok: false, cancelled: true });
+      return;
+    }
+
+    writeTextFileLink(filePath);
+    const state = writeAll(normalized);
+    sendJson(res, 200, {
+      ok: true,
+      state,
+      filePath,
+      fileName: path.basename(filePath),
+      exportPath: EXPORT_FILE,
+      statePath: STATE_FILE
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/cache-text-file-state") {
+    markClientActive();
+    const body = await readBody(req);
+    const payload = body ? JSON.parse(body) : {};
+    if (payload.filePath && payload.state) writeTextFileState(payload.filePath, payload.state);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/clear-text-file-link") {
+    markClientActive();
+    writeTextFileLink(null);
+    sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/open-file-location") {
+    const body = await readBody(req);
+    const payload = body ? JSON.parse(body) : {};
+    readState();
+    const location = await openFileLocation(currentTextFilePath(payload.fileName));
+    sendJson(res, 200, { ok: true, ...location });
     return;
   }
 
@@ -349,7 +697,8 @@ const server = http.createServer(async (req, res) => {
 
     const ext = path.extname(filePath);
     res.writeHead(200, {
-      "content-type": mimeTypes[ext] || "application/octet-stream"
+      "content-type": mimeTypes[ext] || "application/octet-stream",
+      "cache-control": "no-store"
     });
     fs.createReadStream(filePath).pipe(res);
   } catch (error) {
@@ -376,7 +725,13 @@ process.on("SIGTERM", () => {
 });
 
 readState();
+const serverStartedAt = Date.now();
 server.listen(PORT, () => {
   console.log(`Draft Diff Editor running at http://localhost:${PORT}`);
   console.log(`Companion text file: ${EXPORT_FILE}`);
+
+  if (AUTO_EXIT_ON_IDLE) {
+    const timer = setInterval(() => maybeExitWhenIdle(serverStartedAt), 5_000);
+    timer.unref();
+  }
 });

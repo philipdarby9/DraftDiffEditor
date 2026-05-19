@@ -6,6 +6,7 @@ const els = {
   viewMenu: document.querySelector("#view-menu"),
   fileNew: document.querySelector("#file-new"),
   fileOpen: document.querySelector("#file-open"),
+  fileOpenLocation: document.querySelector("#file-open-location"),
   fileSaveAs: document.querySelector("#file-save-as"),
   editUndo: document.querySelector("#edit-undo"),
   editRedo: document.querySelector("#edit-redo"),
@@ -32,6 +33,7 @@ const NOTES_COLLAPSED_STORAGE_KEY = "draftDiff.collapsedNotesIds";
 const NOTES_SIZE_STORAGE_KEY = "draftDiff.notesPanePercents";
 const PAGES_ON_SCREEN_STORAGE_KEY = "draftDiff.pagesOnScreen";
 const FILE_VIEW_STATES_STORAGE_KEY = "draftDiff.fileViewStates";
+const PROJECT_STATE_CACHE_STORAGE_KEY = "draftDiff.projectStatesByPath";
 const DEFAULT_PAGES_ON_SCREEN = 2;
 const HISTORY_LIMIT = 100;
 const FORMAT_DEFAULT_VERSION = 2;
@@ -46,8 +48,9 @@ let showChanges = false;
 let exportPath = "";
 let activeEditorKey = STORY_KEY;
 let projectFileName = "draft-history.txt";
-let projectFileHandle = null;
-let projectFileWritesEnabled = false;
+let linkedTextPath = "";
+let stateRevision = 0;
+let saveQueued = false;
 
 let fileViewStates = readStoredFileViewStates();
 let displayedPageKeys = new Set();
@@ -85,6 +88,7 @@ const allowedFontSizes = new Set(FONT_SIZE_OPTIONS);
 const MENU_SHORTCUT_LABELS = {
   new: { mac: "⌘N", default: "Ctrl+N" },
   open: { mac: "⌘O", default: "Ctrl+O" },
+  openLocation: { mac: "⌘⌥O", default: "Ctrl+Alt+O" },
   saveAs: { mac: "⌘⇧S", default: "Ctrl+Shift+S" },
   undo: { mac: "⌘Z", default: "Ctrl+Z" },
   redo: { mac: "⌘⇧Z", default: "Ctrl+Y" },
@@ -116,6 +120,10 @@ function nowIso() {
   return new Date().toISOString();
 }
 
+function pingServer() {
+  fetch("/api/ping", { method: "POST", keepalive: true }).catch(() => {});
+}
+
 function isMacPlatform() {
   const platform = navigator.userAgentData?.platform || navigator.platform || "";
   return /mac|iphone|ipad|ipod/i.test(platform);
@@ -137,10 +145,21 @@ function hasPlatformShortcutModifier(event) {
 }
 
 function handleGlobalShortcut(event) {
-  if (event.defaultPrevented || event.altKey || event.isComposing) return false;
-  if (!hasPlatformShortcutModifier(event)) return false;
+  if (event.defaultPrevented || event.isComposing) return false;
 
   const key = event.key.toLowerCase();
+  const isOpenLocationShortcut = isMacPlatform()
+    ? event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey && key === "o"
+    : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey && key === "o";
+
+  if (isOpenLocationShortcut) {
+    event.preventDefault();
+    openFileLocation();
+    return true;
+  }
+
+  if (event.altKey) return false;
+  if (!hasPlatformShortcutModifier(event)) return false;
 
   if (!event.shiftKey && key === "z") {
     event.preventDefault();
@@ -402,6 +421,74 @@ function ensureTxtExtension(fileName) {
   return /\.txt$/i.test(trimmed) ? trimmed : `${trimmed}.txt`;
 }
 
+function filePathsMatch(a, b) {
+  const normalizePath = value => String(value || "").replace(/\//g, "\\").toLowerCase();
+  return Boolean(a && b && normalizePath(a) === normalizePath(b));
+}
+
+function textFileStateCacheKey(filePath) {
+  return String(filePath || "").replace(/\//g, "\\").toLowerCase();
+}
+
+function readProjectStateCache() {
+  try {
+    const parsed = JSON.parse(window.localStorage.getItem(PROJECT_STATE_CACHE_STORAGE_KEY) || "{}");
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function writeProjectStateCache(cache) {
+  try {
+    window.localStorage.setItem(PROJECT_STATE_CACHE_STORAGE_KEY, JSON.stringify(cache));
+  } catch {}
+}
+
+function cachedProjectStateForPath(filePath) {
+  const entry = readProjectStateCache()[textFileStateCacheKey(filePath)];
+  if (!entry?.state) return null;
+
+  return migrateLegacyDefaultFonts(entry.state);
+}
+
+function rememberProjectStateForPath(filePath, projectState = state) {
+  if (!filePath || !projectState) return;
+
+  const cache = readProjectStateCache();
+  cache[textFileStateCacheKey(filePath)] = {
+    filePath,
+    updatedAt: nowIso(),
+    state: projectStateFromSnapshot(serializeProjectState(projectState))
+  };
+
+  const entries = Object.entries(cache)
+    .sort(([, left], [, right]) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")))
+    .slice(0, 25);
+  writeProjectStateCache(Object.fromEntries(entries));
+}
+
+function rememberLinkedProjectState() {
+  rememberProjectStateForPath(linkedTextPath);
+}
+
+async function cacheLinkedProjectStateOnServer() {
+  if (!linkedTextPath || !state) return;
+
+  try {
+    await fetch("/api/cache-text-file-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        filePath: linkedTextPath,
+        state
+      })
+    });
+  } catch {
+    // The local browser cache still preserves formats if this best-effort cache write fails.
+  }
+}
+
 function updateProjectTitle() {
   const title = projectFileName || fileNameFromPath(exportPath) || "draft-history.txt";
   projectFileName = title;
@@ -482,6 +569,15 @@ function serializeProjectState(projectState = state) {
 
 function projectStateFromSnapshot(snapshot) {
   return migrateLegacyDefaultFonts(JSON.parse(snapshot));
+}
+
+function markStateChanged() {
+  stateRevision += 1;
+}
+
+function queueSave(delay = 450) {
+  window.clearTimeout(saveTimer);
+  saveTimer = window.setTimeout(saveNow, delay);
 }
 
 function updateUndoRedoControls() {
@@ -1189,20 +1285,24 @@ function parseExportBlock(block) {
   };
 }
 
-function pageFromImportedBlock(block, fallbackTitle) {
+function preservedFormat(previousPage) {
+  return previousPage?.format ? { ...normalizeFormat(previousPage.format) } : { ...DEFAULT_FORMAT };
+}
+
+function pageFromImportedBlock(block, fallbackTitle, previousPage = null) {
   const title = block?.title || fallbackTitle;
   const content = block?.content || "";
   return {
-    id: makeId("page"),
+    id: previousPage?.id || makeId("page"),
     title,
     createdAt: block?.createdAt || nowIso(),
     content,
     contentHtml: textToHtml(content),
-    format: { ...DEFAULT_FORMAT }
+    format: preservedFormat(previousPage)
   };
 }
 
-function stateFromExportText(text) {
+function stateFromExportText(text, previousState = null) {
   const blocks = String(text || "")
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -1237,13 +1337,14 @@ function stateFromExportText(text) {
     }
 
     const draftNumber = drafts.length + 1;
-    const draft = pageFromImportedBlock(draftBlock, `Draft ${draftNumber}`);
-    const notes = pageFromImportedBlock(notesBlock, `${draft.title} Notes`);
-    notes.id = makeId("notes");
+    const previousDraft = previousState?.drafts?.[draftNumber - 1] || null;
+    const draft = pageFromImportedBlock(draftBlock, `Draft ${draftNumber}`, previousDraft);
+    const notes = pageFromImportedBlock(notesBlock, `${draft.title} Notes`, previousDraft?.notes);
+    notes.id = previousDraft?.notes?.id || makeId("notes");
     notes.title = `${draft.title} Notes`;
     drafts.push({
       ...draft,
-      id: makeId("draft"),
+      id: previousDraft?.id || makeId("draft"),
       notes
     });
   }
@@ -1256,7 +1357,7 @@ function stateFromExportText(text) {
     createdAt,
     updatedAt: nowIso(),
     initialNotes: {
-      ...pageFromImportedBlock(storyBlock, PROJECT_NOTES_TITLE),
+      ...pageFromImportedBlock(storyBlock, PROJECT_NOTES_TITLE, previousState?.initialNotes),
       id: "initial-notes",
       title: PROJECT_NOTES_TITLE
     },
@@ -2087,13 +2188,14 @@ function syncFromInputs() {
 }
 
 function scheduleSave() {
+  markStateChanged();
   syncFromInputs();
+  rememberLinkedProjectState();
   renderDraftTabs();
   refreshRenderedPageLabels();
   renderDiff();
   setStatus(isSaving ? "Saving..." : "Unsaved changes");
-  window.clearTimeout(saveTimer);
-  saveTimer = window.setTimeout(saveNow, 450);
+  queueSave();
 }
 
 function resetViewStateForProject() {
@@ -2109,50 +2211,6 @@ function resetViewStateForProject() {
   els.compareMode.value = "first";
   saveCurrentViewState();
   setPagesOnScreen(pagesOnScreen);
-}
-
-async function requestWriteAccess(handle) {
-  if (!handle?.queryPermission || !handle?.requestPermission) return true;
-
-  try {
-    const options = { mode: "readwrite" };
-    if (await handle.queryPermission(options) === "granted") return true;
-    return await handle.requestPermission(options) === "granted";
-  } catch {
-    return false;
-  }
-}
-
-async function writeSelectedTextFile() {
-  if (!projectFileHandle) return true;
-
-  if (!projectFileWritesEnabled) {
-    projectFileWritesEnabled = await requestWriteAccess(projectFileHandle);
-    if (!projectFileWritesEnabled) return false;
-  }
-
-  try {
-    const writable = await projectFileHandle.createWritable();
-    await writable.write(formatExportText(state));
-    await writable.close();
-    return true;
-  } catch (error) {
-    console.error(error);
-    projectFileWritesEnabled = false;
-    return false;
-  }
-}
-
-function pickerTextFileOptions() {
-  return {
-    types: [
-      {
-        description: "Draft Diff text files",
-        accept: { "text/plain": [".txt"] }
-      }
-    ],
-    excludeAcceptAllOption: false
-  };
 }
 
 function isAbortError(error) {
@@ -2171,54 +2229,78 @@ function downloadExportText(fileName) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
-async function applyTextProject(text, fileName, handle) {
-  state = stateFromExportText(text);
+async function applyTextProject(text, fileName, options = {}) {
+  state = stateFromExportText(text, options.preserveFormatsFrom || null);
+  markStateChanged();
+  saveQueued = false;
   editorSelections = {};
   projectFileName = fileName || "draft-history.txt";
-  projectFileHandle = handle || null;
-  projectFileWritesEnabled = false;
   updateProjectTitle();
   restoreViewStateForProject();
   render();
-  await saveNow({ writeSelectedFile: false });
+  const savedToLinkedFile = await saveNow();
   resetHistory();
-  setStatus(projectFileHandle ? "Opened; edits will ask to sync file" : "Opened; saved companion");
+  setStatus(savedToLinkedFile ? `Opened ${projectFileName}; autosave linked` : "Opened; saved companion");
   focusPageEditor(STORY_KEY);
 }
 
-async function saveAsTextProject() {
-  if (!state) return;
-  closeFileMenu();
-  syncFromInputs();
+async function clearLinkedTextFile() {
+  linkedTextPath = "";
 
   try {
-    if ("showSaveFilePicker" in window) {
-      const handle = await window.showSaveFilePicker({
-        suggestedName: ensureTxtExtension(projectFileName || fileNameFromPath(exportPath)),
-        ...pickerTextFileOptions()
-      });
-      projectFileName = handle.name || ensureTxtExtension(projectFileName);
-      projectFileHandle = handle;
-      projectFileWritesEnabled = await requestWriteAccess(handle);
-      updateProjectTitle();
-      const saved = await saveNow();
-      setStatus(saved ? `Saved as ${projectFileName}` : "Save as blocked");
-      return;
+    await fetch("/api/clear-text-file-link", { method: "POST" });
+  } catch {
+    // The fallback file input cannot provide a real disk path, so local autosave is disabled.
+  }
+}
+
+async function saveAsTextProject(stateOverride = null, suggestedFileName = null) {
+  if (!state && !stateOverride) return false;
+  closeFileMenu();
+  if (!stateOverride) syncFromInputs();
+
+  const stateToSave = stateOverride || state;
+  const fileNameToSuggest = ensureTxtExtension(
+    suggestedFileName || projectFileName || fileNameFromPath(exportPath)
+  );
+
+  try {
+    setStatus("Choose a save location...");
+    const response = await fetch("/api/save-as-text-file", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        state: stateToSave,
+        fileName: fileNameToSuggest
+      })
+    });
+
+    if (!response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      throw new Error(payload.error || "Save as failed.");
     }
 
-    const fileName = window.prompt("Save as", ensureTxtExtension(projectFileName));
-    if (!fileName) return;
-    projectFileName = ensureTxtExtension(fileName);
-    projectFileHandle = null;
-    projectFileWritesEnabled = false;
+    const payload = await response.json();
+    if (payload.cancelled) {
+      setStatus("Save as cancelled");
+      return false;
+    }
+
+    state = payload.state;
+    markStateChanged();
+    saveQueued = false;
+    exportPath = payload.exportPath || exportPath;
+    projectFileName = payload.fileName || projectFileName;
+    linkedTextPath = payload.filePath || linkedTextPath || "";
+    rememberLinkedProjectState();
     updateProjectTitle();
-    downloadExportText(projectFileName);
-    await saveNow({ writeSelectedFile: false });
-    setStatus("Downloaded copy; saved companion");
+    setStatus(`Saved as ${projectFileName}`);
+    return true;
   } catch (error) {
-    if (isAbortError(error)) return;
+    if (isAbortError(error)) return false;
     console.error(error);
     setStatus("Save as failed");
+    return false;
   }
 }
 
@@ -2226,28 +2308,13 @@ async function newTextProject() {
   closeFileMenu();
 
   try {
-    let handle = null;
-    let fileName = "draft-history.txt";
-    let canWrite = false;
+    const nextState = createDefaultState();
+    const saved = await saveAsTextProject(nextState, "draft-history.txt");
+    if (!saved) return;
 
-    if ("showSaveFilePicker" in window) {
-      handle = await window.showSaveFilePicker({
-        suggestedName: "draft-history.txt",
-        ...pickerTextFileOptions()
-      });
-      fileName = handle.name || fileName;
-      canWrite = await requestWriteAccess(handle);
-    }
-
-    state = createDefaultState();
     editorSelections = {};
-    projectFileName = fileName;
-    projectFileHandle = handle;
-    projectFileWritesEnabled = Boolean(handle && canWrite);
-    updateProjectTitle();
     resetViewStateForProject();
     render();
-    await saveNow();
     resetHistory();
     focusPageEditor(STORY_KEY);
   } catch (error) {
@@ -2261,13 +2328,26 @@ async function openTextProject() {
   closeFileMenu();
 
   try {
-    if ("showOpenFilePicker" in window) {
-      const [handle] = await window.showOpenFilePicker({
-        multiple: false,
-        ...pickerTextFileOptions()
+    if (state) {
+      syncFromInputs();
+      rememberLinkedProjectState();
+      await cacheLinkedProjectStateOnServer();
+      window.clearTimeout(saveTimer);
+      await saveNow();
+    }
+
+    const previousLinkedTextPath = linkedTextPath;
+    const previousState = state ? projectStateFromSnapshot(serializeProjectState()) : null;
+    const response = await fetch("/api/open-text-file", { method: "POST" });
+    if (response.ok) {
+      const payload = await response.json();
+      if (payload.cancelled) return;
+
+      linkedTextPath = payload.filePath || "";
+      const storedState = cachedProjectStateForPath(linkedTextPath) || payload.storedState;
+      await applyTextProject(payload.text || "", payload.fileName || "draft-history.txt", {
+        preserveFormatsFrom: storedState || (filePathsMatch(previousLinkedTextPath, linkedTextPath) ? previousState : null)
       });
-      const file = await handle.getFile();
-      await applyTextProject(await file.text(), file.name, handle);
       return;
     }
 
@@ -2279,9 +2359,39 @@ async function openTextProject() {
   }
 }
 
-async function saveNow(options = {}) {
+async function openFileLocation() {
+  closeFileMenu();
+
+  try {
+    if (state) await saveNow();
+
+    const response = await fetch("/api/open-file-location", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ fileName: projectFileName })
+    });
+    if (!response.ok) throw new Error("Open file location failed");
+    const location = await response.json();
+
+    setStatus(location.directoryPath ? `Opened ${location.directoryPath}` : "Opened file location");
+  } catch (error) {
+    console.error(error);
+    setStatus("Open file location failed");
+  }
+}
+
+async function saveNow() {
   if (!state) return false;
+
+  if (isSaving) {
+    saveQueued = true;
+    setStatus("Saving...");
+    return false;
+  }
+
   syncFromInputs();
+  rememberLinkedProjectState();
+  const requestRevision = stateRevision;
   isSaving = true;
   setStatus("Saving...");
 
@@ -2299,20 +2409,29 @@ async function saveNow(options = {}) {
     }
 
     const payload = await response.json();
-    state = payload.state;
+    const responseMatchesCurrentState = requestRevision === stateRevision;
+    if (responseMatchesCurrentState) state = payload.state;
+
     exportPath = payload.exportPath || exportPath;
-    const wroteSelectedFile = options.writeSelectedFile === false
-      ? true
-      : await writeSelectedTextFile();
+    linkedTextPath = payload.linkedTextPath || linkedTextPath || "";
+    if (payload.linkedTextFileName) projectFileName = payload.linkedTextFileName;
     isSaving = false;
+
+    if (!responseMatchesCurrentState || saveQueued) {
+      saveQueued = false;
+      setStatus("Unsaved changes");
+      queueSave(0);
+      return Boolean(linkedTextPath);
+    }
+
     ensureDisplaySelection();
-    if (!projectFileHandle && exportPath && projectFileName === "draft-history.txt") {
+    if (!linkedTextPath && exportPath && projectFileName === "draft-history.txt") {
       projectFileName = fileNameFromPath(exportPath) || projectFileName;
     }
     updateProjectTitle();
-    setStatus(wroteSelectedFile ? `Saved ${formatDate(state.updatedAt)}` : "Saved companion; file write blocked");
+    setStatus(linkedTextPath ? `Saved ${formatDate(state.updatedAt)}` : "Saved companion; no text file linked");
     renderDraftTabs();
-    return wroteSelectedFile;
+    return Boolean(linkedTextPath);
   } catch (error) {
     console.error(error);
     setStatus("Save failed");
@@ -2325,14 +2444,15 @@ async function loadState() {
   const response = await fetch("/api/state");
   const payload = await response.json();
   state = migrateLegacyDefaultFonts(payload.state);
+  stateRevision = 0;
+  saveQueued = false;
   editorSelections = {};
   exportPath = payload.exportPath || "";
-  projectFileName = fileNameFromPath(exportPath) || projectFileName;
-  projectFileHandle = null;
-  projectFileWritesEnabled = false;
+  linkedTextPath = payload.linkedTextPath || "";
+  projectFileName = payload.linkedTextFileName || fileNameFromPath(exportPath) || projectFileName;
   updateProjectTitle();
   restoreViewStateForProject();
-  setStatus(`Saved ${formatDate(state.updatedAt)}`);
+  setStatus(linkedTextPath ? `Saved ${formatDate(state.updatedAt)}` : "Saved companion; no text file linked");
   render();
   resetHistory();
 }
@@ -2603,7 +2723,8 @@ function resizeNotesPane(draftId, clientY) {
 
 els.fileNew.addEventListener("click", newTextProject);
 els.fileOpen.addEventListener("click", openTextProject);
-els.fileSaveAs.addEventListener("click", saveAsTextProject);
+els.fileOpenLocation.addEventListener("click", openFileLocation);
+els.fileSaveAs.addEventListener("click", () => saveAsTextProject());
 els.editUndo.addEventListener("click", () => {
   undoProjectChange();
   closeTopMenus();
@@ -2619,7 +2740,8 @@ els.fileOpenInput.addEventListener("change", async event => {
   if (!file) return;
 
   try {
-    await applyTextProject(await file.text(), file.name, null);
+    await clearLinkedTextFile();
+    await applyTextProject(await file.text(), file.name);
   } catch (error) {
     console.error(error);
     setStatus("Open failed");
@@ -2921,6 +3043,8 @@ window.addEventListener("beforeunload", () => {
 });
 
 updateMenuShortcutLabels();
+pingServer();
+window.setInterval(pingServer, 5_000);
 
 loadState().catch(error => {
   console.error(error);
