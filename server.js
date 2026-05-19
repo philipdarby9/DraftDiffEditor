@@ -10,6 +10,8 @@ const STATE_FILE = path.join(DATA_DIR, "project.json");
 const EXPORT_FILE = path.join(DATA_DIR, "draft-history.txt");
 const PORT = Number(process.env.PORT || 4173);
 const PROJECT_NOTES_TITLE = "Project notes";
+const FORMAT_DEFAULT_VERSION = 2;
+const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -33,11 +35,12 @@ function asText(value) {
 }
 
 const DEFAULT_FORMAT = {
-  fontFamily: "Segoe UI",
+  fontFamily: "Consolas",
   fontSize: "16"
 };
 
 const allowedFontFamilies = new Set([
+  "Consolas",
   "Segoe UI",
   "Arial",
   "Calibri",
@@ -86,7 +89,14 @@ function normalizeFormat(format) {
   return { fontFamily, fontSize };
 }
 
-function normalizePage(page, fallback) {
+function upgradeLegacyDefaultFormat(format, shouldUpgrade) {
+  const normalized = normalizeFormat(format);
+  return shouldUpgrade && normalized.fontFamily === LEGACY_DEFAULT_FONT_FAMILY
+    ? { ...normalized, fontFamily: DEFAULT_FORMAT.fontFamily }
+    : normalized;
+}
+
+function normalizePage(page, fallback, options = {}) {
   const content = asText(page?.content) || htmlToText(page?.contentHtml);
   return {
     id: page?.id || fallback.id,
@@ -94,7 +104,7 @@ function normalizePage(page, fallback) {
     createdAt: page?.createdAt || fallback.createdAt,
     content,
     contentHtml: asText(page?.contentHtml) || textToHtml(content),
-    format: normalizeFormat(page?.format)
+    format: upgradeLegacyDefaultFormat(page?.format, options.upgradeLegacyDefaultFont)
   };
 }
 
@@ -122,6 +132,7 @@ function defaultState() {
   const createdAt = nowIso();
   return {
     version: 1,
+    formatDefaultVersion: FORMAT_DEFAULT_VERSION,
     createdAt,
     updatedAt: createdAt,
     initialNotes: {
@@ -141,9 +152,11 @@ function normalizeState(input, options = {}) {
   const raw = input && typeof input === "object" ? input : fallback;
   const createdAt = raw.createdAt || fallback.createdAt;
   const drafts = Array.isArray(raw.drafts) && raw.drafts.length ? raw.drafts : fallback.drafts;
+  const upgradeLegacyDefaultFont = raw.formatDefaultVersion !== FORMAT_DEFAULT_VERSION;
 
   return {
     version: 1,
+    formatDefaultVersion: FORMAT_DEFAULT_VERSION,
     createdAt,
     updatedAt: options.touch ? nowIso() : raw.updatedAt || createdAt,
     initialNotes: normalizePage(raw.initialNotes, {
@@ -151,7 +164,7 @@ function normalizeState(input, options = {}) {
       title: raw.initialNotes?.title || PROJECT_NOTES_TITLE,
       createdAt: raw.initialNotes?.createdAt || createdAt,
       content: ""
-    }),
+    }, { upgradeLegacyDefaultFont }),
     drafts: drafts.map((draft, index) => {
       const draftNumber = index + 1;
       const draftCreatedAt = draft?.createdAt || nowIso();
@@ -160,7 +173,7 @@ function normalizeState(input, options = {}) {
         title: draft?.title || `Draft ${draftNumber}`,
         createdAt: draftCreatedAt,
         content: ""
-      });
+      }, { upgradeLegacyDefaultFont });
       return {
         ...normalizedDraft,
         notes: normalizePage(draft?.notes, {
@@ -168,7 +181,7 @@ function normalizeState(input, options = {}) {
           title: draft?.notes?.title || `Draft ${draftNumber} Notes`,
           createdAt: draft?.notes?.createdAt || draftCreatedAt,
           content: ""
-        })
+        }, { upgradeLegacyDefaultFont })
       };
     })
   };

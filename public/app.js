@@ -2,10 +2,13 @@ const els = {
   saveStatus: document.querySelector("#save-status"),
   projectTitle: document.querySelector("#project-title"),
   fileMenu: document.querySelector("#file-menu"),
+  editMenu: document.querySelector("#edit-menu"),
   viewMenu: document.querySelector("#view-menu"),
   fileNew: document.querySelector("#file-new"),
   fileOpen: document.querySelector("#file-open"),
   fileSaveAs: document.querySelector("#file-save-as"),
+  editUndo: document.querySelector("#edit-undo"),
+  editRedo: document.querySelector("#edit-redo"),
   fileOpenInput: document.querySelector("#file-open-input"),
   storyTab: document.querySelector("#story-tab"),
   storyDisplayToggle: document.querySelector("#story-display-toggle"),
@@ -16,7 +19,6 @@ const els = {
   toggleChanges: document.querySelector("#toggle-changes"),
   compareMode: document.querySelector("#compare-mode"),
   pagesOnScreen: document.querySelector("#pages-on-screen"),
-  compareSelector: document.querySelector("#compare-selector"),
   compareSubtitle: document.querySelector("#compare-subtitle"),
   diffOutput: document.querySelector("#diff-output"),
   editorSurface: document.querySelector("#editor-surface"),
@@ -31,6 +33,9 @@ const NOTES_SIZE_STORAGE_KEY = "draftDiff.notesPanePercents";
 const PAGES_ON_SCREEN_STORAGE_KEY = "draftDiff.pagesOnScreen";
 const FILE_VIEW_STATES_STORAGE_KEY = "draftDiff.fileViewStates";
 const DEFAULT_PAGES_ON_SCREEN = 2;
+const HISTORY_LIMIT = 100;
+const FORMAT_DEFAULT_VERSION = 2;
+const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
 
 let state = null;
 let selectedDraftId = null;
@@ -39,7 +44,6 @@ let saveTimer = null;
 let isSaving = false;
 let showChanges = false;
 let exportPath = "";
-let compareSelectedIds = new Set();
 let activeEditorKey = STORY_KEY;
 let projectFileName = "draft-history.txt";
 let projectFileHandle = null;
@@ -53,13 +57,18 @@ let notesPanePercents = {};
 let pagesOnScreen = DEFAULT_PAGES_ON_SCREEN;
 let resizingDraftId = null;
 let compareHighlightTimer = null;
+let editorSelections = {};
+let undoStack = [];
+let redoStack = [];
+let isRestoringHistory = false;
 
 const DEFAULT_FORMAT = {
-  fontFamily: "Segoe UI",
+  fontFamily: "Consolas",
   fontSize: "16"
 };
 
 const FONT_FAMILY_OPTIONS = [
+  "Consolas",
   "Segoe UI",
   "Arial",
   "Calibri",
@@ -77,6 +86,8 @@ const MENU_SHORTCUT_LABELS = {
   new: { mac: "⌘N", default: "Ctrl+N" },
   open: { mac: "⌘O", default: "Ctrl+O" },
   saveAs: { mac: "⌘⇧S", default: "Ctrl+Shift+S" },
+  undo: { mac: "⌘Z", default: "Ctrl+Z" },
+  redo: { mac: "⌘⇧Z", default: "Ctrl+Y" },
   pages1: { mac: "⌘1", default: "Ctrl+1" },
   pages2: { mac: "⌘2", default: "Ctrl+2" },
   pages3: { mac: "⌘3", default: "Ctrl+3" },
@@ -130,6 +141,20 @@ function handleGlobalShortcut(event) {
   if (!hasPlatformShortcutModifier(event)) return false;
 
   const key = event.key.toLowerCase();
+
+  if (!event.shiftKey && key === "z") {
+    event.preventDefault();
+    undoProjectChange();
+    closeTopMenus();
+    return true;
+  }
+
+  if ((!event.shiftKey && key === "y") || (event.shiftKey && key === "z")) {
+    event.preventDefault();
+    redoProjectChange();
+    closeTopMenus();
+    return true;
+  }
 
   if (!event.shiftKey && key === "n") {
     event.preventDefault();
@@ -352,6 +377,7 @@ function createDefaultState() {
   const createdAt = nowIso();
   return {
     version: 1,
+    formatDefaultVersion: FORMAT_DEFAULT_VERSION,
     createdAt,
     updatedAt: createdAt,
     initialNotes: {
@@ -388,7 +414,7 @@ function closeFileMenu() {
 }
 
 function closeTopMenus(exceptMenu = null) {
-  [els.fileMenu, els.viewMenu].forEach(menu => {
+  [els.fileMenu, els.editMenu, els.viewMenu].forEach(menu => {
     if (menu && menu !== exceptMenu) menu.open = false;
   });
 }
@@ -425,6 +451,139 @@ function normalizeFormat(format = {}) {
     ? String(format.fontSize)
     : DEFAULT_FORMAT.fontSize;
   return { fontFamily, fontSize };
+}
+
+function upgradeLegacyDefaultFormat(format = {}, shouldUpgrade = false) {
+  const normalized = normalizeFormat(format);
+  return shouldUpgrade && normalized.fontFamily === LEGACY_DEFAULT_FONT_FAMILY
+    ? { ...normalized, fontFamily: DEFAULT_FORMAT.fontFamily }
+    : normalized;
+}
+
+function migrateLegacyDefaultFonts(projectState) {
+  if (!projectState || projectState.formatDefaultVersion >= FORMAT_DEFAULT_VERSION) return projectState;
+
+  const upgradePage = page => {
+    if (page) page.format = upgradeLegacyDefaultFormat(page.format, true);
+  };
+
+  upgradePage(projectState.initialNotes);
+  projectState.drafts?.forEach(draft => {
+    upgradePage(draft);
+    upgradePage(draft.notes);
+  });
+  projectState.formatDefaultVersion = FORMAT_DEFAULT_VERSION;
+  return projectState;
+}
+
+function serializeProjectState(projectState = state) {
+  return projectState ? JSON.stringify(projectState) : "";
+}
+
+function projectStateFromSnapshot(snapshot) {
+  return migrateLegacyDefaultFonts(JSON.parse(snapshot));
+}
+
+function updateUndoRedoControls() {
+  if (els.editUndo) els.editUndo.disabled = !undoStack.length;
+  if (els.editRedo) els.editRedo.disabled = !redoStack.length;
+}
+
+function resetHistory() {
+  undoStack = [];
+  redoStack = [];
+  updateUndoRedoControls();
+}
+
+function recordUndoSnapshot() {
+  if (!state || isRestoringHistory) return;
+
+  const snapshot = serializeProjectState();
+  if (!snapshot || snapshot === undoStack[undoStack.length - 1]) return;
+
+  undoStack.push(snapshot);
+  if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+  redoStack = [];
+  updateUndoRedoControls();
+}
+
+function draftExists(draftId) {
+  return Boolean(draftId && state?.drafts?.some(draft => draft.id === draftId));
+}
+
+function pageKeyExists(pageKey) {
+  if (pageKey === STORY_KEY) return true;
+  const parsed = parseDraftPageKey(pageKey);
+  return Boolean(parsed?.draftId && draftExists(parsed.draftId));
+}
+
+function reconcileViewAfterHistoryRestore() {
+  if (!state?.drafts?.length) state.drafts = [createDraft(null, 1)];
+
+  if (!draftExists(selectedDraftId)) selectedDraftId = state.drafts[0]?.id || null;
+  if (!pageKeyExists(activeEditorKey)) {
+    activeEditorKey = activeArea === "story" ? STORY_KEY : draftContentKey(selectedDraftId);
+  }
+
+  const parsed = parseDraftPageKey(activeEditorKey);
+  if (activeEditorKey === STORY_KEY) {
+    activeArea = "story";
+  } else if (parsed?.draftId && draftExists(parsed.draftId)) {
+    selectedDraftId = parsed.draftId;
+    activeArea = "draft";
+  } else {
+    selectedDraftId = state.drafts[0]?.id || null;
+    activeArea = "draft";
+    activeEditorKey = draftContentKey(selectedDraftId);
+  }
+
+  ensureDisplaySelection();
+}
+
+function restoreHistorySnapshot(snapshot) {
+  isRestoringHistory = true;
+  state = projectStateFromSnapshot(snapshot);
+  editorSelections = {};
+  reconcileViewAfterHistoryRestore();
+  render();
+  scheduleSave();
+  updateUndoRedoControls();
+  focusPageEditor(activeEditorKey);
+  isRestoringHistory = false;
+}
+
+function undoProjectChange() {
+  if (!undoStack.length) {
+    updateUndoRedoControls();
+    return;
+  }
+
+  syncFromInputs();
+  const currentSnapshot = serializeProjectState();
+  const previousSnapshot = undoStack.pop();
+  if (currentSnapshot && currentSnapshot !== previousSnapshot) redoStack.push(currentSnapshot);
+  restoreHistorySnapshot(previousSnapshot);
+}
+
+function redoProjectChange() {
+  if (!redoStack.length) {
+    updateUndoRedoControls();
+    return;
+  }
+
+  syncFromInputs();
+  const currentSnapshot = serializeProjectState();
+  const nextSnapshot = redoStack.pop();
+  if (currentSnapshot && currentSnapshot !== nextSnapshot) {
+    undoStack.push(currentSnapshot);
+    if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+  }
+  restoreHistorySnapshot(nextSnapshot);
+}
+
+function editableHistoryTarget(target) {
+  if (!(target instanceof Element)) return null;
+  return target.closest("[data-editor-key], [data-title-draft-id]");
 }
 
 function ensurePageFields(page) {
@@ -550,8 +709,7 @@ function saveCurrentViewState() {
     selectedDraftIndex: selectedDraftIndex >= 0 ? selectedDraftIndex : 0,
     activeArea,
     showChanges,
-    compareMode: els.compareMode.value,
-    compareSelectedDraftIndexes: selectedCompareIndexes()
+    compareMode: els.compareMode.value
   };
   saveFileViewStates();
 }
@@ -583,10 +741,6 @@ function restoreStoredViewState(stored) {
     els.compareMode.value = stored.compareMode;
   }
 
-  const storedCompareIds = draftIdsFromIndexes(stored?.compareSelectedDraftIndexes);
-  compareSelectedIds = storedCompareIds.length
-    ? new Set(storedCompareIds)
-    : new Set(state.drafts.map(draft => draft.id));
 }
 
 function restoreViewStateForProject(options = {}) {
@@ -679,6 +833,166 @@ function canDeleteDraft(draft) {
 function editorElementForKey(editorKey) {
   return Array.from(els.pageCanvas.querySelectorAll("[data-editor-key]"))
     .find(editor => editor.dataset.editorKey === editorKey);
+}
+
+function nodeOffsetLimit(node) {
+  return node.nodeType === Node.TEXT_NODE ? node.nodeValue.length : node.childNodes.length;
+}
+
+function nodePathFromRoot(root, node) {
+  const path = [];
+  let current = node;
+
+  while (current && current !== root) {
+    const parent = current.parentNode;
+    if (!parent) return null;
+    path.unshift(Array.prototype.indexOf.call(parent.childNodes, current));
+    current = parent;
+  }
+
+  return current === root ? path : null;
+}
+
+function nodeFromPath(root, path) {
+  if (!Array.isArray(path)) return null;
+  let current = root;
+
+  for (const index of path) {
+    current = current?.childNodes?.[index] || null;
+    if (!current) return null;
+  }
+
+  return current;
+}
+
+function textOffsetForRangeBoundary(root, container, offset) {
+  const range = document.createRange();
+  range.selectNodeContents(root);
+  range.setEnd(container, offset);
+  return range.toString().length;
+}
+
+function rangeBoundaryFromTextOffset(root, offset) {
+  const target = Math.max(0, Number(offset) || 0);
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+  let currentOffset = 0;
+  let lastTextNode = null;
+
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const nextOffset = currentOffset + node.nodeValue.length;
+    lastTextNode = node;
+
+    if (target <= nextOffset) {
+      return { node, offset: target - currentOffset };
+    }
+
+    currentOffset = nextOffset;
+  }
+
+  if (lastTextNode) {
+    return { node: lastTextNode, offset: lastTextNode.nodeValue.length };
+  }
+
+  return { node: root, offset: root.childNodes.length };
+}
+
+function rangeFromTextOffsets(root, startOffset, endOffset) {
+  const range = document.createRange();
+  const start = rangeBoundaryFromTextOffset(root, startOffset);
+  const end = rangeBoundaryFromTextOffset(root, Math.max(startOffset, endOffset));
+  range.setStart(start.node, start.offset);
+  range.setEnd(end.node, end.offset);
+  return range;
+}
+
+function saveEditorSelection(editorEl) {
+  if (!editorEl) return;
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return;
+
+  const range = selection.getRangeAt(0);
+  if (!editorEl.contains(range.startContainer) || !editorEl.contains(range.endContainer)) return;
+
+  editorSelections[editorEl.dataset.editorKey] = {
+    ...editorSelections[editorEl.dataset.editorKey],
+    startPath: nodePathFromRoot(editorEl, range.startContainer),
+    startOffset: range.startOffset,
+    endPath: nodePathFromRoot(editorEl, range.endContainer),
+    endOffset: range.endOffset,
+    startTextOffset: textOffsetForRangeBoundary(editorEl, range.startContainer, range.startOffset),
+    endTextOffset: textOffsetForRangeBoundary(editorEl, range.endContainer, range.endOffset)
+  };
+}
+
+function saveEditorScrollPosition(editorEl) {
+  if (!editorEl?.dataset.editorKey) return;
+  editorSelections[editorEl.dataset.editorKey] = {
+    ...editorSelections[editorEl.dataset.editorKey],
+    scrollTop: editorEl.scrollTop,
+    scrollLeft: editorEl.scrollLeft
+  };
+}
+
+function saveEditorViewState(editorEl) {
+  saveEditorScrollPosition(editorEl);
+  saveEditorSelection(editorEl);
+}
+
+function saveVisibleEditorScrollPositions() {
+  els.pageCanvas.querySelectorAll("[data-editor-key]").forEach(saveEditorScrollPosition);
+}
+
+function saveCurrentEditorSelection() {
+  const selection = window.getSelection();
+  const anchor = selection?.anchorNode;
+  const anchorElement = anchor?.nodeType === Node.ELEMENT_NODE ? anchor : anchor?.parentElement;
+  const editorEl = anchorElement?.closest?.("[data-editor-key]");
+  if (editorEl && els.pageCanvas.contains(editorEl)) saveEditorSelection(editorEl);
+}
+
+function saveCurrentEditorViewState() {
+  const selection = window.getSelection();
+  const anchor = selection?.anchorNode;
+  const anchorElement = anchor?.nodeType === Node.ELEMENT_NODE ? anchor : anchor?.parentElement;
+  const editorEl = anchorElement?.closest?.("[data-editor-key]");
+  if (editorEl && els.pageCanvas.contains(editorEl)) saveEditorViewState(editorEl);
+}
+
+function restoreEditorScrollPosition(editorEl) {
+  const saved = editorSelections[editorEl?.dataset.editorKey];
+  if (!editorEl || !saved) return;
+
+  editorEl.scrollTop = Math.max(0, Number(saved.scrollTop) || 0);
+  editorEl.scrollLeft = Math.max(0, Number(saved.scrollLeft) || 0);
+}
+
+function restoreEditorSelection(editorEl) {
+  const saved = editorSelections[editorEl?.dataset.editorKey];
+  if (!editorEl || !saved) return false;
+  if (saved.startTextOffset === undefined || saved.endTextOffset === undefined) return false;
+
+  const startNode = nodeFromPath(editorEl, saved.startPath);
+  const endNode = nodeFromPath(editorEl, saved.endPath);
+  let range = null;
+
+  if (
+    startNode &&
+    endNode &&
+    saved.startOffset <= nodeOffsetLimit(startNode) &&
+    saved.endOffset <= nodeOffsetLimit(endNode)
+  ) {
+    range = document.createRange();
+    range.setStart(startNode, saved.startOffset);
+    range.setEnd(endNode, saved.endOffset);
+  } else {
+    range = rangeFromTextOffsets(editorEl, saved.startTextOffset, saved.endTextOffset);
+  }
+
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
 }
 
 function displayElementForKey(pageKey) {
@@ -938,6 +1252,7 @@ function stateFromExportText(text) {
 
   return {
     version: 1,
+    formatDefaultVersion: FORMAT_DEFAULT_VERSION,
     createdAt,
     updatedAt: nowIso(),
     initialNotes: {
@@ -1169,23 +1484,14 @@ function draftIndexForId(draftId) {
   return state.drafts.findIndex(draft => draft.id === draftId);
 }
 
-function resetCompareSelection() {
-  compareSelectedIds = new Set(state.drafts.map(draft => draft.id));
-}
-
-function pruneCompareSelection() {
-  const draftIds = new Set(state.drafts.map(draft => draft.id));
-  compareSelectedIds = new Set([...compareSelectedIds].filter(id => draftIds.has(id)));
-}
-
 function renderDraftTabs() {
-  els.storyTab.classList.toggle("active", activeArea === "story");
-  els.storyDisplayToggle.checked = displayedPageKeys.has(STORY_KEY);
+  els.storyTab.classList.toggle("active", !showChanges && activeArea === "story");
+  els.storyDisplayToggle.checked = showChanges ? false : displayedPageKeys.has(STORY_KEY);
   els.storyDisplayToggle.disabled = showChanges;
+  els.storyDisplayToggle.setAttribute("aria-label", showChanges ? "Project notes are not compared" : "Display Project notes");
   els.draftTabs.innerHTML = state.drafts.map((draft, index) => {
     const active = draft.id === selectedDraftId && activeArea !== "story" ? " active" : "";
     const checked = displayedPageKeys.has(draftContentKey(draft.id)) ? " checked" : "";
-    const disabled = showChanges ? " disabled" : "";
     const draftNumber = String(index + 1);
     const deleteButton = canDeleteDraft(draft)
       ? `
@@ -1198,7 +1504,7 @@ function renderDraftTabs() {
       : "";
     return `
       <div class="page-tab draft-tab${active}" data-draft-tab-id="${draft.id}">
-        <input type="checkbox" data-display-draft-id="${draft.id}" aria-label="Display ${escapeHtml(draft.title)}"${checked}${disabled}>
+        <input type="checkbox" data-display-draft-id="${draft.id}" aria-label="${showChanges ? "Compare" : "Display"} ${escapeHtml(draft.title)}"${checked}>
         <button class="tab-label" type="button" data-draft-id="${draft.id}" aria-label="${escapeHtml(draft.title)}">
           <span class="tab-label-full">${escapeHtml(draft.title)}</span>
           <span class="tab-label-short" aria-hidden="true">${escapeHtml(draftNumber)}</span>
@@ -1422,6 +1728,8 @@ function hydrateVisibleEditors(items) {
     setEditorHtml(editorEl, item.page.contentHtml);
     applyEditorFormat(editorEl, item.page.format);
     syncToolbarValues(item.key);
+    restoreEditorScrollPosition(editorEl);
+    window.requestAnimationFrame(() => restoreEditorScrollPosition(editorEl));
   });
 }
 
@@ -1641,10 +1949,9 @@ function markedComparePageHtml(pair) {
 }
 
 function selectedCompareIndexes() {
-  return [...compareSelectedIds]
-    .map(draftIndexForId)
-    .filter(index => index >= 0)
-    .sort((a, b) => a - b);
+  return state.drafts
+    .map((draft, index) => displayedPageKeys.has(draftContentKey(draft.id)) ? index : null)
+    .filter(index => index !== null);
 }
 
 function beforeIndexForSelectedDraft(indexes, position) {
@@ -1720,41 +2027,6 @@ function jumpToComparedToken(sourceToken) {
   highlightCompareTarget(target);
 }
 
-function renderCompareSelector() {
-  pruneCompareSelection();
-
-  if (!state.drafts.length) {
-    els.compareSelector.classList.remove("compact-compare", "scrollable-compare");
-    els.compareSelector.innerHTML = `<p class="compare-selector-empty">No drafts yet.</p>`;
-    return;
-  }
-
-  els.compareSelector.innerHTML = [
-    `<span class="compare-selector-label">Drafts</span>`,
-    ...state.drafts.map((draft, index) => {
-    const checked = compareSelectedIds.has(draft.id) ? " checked" : "";
-    const draftNumber = String(index + 1);
-    return `
-      <label class="compare-choice">
-        <input type="checkbox" data-compare-draft-id="${draft.id}" aria-label="Compare ${escapeHtml(draft.title)}"${checked}>
-        <span class="compare-label-full">${escapeHtml(draft.title)}</span>
-        <span class="compare-label-short" aria-hidden="true">${escapeHtml(draftNumber)}</span>
-      </label>
-    `;
-    })
-  ].join("");
-  updateCompareSelectorDensity();
-}
-
-function updateCompareSelectorDensity() {
-  if (!els.compareSelector || !state || !els.compareSelector.clientWidth) return;
-
-  els.compareSelector.classList.remove("compact-compare", "scrollable-compare");
-  const needsCompactLabels = els.compareSelector.scrollWidth > els.compareSelector.clientWidth + 1;
-  els.compareSelector.classList.toggle("compact-compare", needsCompactLabels);
-  els.compareSelector.classList.toggle("scrollable-compare", els.compareSelector.scrollWidth > els.compareSelector.clientWidth + 1);
-}
-
 function renderDiff() {
   if (!showChanges) {
     els.diffOutput.innerHTML = "";
@@ -1762,7 +2034,6 @@ function renderDiff() {
     return;
   }
 
-  renderCompareSelector();
   const indexes = selectedCompareIndexes();
 
   const baseline = state.drafts[indexes[0]];
@@ -1788,16 +2059,19 @@ function renderChangesVisibility() {
 }
 
 function render() {
+  saveCurrentEditorViewState();
+  saveVisibleEditorScrollPositions();
   ensureDisplaySelection();
   renderDraftTabs();
   renderEditor();
-  renderCompareSelector();
   renderChangesVisibility();
   renderDiff();
 }
 
 function syncFromInputs() {
   if (!state) return;
+  saveCurrentEditorViewState();
+  saveVisibleEditorScrollPositions();
 
   els.pageCanvas.querySelectorAll("[data-title-draft-id]").forEach(input => {
     const draft = draftById(input.dataset.titleDraftId);
@@ -1833,7 +2107,6 @@ function resetViewStateForProject() {
   notesPanePercents = {};
   pagesOnScreen = DEFAULT_PAGES_ON_SCREEN;
   els.compareMode.value = "first";
-  resetCompareSelection();
   saveCurrentViewState();
   setPagesOnScreen(pagesOnScreen);
 }
@@ -1900,6 +2173,7 @@ function downloadExportText(fileName) {
 
 async function applyTextProject(text, fileName, handle) {
   state = stateFromExportText(text);
+  editorSelections = {};
   projectFileName = fileName || "draft-history.txt";
   projectFileHandle = handle || null;
   projectFileWritesEnabled = false;
@@ -1907,6 +2181,7 @@ async function applyTextProject(text, fileName, handle) {
   restoreViewStateForProject();
   render();
   await saveNow({ writeSelectedFile: false });
+  resetHistory();
   setStatus(projectFileHandle ? "Opened; edits will ask to sync file" : "Opened; saved companion");
   focusPageEditor(STORY_KEY);
 }
@@ -1965,6 +2240,7 @@ async function newTextProject() {
     }
 
     state = createDefaultState();
+    editorSelections = {};
     projectFileName = fileName;
     projectFileHandle = handle;
     projectFileWritesEnabled = Boolean(handle && canWrite);
@@ -1972,6 +2248,7 @@ async function newTextProject() {
     resetViewStateForProject();
     render();
     await saveNow();
+    resetHistory();
     focusPageEditor(STORY_KEY);
   } catch (error) {
     if (isAbortError(error)) return;
@@ -2047,7 +2324,8 @@ async function saveNow(options = {}) {
 async function loadState() {
   const response = await fetch("/api/state");
   const payload = await response.json();
-  state = payload.state;
+  state = migrateLegacyDefaultFonts(payload.state);
+  editorSelections = {};
   exportPath = payload.exportPath || "";
   projectFileName = fileNameFromPath(exportPath) || projectFileName;
   projectFileHandle = null;
@@ -2056,6 +2334,7 @@ async function loadState() {
   restoreViewStateForProject();
   setStatus(`Saved ${formatDate(state.updatedAt)}`);
   render();
+  resetHistory();
 }
 
 function setActiveFromPageKey(pageKey) {
@@ -2080,7 +2359,11 @@ function setActiveFromPageKey(pageKey) {
 function focusPageEditor(pageKey) {
   window.requestAnimationFrame(() => {
     const editor = editorElementForKey(pageKey);
-    if (editor) editor.focus({ preventScroll: true });
+    if (editor) {
+      editor.focus({ preventScroll: true });
+      restoreEditorSelection(editor);
+      restoreEditorScrollPosition(editor);
+    }
     alignPageInCanvas(pageKey);
   });
 }
@@ -2097,9 +2380,9 @@ function selectDraft(draftId) {
 
 function addDraft(copyFromSelected) {
   syncFromInputs();
+  recordUndoSnapshot();
   const draft = createDraft(copyFromSelected ? getSelectedDraft() : null);
   state.drafts.push(draft);
-  compareSelectedIds.add(draft.id);
   selectedDraftId = draft.id;
   activeArea = "draft";
   displayPage(draftContentKey(draft.id), true);
@@ -2109,14 +2392,31 @@ function addDraft(copyFromSelected) {
   focusPageEditor(draftContentKey(draft.id));
 }
 
+function toolbarFormatValues(editorKey) {
+  const toolbar = toolbarForEditor(editorKey);
+  const values = {};
+  toolbar?.querySelectorAll("[data-page-format-picker]").forEach(picker => {
+    const field = picker.dataset.pageFormatPicker;
+    if (field && picker.dataset.value) values[field] = picker.dataset.value;
+  });
+  return values;
+}
+
 function applyPageFormat(editorKey, field, value) {
   const page = pageForEditorKey(editorKey);
   const editorEl = editorElementForKey(editorKey);
   if (!page || !editorEl) return;
 
   ensurePageFields(page);
-  page.format[field] = value;
-  page.format = normalizeFormat(page.format);
+  const nextFormat = normalizeFormat({
+    ...page.format,
+    ...toolbarFormatValues(editorKey),
+    [field]: value
+  });
+  if (page.format.fontFamily === nextFormat.fontFamily && page.format.fontSize === nextFormat.fontSize) return;
+
+  recordUndoSnapshot();
+  page.format = nextFormat;
   applyEditorFormat(editorEl, page.format);
   syncToolbarValues(editorKey);
   scheduleSave();
@@ -2127,6 +2427,7 @@ function runEditorCommand(editorKey, command) {
   if (!editorEl) return;
   activeEditorKey = editorKey;
   editorEl.focus();
+  recordUndoSnapshot();
   document.execCommand(command, false, null);
   scheduleSave();
 }
@@ -2140,18 +2441,35 @@ function setRibbonRegionOpen(region, open) {
   if (toolbar) toolbar.setAttribute("aria-hidden", String(!open));
 }
 
+function closeEditorRibbonRegion(region) {
+  if (!region?.classList.contains("ribbon-open")) return;
+  setRibbonRegionOpen(region, false);
+  closeFormatPickers();
+}
+
+function closeRibbonsOutsidePanel(target) {
+  if (!(target instanceof Element)) return;
+
+  els.pageCanvas.querySelectorAll(".editor-ribbon-region.ribbon-open").forEach(region => {
+    const panel = region.closest(".editor-panel");
+    if (!panel || panel.contains(target)) return;
+    closeEditorRibbonRegion(region);
+  });
+}
+
 function toggleEditorRibbon(toggle) {
   const region = toggle.closest(".editor-ribbon-region");
   if (!region) return;
 
   const shouldOpen = !region.classList.contains("ribbon-open");
-  setRibbonRegionOpen(region, shouldOpen);
-
   if (shouldOpen) {
+    closeRibbonsOutsidePanel(toggle);
+    setRibbonRegionOpen(region, true);
     syncToolbarValues(region.dataset.ribbonRegion);
-  } else {
-    closeFormatPickers();
+    return;
   }
+
+  closeEditorRibbonRegion(region);
 }
 
 function closeFormatPickers(exceptPicker = null) {
@@ -2254,10 +2572,12 @@ function deleteDraft(draftId) {
   const draft = draftById(draftId);
   if (!draft || !canDeleteDraft(draft)) return;
 
+  recordUndoSnapshot();
   state.drafts = state.drafts.filter(item => item.id !== draftId);
-  compareSelectedIds.delete(draftId);
   displayedPageKeys.delete(draftContentKey(draftId));
   collapsedNotesIds.delete(draftId);
+  delete editorSelections[draftContentKey(draftId)];
+  delete editorSelections[draftNotesKey(draftId)];
 
   if (!state.drafts.length) {
     state.drafts.push(createDraft(null));
@@ -2284,6 +2604,14 @@ function resizeNotesPane(draftId, clientY) {
 els.fileNew.addEventListener("click", newTextProject);
 els.fileOpen.addEventListener("click", openTextProject);
 els.fileSaveAs.addEventListener("click", saveAsTextProject);
+els.editUndo.addEventListener("click", () => {
+  undoProjectChange();
+  closeTopMenus();
+});
+els.editRedo.addEventListener("click", () => {
+  redoProjectChange();
+  closeTopMenus();
+});
 
 els.fileOpenInput.addEventListener("change", async event => {
   const [file] = event.target.files || [];
@@ -2308,6 +2636,11 @@ els.storyTab.addEventListener("click", event => {
 });
 
 els.storyDisplayToggle.addEventListener("change", event => {
+  if (showChanges) {
+    event.target.checked = false;
+    return;
+  }
+
   syncFromInputs();
   displayPage(STORY_KEY, event.target.checked);
   render();
@@ -2362,10 +2695,58 @@ els.pageCanvas.addEventListener("focusin", event => {
   }
 });
 
+els.pageCanvas.addEventListener("focusout", event => {
+  const editorEl = event.target.closest("[data-editor-key]");
+  if (editorEl) saveEditorViewState(editorEl);
+});
+
+els.pageCanvas.addEventListener("beforeinput", event => {
+  if (!editableHistoryTarget(event.target)) return;
+
+  if (event.inputType === "historyUndo") {
+    event.preventDefault();
+    undoProjectChange();
+    return;
+  }
+
+  if (event.inputType === "historyRedo") {
+    event.preventDefault();
+    redoProjectChange();
+    return;
+  }
+
+  recordUndoSnapshot();
+});
+
 els.pageCanvas.addEventListener("input", event => {
-  if (event.target.closest("[data-editor-key]") || event.target.closest("[data-title-draft-id]")) {
+  const editorEl = event.target.closest("[data-editor-key]");
+  const titleInput = event.target.closest("[data-title-draft-id]");
+  if (editorEl) window.requestAnimationFrame(() => saveEditorViewState(editorEl));
+
+  if (editorEl || titleInput) {
+    recordUndoSnapshot();
     scheduleSave();
   }
+});
+
+els.pageCanvas.addEventListener("keyup", event => {
+  const editorEl = event.target.closest("[data-editor-key]");
+  if (editorEl) saveEditorViewState(editorEl);
+});
+
+els.pageCanvas.addEventListener("pointerup", event => {
+  const editorEl = event.target.closest("[data-editor-key]");
+  if (editorEl) saveEditorViewState(editorEl);
+});
+
+els.pageCanvas.addEventListener("scroll", event => {
+  const editorEl = event.target.closest?.("[data-editor-key]");
+  if (editorEl) saveEditorScrollPosition(editorEl);
+}, true);
+
+els.pageCanvas.addEventListener("wheel", event => {
+  const editorEl = event.target.closest?.("[data-editor-key]");
+  if (editorEl) window.requestAnimationFrame(() => saveEditorScrollPosition(editorEl));
 });
 
 els.pageCanvas.addEventListener("keydown", event => {
@@ -2383,6 +2764,7 @@ els.pageCanvas.addEventListener("keydown", event => {
 
   event.preventDefault();
   activeEditorKey = editorEl.dataset.editorKey;
+  recordUndoSnapshot();
   document.execCommand("insertText", false, "\t");
   scheduleSave();
 });
@@ -2393,6 +2775,7 @@ els.pageCanvas.addEventListener("paste", event => {
 
   event.preventDefault();
   activeEditorKey = editorEl.dataset.editorKey;
+  recordUndoSnapshot();
   const html = event.clipboardData.getData("text/html");
   const text = event.clipboardData.getData("text/plain");
   document.execCommand("insertHTML", false, html ? sanitizeRichHtml(html) : textToHtml(text));
@@ -2481,20 +2864,6 @@ els.compareMode.addEventListener("change", () => {
   renderDiff();
 });
 
-els.compareSelector.addEventListener("change", event => {
-  const checkbox = event.target.closest("[data-compare-draft-id]");
-  if (!checkbox) return;
-
-  if (checkbox.checked) {
-    compareSelectedIds.add(checkbox.dataset.compareDraftId);
-  } else {
-    compareSelectedIds.delete(checkbox.dataset.compareDraftId);
-  }
-
-  saveCurrentViewState();
-  renderDiff();
-});
-
 els.diffOutput.addEventListener("dblclick", event => {
   if (!(event.target instanceof Element)) return;
 
@@ -2509,22 +2878,27 @@ els.toggleChanges.addEventListener("click", () => {
   syncFromInputs();
   showChanges = !showChanges;
   saveCurrentViewState();
+  renderDraftTabs();
   renderChangesVisibility();
   renderDiff();
 });
 
 document.addEventListener("click", event => {
   const topMenu =
-    event.target instanceof Element ? event.target.closest("#file-menu, #view-menu") : null;
+    event.target instanceof Element ? event.target.closest("#file-menu, #edit-menu, #view-menu") : null;
   if (topMenu) {
     closeTopMenus(topMenu);
   } else {
     closeTopMenus();
   }
 
+  closeRibbonsOutsidePanel(event.target);
+
   if (event.target instanceof Element && event.target.closest(".fr-picker")) return;
   closeFormatPickers();
 });
+
+document.addEventListener("selectionchange", saveCurrentEditorSelection);
 
 document.addEventListener("keydown", event => {
   if (handleGlobalShortcut(event)) return;
@@ -2538,7 +2912,6 @@ document.addEventListener("keydown", event => {
 document.addEventListener("scroll", positionOpenFormatPickers, true);
 window.addEventListener("resize", positionOpenFormatPickers);
 window.addEventListener("resize", updateTabDensity);
-window.addEventListener("resize", updateCompareSelectorDensity);
 
 window.addEventListener("beforeunload", () => {
   if (!state) return;

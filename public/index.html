@@ -29,6 +29,13 @@
               <button id="file-save-as" type="button"><span class="menu-check">✓</span><span>Save as…</span><span class="menu-shortcut" data-shortcut="saveAs">Ctrl+Shift+S</span></button>
             </div>
           </details>
+          <details id="edit-menu" class="file-menu">
+            <summary>Edit</summary>
+            <div class="file-menu-panel">
+              <button id="edit-undo" type="button" disabled><span class="menu-check" aria-hidden="true"></span><span>Undo</span><span class="menu-shortcut" data-shortcut="undo">Ctrl+Z</span></button>
+              <button id="edit-redo" type="button" disabled><span class="menu-check" aria-hidden="true"></span><span>Redo</span><span class="menu-shortcut" data-shortcut="redo">Ctrl+Y</span></button>
+            </div>
+          </details>
           <details id="view-menu" class="file-menu">
             <summary>View</summary>
             <div class="file-menu-panel">
@@ -71,14 +78,6 @@
             <span class="toggle-changes-label">Show changes</span>
           </button>
           <span class="action-divider" aria-hidden="true"></span>
-          <label class="select-control" for="compare-mode">
-            Compare
-            <select id="compare-mode">
-              <option value="first">To first</option>
-              <option value="consecutive">Consecutive</option>
-            </select>
-          </label>
-          <span class="action-divider" aria-hidden="true"></span>
           <a class="link-button" href="/api/export" target="_blank" rel="noreferrer" title="Open the companion text file in a new tab">
             <svg class="action-icon" viewBox="0 0 16 16" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
               <path d="M9 2H4.5A1.5 1.5 0 0 0 3 3.5v9A1.5 1.5 0 0 0 4.5 14h7a1.5 1.5 0 0 0 1.5-1.5V6"></path>
@@ -105,7 +104,13 @@
               <span class="legend-item"><span class="legend-swatch same">unchanged</span></span>
               <span class="legend-item"><span class="legend-swatch ws">·whitespace·</span></span>
             </div>
-            <div id="compare-selector" class="compare-selector" aria-label="Drafts to compare"></div>
+            <label class="select-control compare-mode-control" for="compare-mode">
+              Compare
+              <select id="compare-mode">
+                <option value="first">To first</option>
+                <option value="consecutive">Consecutive</option>
+              </select>
+            </label>
           </div>
           <div id="diff-output" class="diff-output"></div>
         </aside>
