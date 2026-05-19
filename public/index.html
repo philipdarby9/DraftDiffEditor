@@ -23,20 +23,20 @@
           <details id="file-menu" class="file-menu">
             <summary>File</summary>
             <div class="file-menu-panel">
-              <button id="file-new" type="button"><span class="menu-check">✓</span><span>New</span><span class="menu-shortcut">⌘N</span></button>
-              <button id="file-open" type="button"><span class="menu-check">✓</span><span>Open…</span><span class="menu-shortcut">⌘O</span></button>
+              <button id="file-new" type="button"><span class="menu-check">✓</span><span>New</span><span class="menu-shortcut" data-shortcut="new">Ctrl+N</span></button>
+              <button id="file-open" type="button"><span class="menu-check">✓</span><span>Open…</span><span class="menu-shortcut" data-shortcut="open">Ctrl+O</span></button>
               <span class="menu-divider" aria-hidden="true"></span>
-              <button id="file-save-as" type="button"><span class="menu-check">✓</span><span>Save as…</span><span class="menu-shortcut">⌘⇧S</span></button>
+              <button id="file-save-as" type="button"><span class="menu-check">✓</span><span>Save as…</span><span class="menu-shortcut" data-shortcut="saveAs">Ctrl+Shift+S</span></button>
             </div>
           </details>
           <details id="view-menu" class="file-menu">
             <summary>View</summary>
             <div class="file-menu-panel">
               <div id="pages-on-screen" class="view-options" aria-label="Pages on screen">
-                <button type="button" data-pages-on-screen="1"><span class="menu-check">✓</span><span>1 on screen</span><span class="menu-shortcut">⌘1</span></button>
-                <button type="button" data-pages-on-screen="2" aria-pressed="true"><span class="menu-check">✓</span><span>2 on screen</span><span class="menu-shortcut">⌘2</span></button>
-                <button type="button" data-pages-on-screen="3"><span class="menu-check">✓</span><span>3 on screen</span><span class="menu-shortcut">⌘3</span></button>
-                <button type="button" data-pages-on-screen="4"><span class="menu-check">✓</span><span>4 on screen</span><span class="menu-shortcut">⌘4</span></button>
+                <button type="button" data-pages-on-screen="1"><span class="menu-check">✓</span><span>1 on screen</span><span class="menu-shortcut" data-shortcut="pages1">Ctrl+1</span></button>
+                <button type="button" data-pages-on-screen="2" aria-pressed="true"><span class="menu-check">✓</span><span>2 on screen</span><span class="menu-shortcut" data-shortcut="pages2">Ctrl+2</span></button>
+                <button type="button" data-pages-on-screen="3"><span class="menu-check">✓</span><span>3 on screen</span><span class="menu-shortcut" data-shortcut="pages3">Ctrl+3</span></button>
+                <button type="button" data-pages-on-screen="4"><span class="menu-check">✓</span><span>4 on screen</span><span class="menu-shortcut" data-shortcut="pages4">Ctrl+4</span></button>
               </div>
             </div>
           </details>
@@ -45,10 +45,10 @@
 
         <div class="tab-strip" aria-label="Pages">
           <div id="story-tab" class="page-tab story-tab">
-            <input id="story-display-toggle" type="checkbox" data-display-story aria-label="Display Story Notes">
-            <button class="tab-label" type="button" data-story-focus aria-label="Story Notes">
-              <span class="tab-label-full">Story Notes</span>
-              <span class="tab-label-short" aria-hidden="true">SN</span>
+            <input id="story-display-toggle" type="checkbox" data-display-story aria-label="Display Project notes">
+            <button class="tab-label" type="button" data-story-focus aria-label="Project notes">
+              <span class="tab-label-full">Project notes</span>
+              <span class="tab-label-short" aria-hidden="true">PN</span>
             </button>
           </div>
           <div id="draft-tabs" class="draft-tabs"></div>

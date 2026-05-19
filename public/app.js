@@ -24,6 +24,7 @@ const els = {
 };
 
 const STORY_KEY = "story";
+const PROJECT_NOTES_TITLE = "Project notes";
 const DISPLAY_STORAGE_KEY = "draftDiff.displayedPageKeys";
 const NOTES_COLLAPSED_STORAGE_KEY = "draftDiff.collapsedNotesIds";
 const NOTES_SIZE_STORAGE_KEY = "draftDiff.notesPanePercents";
@@ -51,6 +52,7 @@ let collapsedNotesIds = new Set();
 let notesPanePercents = {};
 let pagesOnScreen = DEFAULT_PAGES_ON_SCREEN;
 let resizingDraftId = null;
+let compareHighlightTimer = null;
 
 const DEFAULT_FORMAT = {
   fontFamily: "Segoe UI",
@@ -70,6 +72,16 @@ const FONT_SIZE_OPTIONS = ["12", "14", "16", "18", "20", "24", "28", "32"];
 
 const allowedFontFamilies = new Set(FONT_FAMILY_OPTIONS);
 const allowedFontSizes = new Set(FONT_SIZE_OPTIONS);
+
+const MENU_SHORTCUT_LABELS = {
+  new: { mac: "⌘N", default: "Ctrl+N" },
+  open: { mac: "⌘O", default: "Ctrl+O" },
+  saveAs: { mac: "⌘⇧S", default: "Ctrl+Shift+S" },
+  pages1: { mac: "⌘1", default: "Ctrl+1" },
+  pages2: { mac: "⌘2", default: "Ctrl+2" },
+  pages3: { mac: "⌘3", default: "Ctrl+3" },
+  pages4: { mac: "⌘4", default: "Ctrl+4" }
+};
 
 const toolbarIcons = {
   undo: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 7h7.5a2.5 2.5 0 0 1 0 5H8"></path><path d="M5.5 4.5 3 7l2.5 2.5"></path></svg>',
@@ -91,6 +103,60 @@ const toolbarIcons = {
 
 function nowIso() {
   return new Date().toISOString();
+}
+
+function isMacPlatform() {
+  const platform = navigator.userAgentData?.platform || navigator.platform || "";
+  return /mac|iphone|ipad|ipod/i.test(platform);
+}
+
+function updateMenuShortcutLabels() {
+  const labelSet = isMacPlatform() ? "mac" : "default";
+
+  document.querySelectorAll("[data-shortcut]").forEach(shortcut => {
+    const labels = MENU_SHORTCUT_LABELS[shortcut.dataset.shortcut];
+    if (labels) shortcut.textContent = labels[labelSet];
+  });
+}
+
+function hasPlatformShortcutModifier(event) {
+  return isMacPlatform()
+    ? event.metaKey && !event.ctrlKey
+    : event.ctrlKey && !event.metaKey;
+}
+
+function handleGlobalShortcut(event) {
+  if (event.defaultPrevented || event.altKey || event.isComposing) return false;
+  if (!hasPlatformShortcutModifier(event)) return false;
+
+  const key = event.key.toLowerCase();
+
+  if (!event.shiftKey && key === "n") {
+    event.preventDefault();
+    newTextProject();
+    return true;
+  }
+
+  if (!event.shiftKey && key === "o") {
+    event.preventDefault();
+    openTextProject();
+    return true;
+  }
+
+  if (event.shiftKey && key === "s") {
+    event.preventDefault();
+    saveAsTextProject();
+    return true;
+  }
+
+  if (!event.shiftKey && /^[1-4]$/.test(event.key)) {
+    event.preventDefault();
+    setPagesOnScreen(event.key);
+    closeTopMenus();
+    return true;
+  }
+
+  return false;
 }
 
 function makeId(prefix) {
@@ -290,7 +356,7 @@ function createDefaultState() {
     updatedAt: createdAt,
     initialNotes: {
       id: "initial-notes",
-      title: "Story Notes",
+      title: PROJECT_NOTES_TITLE,
       createdAt,
       content: "",
       contentHtml: "",
@@ -380,11 +446,11 @@ function pageItemForKey(key) {
     return {
       key: STORY_KEY,
       type: "story",
-      title: "Story notes",
+      title: PROJECT_NOTES_TITLE,
       kicker: "Page",
       createdAt: state.initialNotes.createdAt,
       page: state.initialNotes,
-      ariaLabel: "Story notes",
+      ariaLabel: PROJECT_NOTES_TITLE,
       editableTitle: false
     };
   }
@@ -744,7 +810,7 @@ function exportPageBlock(title, createdAt, content) {
 
 function formatExportText(projectState) {
   const pages = [
-    exportPageBlock("Story Notes", projectState.initialNotes.createdAt, projectState.initialNotes.content)
+    exportPageBlock(PROJECT_NOTES_TITLE, projectState.initialNotes.createdAt, projectState.initialNotes.content)
   ];
 
   projectState.drafts.forEach((draft, index) => {
@@ -833,7 +899,10 @@ function stateFromExportText(text) {
   if (!blocks.length) throw new Error("This file is empty.");
 
   const pages = blocks.map(parseExportBlock);
-  const storyIndex = pages.findIndex(page => page.title.toLowerCase() === "story notes");
+  const storyIndex = pages.findIndex(page => {
+    const title = page.title.toLowerCase();
+    return title === "project notes" || title === "story notes";
+  });
   const storyBlock = pages[storyIndex >= 0 ? storyIndex : 0];
   const createdAt = storyBlock.createdAt || nowIso();
   const afterStory = pages.slice((storyIndex >= 0 ? storyIndex : 0) + 1);
@@ -872,9 +941,9 @@ function stateFromExportText(text) {
     createdAt,
     updatedAt: nowIso(),
     initialNotes: {
-      ...pageFromImportedBlock(storyBlock, "Story Notes"),
+      ...pageFromImportedBlock(storyBlock, PROJECT_NOTES_TITLE),
       id: "initial-notes",
-      title: "Story Notes"
+      title: PROJECT_NOTES_TITLE
     },
     drafts
   };
@@ -945,25 +1014,51 @@ function diffSequence(before, after) {
 
   while (i < before.length && j < after.length) {
     if (before[i].key === after[j].key) {
-      result.push({ type: "same", text: before[i].text, marks: after[j].marks || before[i].marks || {} });
+      result.push({
+        type: "same",
+        text: before[i].text,
+        marks: after[j].marks || before[i].marks || {},
+        beforeIndex: i,
+        afterIndex: j
+      });
       i += 1;
       j += 1;
     } else if (rows[i + 1][j] >= rows[i][j + 1]) {
-      result.push({ type: "removed", text: before[i].text, marks: before[i].marks || {} });
+      result.push({
+        type: "removed",
+        text: before[i].text,
+        marks: before[i].marks || {},
+        beforeIndex: i
+      });
       i += 1;
     } else {
-      result.push({ type: "added", text: after[j].text, marks: after[j].marks || {} });
+      result.push({
+        type: "added",
+        text: after[j].text,
+        marks: after[j].marks || {},
+        afterIndex: j
+      });
       j += 1;
     }
   }
 
   while (i < before.length) {
-    result.push({ type: "removed", text: before[i].text, marks: before[i].marks || {} });
+    result.push({
+      type: "removed",
+      text: before[i].text,
+      marks: before[i].marks || {},
+      beforeIndex: i
+    });
     i += 1;
   }
 
   while (j < after.length) {
-    result.push({ type: "added", text: after[j].text, marks: after[j].marks || {} });
+    result.push({
+      type: "added",
+      text: after[j].text,
+      marks: after[j].marks || {},
+      afterIndex: j
+    });
     j += 1;
   }
 
@@ -1282,7 +1377,7 @@ function editorPanelHtml(item, options = {}) {
       <span class="meta" title="Created ${formatDate(item.createdAt)}">${formatDate(item.createdAt)}</span>
     `;
   const placeholder = item.type === "story"
-    ? "Story notes..."
+    ? "Project notes..."
     : (item.type === "notes" ? "Draft notes..." : "Start drafting...");
   const pageToolbar = hasToolbar
     ? formatRibbonHtml(item.key, item.title, options)
@@ -1431,19 +1526,70 @@ function visibleChangedWhitespace(text) {
     .replace(/\n/g, "↵\n");
 }
 
-function renderDiffToken(part) {
+function isCompareWordToken(text) {
+  return String(text || "").trim().length > 0;
+}
+
+function compareTokenAttributes(attributes = {}) {
+  return Object.entries(attributes)
+    .filter(([, value]) => value !== undefined && value !== null)
+    .map(([name, value]) => `${name}="${escapeHtml(value)}"`)
+    .join(" ");
+}
+
+function renderComparePageToken(token, index) {
+  const classes = ["compare-token"];
+  const semanticClassName = semanticClasses(token.marks);
+  if (semanticClassName) classes.push(semanticClassName);
+
+  const attributes = isCompareWordToken(token.text)
+    ? { "data-compare-token-index": index }
+    : {};
+  const attributeText = compareTokenAttributes(attributes);
+
+  return `<span class="${classes.join(" ")}"${attributeText ? ` ${attributeText}` : ""}>${escapeHtml(token.text)}</span>`;
+}
+
+function comparePageContentHtml(page) {
+  ensurePageFields(page);
+  if (!page.content.trim()) {
+    return `<div class="compare-text empty-line">No draft text yet.</div>`;
+  }
+
+  const tokens = semanticTokensFromHtml(page.contentHtml)
+    .map((token, index) => renderComparePageToken(token, index))
+    .join("");
+  return `<div class="compare-text">${tokens}</div>`;
+}
+
+function renderDiffToken(part, pair) {
   const classes = ["compare-token"];
   if (part.type !== "same") classes.push(part.type);
   const semanticClassName = semanticClasses(part.marks);
   if (semanticClassName) classes.push(semanticClassName);
   const text = part.type === "same" ? part.text : visibleChangedWhitespace(part.text);
-  return `<span class="${classes.join(" ")}">${escapeHtml(text)}</span>`;
+  const attributes = {};
+
+  if (isCompareWordToken(part.text)) {
+    if ((part.type === "same" || part.type === "added") && Number.isInteger(part.afterIndex)) {
+      attributes["data-compare-token-index"] = part.afterIndex;
+    }
+
+    if ((part.type === "same" || part.type === "removed") && Number.isInteger(part.beforeIndex)) {
+      attributes["data-scroll-target-page-id"] = pair.before.id;
+      attributes["data-scroll-target-token-index"] = part.beforeIndex;
+      attributes.title = "Double-click to find this word in the previous version";
+    }
+  }
+
+  const attributeText = compareTokenAttributes(attributes);
+  return `<span class="${classes.join(" ")}"${attributeText ? ` ${attributeText}` : ""}>${escapeHtml(text)}</span>`;
 }
 
 function baseComparePageHtml(draft, subtitle = "BASELINE") {
   ensurePageFields(draft);
   return `
-    <article class="compare-page is-baseline">
+    <article class="compare-page is-baseline" data-compare-page-id="${escapeHtml(draft.id)}">
       <div class="compare-page-header">
         <div class="kicker">${escapeHtml(subtitle)}</div>
         <div class="title-row">
@@ -1452,7 +1598,7 @@ function baseComparePageHtml(draft, subtitle = "BASELINE") {
         <div class="meta">${formatDate(draft.createdAt)}</div>
       </div>
       <div class="compare-page-body" style="${fontStyle(draft.format)}">
-        <div class="compare-rich-content">${richPageHtml(draft)}</div>
+        ${comparePageContentHtml(draft)}
       </div>
     </article>
   `;
@@ -1463,7 +1609,7 @@ function markedLaterPageHtml(pair, diff = diffRichPages(pair.before, pair.after)
     return `<div class="compare-text empty-line">No draft text yet.</div>`;
   }
 
-  const tokens = diff.map(renderDiffToken).join("");
+  const tokens = diff.map(part => renderDiffToken(part, pair)).join("");
   return `<div class="compare-text">${tokens}</div>`;
 }
 
@@ -1472,7 +1618,7 @@ function markedComparePageHtml(pair) {
   const stats = diffTokenStats(diff);
 
   return `
-    <article class="compare-page later-page">
+    <article class="compare-page later-page" data-compare-page-id="${escapeHtml(pair.after.id)}">
       <div class="compare-page-header">
         <div class="kicker">CHANGES</div>
         <div class="title-row">
@@ -1520,6 +1666,58 @@ function renderComparisonStrip(indexes) {
   const gapTotal = 0;
   const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: ${gapTotal}px;`;
   return `<div class="compare-strip" style="${style}">${pages.join("")}</div>`;
+}
+
+function cssEscape(value) {
+  if (window.CSS && typeof window.CSS.escape === "function") return window.CSS.escape(String(value));
+  return String(value).replace(/["\\]/g, "\\$&");
+}
+
+function clearCompareTargetHighlight() {
+  window.clearTimeout(compareHighlightTimer);
+  compareHighlightTimer = null;
+  els.diffOutput.querySelector(".compare-target-highlight")?.classList.remove("compare-target-highlight");
+}
+
+function findCompareTargetToken(pageId, tokenIndex) {
+  const index = Number(tokenIndex);
+  if (!pageId || !Number.isInteger(index)) return null;
+
+  const page = els.diffOutput.querySelector(`[data-compare-page-id="${cssEscape(pageId)}"]`);
+  return page?.querySelector(`[data-compare-token-index="${index}"]`) || null;
+}
+
+function scrollCompareTargetIntoView(target, sourceToken) {
+  const page = target.closest(".compare-page");
+  const body = target.closest(".compare-page-body");
+  const sourceRect = sourceToken.getBoundingClientRect();
+
+  page?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "smooth" });
+
+  if (body) {
+    const bodyRect = body.getBoundingClientRect();
+    const targetRect = target.getBoundingClientRect();
+    const targetTop = body.scrollTop + targetRect.top - bodyRect.top;
+    const sourceOffset = sourceRect.top - bodyRect.top;
+    body.scrollTo({ top: Math.max(0, targetTop - sourceOffset), behavior: "smooth" });
+  }
+}
+
+function highlightCompareTarget(target) {
+  clearCompareTargetHighlight();
+  target.classList.add("compare-target-highlight");
+  compareHighlightTimer = window.setTimeout(clearCompareTargetHighlight, 2200);
+}
+
+function jumpToComparedToken(sourceToken) {
+  const target = findCompareTargetToken(
+    sourceToken.dataset.scrollTargetPageId,
+    sourceToken.dataset.scrollTargetTokenIndex
+  );
+  if (!target) return;
+
+  scrollCompareTargetIntoView(target, sourceToken);
+  highlightCompareTarget(target);
 }
 
 function renderCompareSelector() {
@@ -2297,6 +2495,16 @@ els.compareSelector.addEventListener("change", event => {
   renderDiff();
 });
 
+els.diffOutput.addEventListener("dblclick", event => {
+  if (!(event.target instanceof Element)) return;
+
+  const sourceToken = event.target.closest("[data-scroll-target-page-id][data-scroll-target-token-index]");
+  if (!sourceToken || !els.diffOutput.contains(sourceToken)) return;
+
+  event.preventDefault();
+  jumpToComparedToken(sourceToken);
+});
+
 els.toggleChanges.addEventListener("click", () => {
   syncFromInputs();
   showChanges = !showChanges;
@@ -2319,6 +2527,8 @@ document.addEventListener("click", event => {
 });
 
 document.addEventListener("keydown", event => {
+  if (handleGlobalShortcut(event)) return;
+
   if (event.key === "Escape") {
     closeTopMenus();
     closeFormatPickers();
@@ -2336,6 +2546,8 @@ window.addEventListener("beforeunload", () => {
   const blob = new Blob([JSON.stringify(state)], { type: "application/json" });
   navigator.sendBeacon("/api/close", blob);
 });
+
+updateMenuShortcutLabels();
 
 loadState().catch(error => {
   console.error(error);

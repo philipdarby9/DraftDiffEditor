@@ -9,6 +9,7 @@ const DATA_DIR = path.join(ROOT, "data");
 const STATE_FILE = path.join(DATA_DIR, "project.json");
 const EXPORT_FILE = path.join(DATA_DIR, "draft-history.txt");
 const PORT = Number(process.env.PORT || 4173);
+const PROJECT_NOTES_TITLE = "Project notes";
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -125,7 +126,7 @@ function defaultState() {
     updatedAt: createdAt,
     initialNotes: {
       id: "initial-notes",
-      title: "Story Notes",
+      title: PROJECT_NOTES_TITLE,
       createdAt,
       content: "",
       contentHtml: "",
@@ -147,7 +148,7 @@ function normalizeState(input, options = {}) {
     updatedAt: options.touch ? nowIso() : raw.updatedAt || createdAt,
     initialNotes: normalizePage(raw.initialNotes, {
       id: raw.initialNotes?.id || "initial-notes",
-      title: raw.initialNotes?.title || "Story Notes",
+      title: raw.initialNotes?.title || PROJECT_NOTES_TITLE,
       createdAt: raw.initialNotes?.createdAt || createdAt,
       content: ""
     }),
@@ -194,7 +195,7 @@ function pageBlock(title, createdAt, content) {
 
 function formatExport(state) {
   const pages = [
-    pageBlock("Story Notes", state.initialNotes.createdAt, state.initialNotes.content)
+    pageBlock(PROJECT_NOTES_TITLE, state.initialNotes.createdAt, state.initialNotes.content)
   ];
 
   state.drafts.forEach((draft, index) => {

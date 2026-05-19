@@ -14,7 +14,7 @@ Then open `http://localhost:4173`.
 
 - Keeps initial notes, drafts, and notes for each draft.
 - Opens as a Notepad-style editor with a ribbon, horizontal draft tabs, and a left-to-right page canvas.
-- Lets you show or hide Story Notes and draft stacks from the tab checkboxes.
+- Lets you show or hide Project notes and draft stacks from the tab checkboxes.
 - Shows each selected draft with its notes as an adjustable panel underneath.
 - Lets you choose whether 1, 2, 3, or 4 writing pages fit on screen at once.
 - Remembers display choices, pages-on-screen, note panel state, and comparison selections separately for each opened text file.
@@ -34,7 +34,7 @@ Then open `http://localhost:4173`.
 The companion text document is ordered as:
 
 ```text
-Story Notes
+Project notes
 Draft 1
 Draft 1 Notes
 Draft 2
