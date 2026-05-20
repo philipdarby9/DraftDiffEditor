@@ -13,6 +13,7 @@ const els = {
   editRedo: document.querySelector("#edit-redo"),
   editGlobalFont: document.querySelector("#edit-global-font"),
   editGlobalFontSize: document.querySelector("#edit-global-font-size"),
+  viewEnablePanelDrag: document.querySelector("#view-enable-panel-drag"),
   fileOpenInput: document.querySelector("#file-open-input"),
   storyTab: document.querySelector("#story-tab"),
   storyDisplayToggle: document.querySelector("#story-display-toggle"),
@@ -72,10 +73,19 @@ let editorSelections = {};
 let undoStack = [];
 let redoStack = [];
 let isRestoringHistory = false;
+let panelDragEnabled = false;
+let detachedUnitKeys = new Set();
+let detachedPanelWindows = new Map();
+
+const DETACHED_PANEL_CHANNEL = "draftDiff.detachedPanels";
+const detachedPanelChannel = "BroadcastChannel" in window
+  ? new BroadcastChannel(DETACHED_PANEL_CHANNEL)
+  : null;
 
 const DEFAULT_FORMAT = {
   fontFamily: "Consolas",
-  fontSize: "16"
+  fontSize: "16",
+  lineHeight: "1.62"
 };
 
 const FONT_FAMILY_OPTIONS = [
@@ -83,15 +93,35 @@ const FONT_FAMILY_OPTIONS = [
   "Segoe UI",
   "Arial",
   "Calibri",
+  "Cambria",
+  "Candara",
+  "Constantia",
+  "Corbel",
   "Georgia",
+  "Garamond",
+  "Book Antiqua",
+  "Palatino Linotype",
   "Times New Roman",
-  "Courier New"
+  "Courier New",
+  "Lucida Console",
+  "Verdana",
+  "Tahoma",
+  "Trebuchet MS"
 ];
 
 const FONT_SIZE_OPTIONS = ["12", "14", "16", "18", "20", "24", "28", "32"];
+const LINE_HEIGHT_OPTIONS = ["1.2", "1.4", "1.62", "1.8", "2"];
 
 const allowedFontFamilies = new Set(FONT_FAMILY_OPTIONS);
 const allowedFontSizes = new Set(FONT_SIZE_OPTIONS);
+const allowedLineHeights = new Set(LINE_HEIGHT_OPTIONS);
+
+function allowedFormatValuesForField(field) {
+  if (field === "fontFamily") return allowedFontFamilies;
+  if (field === "fontSize") return allowedFontSizes;
+  if (field === "lineHeight") return allowedLineHeights;
+  return new Set();
+}
 
 const MENU_SHORTCUT_LABELS = {
   new: { mac: "⌘N", default: "Ctrl+N" },
@@ -100,6 +130,7 @@ const MENU_SHORTCUT_LABELS = {
   saveAs: { mac: "⌘⇧S", default: "Ctrl+Shift+S" },
   undo: { mac: "⌘Z", default: "Ctrl+Z" },
   redo: { mac: "⌘⇧Z", default: "Ctrl+Y" },
+  panelDrag: { mac: "Cmd+Opt+P", default: "Ctrl+Alt+P" },
   pages1: { mac: "⌘1", default: "Ctrl+1" },
   pages2: { mac: "⌘2", default: "Ctrl+2" },
   pages3: { mac: "⌘3", default: "Ctrl+3" },
@@ -107,21 +138,22 @@ const MENU_SHORTCUT_LABELS = {
 };
 
 const toolbarIcons = {
-  undo: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 7h7.5a2.5 2.5 0 0 1 0 5H8"></path><path d="M5.5 4.5 3 7l2.5 2.5"></path></svg>',
-  redo: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M13 7H5.5a2.5 2.5 0 0 0 0 5H8"></path><path d="M10.5 4.5 13 7l-2.5 2.5"></path></svg>',
-  bold: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5 3h4a2.25 2.25 0 1 1 0 4.5H5zM5 7.5h4.5a2.5 2.5 0 1 1 0 5H5z"></path></svg>',
-  italic: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M10.5 3h-4M9.5 13h-4M9.5 3l-3 10"></path></svg>',
-  underline: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.5 3v5a3.5 3.5 0 0 0 7 0V3"></path><path d="M3.5 13.5h9"></path></svg>',
-  strike: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 8h11"></path><path d="M5 5.5a2.5 2.5 0 0 1 5 0"></path><path d="M11 10.5a2.5 2.5 0 0 1-5 0"></path></svg>',
-  unorderedList: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="3.5" cy="4.5" r="0.8" fill="currentColor"></circle><circle cx="3.5" cy="8" r="0.8" fill="currentColor"></circle><circle cx="3.5" cy="11.5" r="0.8" fill="currentColor"></circle><path d="M6 4.5h7M6 8h7M6 11.5h7"></path></svg>',
-  orderedList: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M6 4.5h7M6 8h7M6 11.5h7"></path><path d="M2.5 3v3M2 3h1M2 6h1.5M2 8.5h1.5M2 8.5a.75.75 0 0 1 1.5 0c0 .75-1.5.75-1.5 1.5h1.5"></path><path d="M2 11h1.5M2 12.5h1.5M2 12.5a.75.75 0 0 1 .75-.75M2 14h1.5"></path></svg>',
-  outdent: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M7 7h6M7 9h6M3 12.5h10"></path><path d="M5 7 3 8.5 5 10"></path></svg>',
-  indent: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M7 7h6M7 9h6M3 12.5h10"></path><path d="m3 7 2 1.5L3 10"></path></svg>',
-  alignLeft: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M3 7h7M3 10.5h10M3 13.5h7"></path></svg>',
-  alignCenter: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M5 7h6M3 10.5h10M5 13.5h6"></path></svg>',
-  alignRight: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 3.5h10M6 7h7M3 10.5h10M6 13.5h7"></path></svg>',
-  clear: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4 12.5h8"></path><path d="M5.5 3.5H10l-1.5 7h-2zM3 13l3-3"></path></svg>',
-  format: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h10"></path><path d="M5.5 3v3M10.5 6.5v3M7.5 10v3"></path></svg>'
+  undo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 5 10l4-4"></path><path d="M5 10h11a4 4 0 1 1 0 8h-1"></path></svg>',
+  redo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 4-4-4-4"></path><path d="M19 10H8a4 4 0 1 0 0 8h1"></path></svg>',
+  bold: '<span class="fr-letter-icon bold" aria-hidden="true">B</span>',
+  italic: '<span class="fr-letter-icon italic" aria-hidden="true">I</span>',
+  underline: '<span class="fr-letter-icon underline" aria-hidden="true">U</span>',
+  strike: '<span class="fr-letter-icon strike" aria-hidden="true">S</span>',
+  unorderedList: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11"></path><path d="M9 12h11"></path><path d="M9 18h11"></path><path d="M5 6v.01"></path><path d="M5 12v.01"></path><path d="M5 18v.01"></path></svg>',
+  orderedList: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6h9"></path><path d="M11 12h9"></path><path d="M12 18h8"></path><path d="M4 6h1v4"></path><path d="M4 10h2"></path><path d="M6 18H4c0-1.2 2-2.1 2-3.2 0-.7-.5-1.2-1.2-1.2-.5 0-.9.2-1.2.6"></path></svg>',
+  outdent: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6H9"></path><path d="M20 12h-7"></path><path d="M20 18H9"></path><path d="m8 8-4 4 4 4"></path></svg>',
+  indent: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6H9"></path><path d="M20 12h-7"></path><path d="M20 18H9"></path><path d="m4 8 4 4-4 4"></path></svg>',
+  alignLeft: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M4 12h10"></path><path d="M4 18h14"></path></svg>',
+  alignCenter: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M8 12h8"></path><path d="M6 18h12"></path></svg>',
+  alignRight: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M10 12h10"></path><path d="M6 18h14"></path></svg>',
+  clear: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 12.3h7.4"></path><path d="m5.3 8.8 3.9-4.2 2.2 2.1-3.9 4.2H5.3z"></path><path d="M4 13.1 12.5 3"></path></svg>',
+  format: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h10"></path><path d="M5.5 3v3M10.5 6.5v3M7.5 10v3"></path></svg>',
+  detach: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.4 3.6H4.1c-.8 0-1.4.6-1.4 1.4v6.9c0 .8.6 1.4 1.4 1.4H11c.8 0 1.4-.6 1.4-1.4v-1.3"></path><path d="M8.2 3.4h4.4v4.4"></path><path d="M7.2 8.8 12.4 3.6"></path></svg>'
 };
 
 function nowIso() {
@@ -163,6 +195,17 @@ function handleGlobalShortcut(event) {
   if (isOpenLocationShortcut) {
     event.preventDefault();
     openFileLocation();
+    return true;
+  }
+
+  const isPanelDragShortcut = isMacPlatform()
+    ? event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey && key === "p"
+    : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey && key === "p";
+
+  if (isPanelDragShortcut) {
+    event.preventDefault();
+    setPanelDragEnabled(!panelDragEnabled);
+    closeTopMenus();
     return true;
   }
 
@@ -241,11 +284,22 @@ function draftNotesKey(draftId) {
   return `draft:${draftId}:notes`;
 }
 
+function draftUnitKey(draftId) {
+  return `draft:${draftId}`;
+}
+
 function parseDraftPageKey(key) {
   if (key === STORY_KEY) return { type: "story" };
   const match = /^draft:(.+):(content|notes)$/.exec(key);
   if (!match) return null;
   return { type: match[2], draftId: match[1] };
+}
+
+function parseDetachedUnitKey(key) {
+  if (key === STORY_KEY) return { type: "story" };
+  const match = /^draft:(.+)$/.exec(String(key || ""));
+  if (!match) return null;
+  return { type: "draft", draftId: match[1] };
 }
 
 function readStoredStringArray(storageKey) {
@@ -314,6 +368,20 @@ function selectedDisplayPageCount() {
   if (!state) return 0;
   const validKeys = new Set(displayKeys());
   return [...displayedPageKeys].filter(key => validKeys.has(key)).length;
+}
+
+function draftHasVisibleMainPanel(draft) {
+  if (!draft || !displayedPageKeys.has(draftContentKey(draft.id))) return false;
+  return !detachedUnitKeys.has(draftUnitKey(draft.id));
+}
+
+function mainDisplayPageCount() {
+  if (!state) return 0;
+  let count = displayedPageKeys.has(STORY_KEY) && !detachedUnitKeys.has(STORY_KEY) ? 1 : 0;
+  state.drafts.forEach(draft => {
+    if (draftHasVisibleMainPanel(draft)) count += 1;
+  });
+  return count;
 }
 
 function normalizePagesOnScreenForSelection(value) {
@@ -559,7 +627,10 @@ function normalizeFormat(format = {}) {
   const fontSize = allowedFontSizes.has(String(format.fontSize))
     ? String(format.fontSize)
     : DEFAULT_FORMAT.fontSize;
-  return { fontFamily, fontSize };
+  const lineHeight = allowedLineHeights.has(String(format.lineHeight))
+    ? String(format.lineHeight)
+    : DEFAULT_FORMAT.lineHeight;
+  return { fontFamily, fontSize, lineHeight };
 }
 
 function upgradeLegacyDefaultFormat(format = {}, shouldUpgrade = false) {
@@ -871,7 +942,7 @@ function ensurePageFields(page) {
 
 function fontStyle(format) {
   const normalized = normalizeFormat(format);
-  return `font-family: ${normalized.fontFamily}; font-size: ${normalized.fontSize}px;`;
+  return `font-family: ${normalized.fontFamily}; font-size: ${normalized.fontSize}px; line-height: ${normalized.lineHeight};`;
 }
 
 function pageItemForKey(key) {
@@ -928,6 +999,118 @@ function allPageItems() {
     pages.push(pageItemForKey(draftNotesKey(draft.id)));
   });
   return pages.filter(Boolean);
+}
+
+function pageSnapshotForPanel(key) {
+  const item = pageItemForKey(key);
+  if (!item) return null;
+  const page = ensurePageFields(item.page);
+  return {
+    key,
+    type: item.type,
+    title: item.title,
+    kicker: item.kicker,
+    ariaLabel: item.ariaLabel,
+    editableTitle: item.editableTitle,
+    page: {
+      title: page.title,
+      createdAt: page.createdAt,
+      updatedAt: page.updatedAt,
+      content: page.content,
+      contentHtml: page.contentHtml,
+      format: normalizeFormat(page.format)
+    }
+  };
+}
+
+function snapshotForDetachedUnit(unitKey) {
+  const parsed = parseDetachedUnitKey(unitKey);
+  if (!parsed) return null;
+
+  if (parsed.type === "story") {
+    const story = pageSnapshotForPanel(STORY_KEY);
+    return story ? {
+      key: STORY_KEY,
+      type: "story",
+      title: story.title,
+      pages: [story]
+    } : null;
+  }
+
+  const draft = draftById(parsed.draftId);
+  if (!draft) return null;
+  const draftPage = pageSnapshotForPanel(draftContentKey(draft.id));
+  const notesPage = pageSnapshotForPanel(draftNotesKey(draft.id));
+  if (!draftPage || !notesPage) return null;
+
+  return {
+    key: draftUnitKey(draft.id),
+    type: "draft",
+    draftId: draft.id,
+    title: draft.title,
+    pages: [draftPage, notesPage]
+  };
+}
+
+function applyPageSnapshot(key, snapshotPage) {
+  const parsed = parseDraftPageKey(key);
+  const page = pageForEditorKey(key);
+  if (!parsed || !page || !snapshotPage) return false;
+
+  ensurePageFields(page);
+  let changed = false;
+
+  if (typeof snapshotPage.content === "string" && page.content !== snapshotPage.content) {
+    page.content = snapshotPage.content;
+    changed = true;
+  }
+  if (typeof snapshotPage.contentHtml === "string") {
+    const contentHtml = sanitizeRichHtml(snapshotPage.contentHtml);
+    if (page.contentHtml !== contentHtml) {
+      page.contentHtml = contentHtml;
+      changed = true;
+    }
+  }
+  if (snapshotPage.format) {
+    const nextFormat = normalizeFormat({ ...page.format, ...snapshotPage.format });
+    if (
+      page.format.fontFamily !== nextFormat.fontFamily ||
+      page.format.fontSize !== nextFormat.fontSize ||
+      page.format.lineHeight !== nextFormat.lineHeight
+    ) {
+      page.format = nextFormat;
+      changed = true;
+    }
+  }
+
+  if (parsed.type === "content" && typeof snapshotPage.title === "string") {
+    const draft = draftById(parsed.draftId);
+    if (draft) {
+      const nextTitle = snapshotPage.title.trim() || "Untitled draft";
+      if (draft.title !== nextTitle) {
+        draft.title = nextTitle;
+        draft.notes.title = `${draft.title} Notes`;
+        changed = true;
+      }
+    }
+  }
+
+  if (snapshotPage.updatedAt) {
+    page.updatedAt = snapshotPage.updatedAt;
+  } else if (changed) {
+    page.updatedAt = nowIso();
+  }
+
+  return true;
+}
+
+function applyDetachedUnitSnapshot(unit) {
+  if (!unit?.pages?.length) return false;
+  let applied = false;
+  unit.pages.forEach(page => {
+    if (page?.key && applyPageSnapshot(page.key, page.page || page)) applied = true;
+  });
+  return applied;
 }
 
 function displayKeys() {
@@ -1091,12 +1274,13 @@ function activeDisplayKey() {
 
 function setPagesOnScreen(value) {
   pagesOnScreen = normalizePagesOnScreenForSelection(value);
+  const visiblePagesOnScreen = Math.max(1, Math.min(pagesOnScreen, mainDisplayPageCount() || pagesOnScreen));
   const outerPadding = 0;
   const pageGap = 0;
-  const widthOffset = outerPadding + pageGap * (pagesOnScreen - 1);
+  const widthOffset = outerPadding + pageGap * (visiblePagesOnScreen - 1);
   document.documentElement.style.setProperty(
     "--page-width",
-    `calc((100vw - ${widthOffset}px) / ${pagesOnScreen})`
+    `calc((100vw - ${widthOffset}px) / ${visiblePagesOnScreen})`
   );
   if (els.pagesOnScreen) {
     els.pagesOnScreen.querySelectorAll("[data-pages-on-screen]").forEach(button => {
@@ -1104,7 +1288,156 @@ function setPagesOnScreen(value) {
     });
   }
   saveCurrentViewState();
-  window.requestAnimationFrame(() => alignPageInCanvas(activeDisplayKey()));
+  window.requestAnimationFrame(() => {
+    alignPageInCanvas(activeDisplayKey());
+    updateAllNotesHeadingDensity();
+  });
+}
+
+function syncPanelDragMenu() {
+  if (!els.viewEnablePanelDrag) return;
+  els.viewEnablePanelDrag.setAttribute("aria-pressed", String(panelDragEnabled));
+}
+
+function setPanelDragEnabled(enabled) {
+  panelDragEnabled = Boolean(enabled);
+  syncPanelDragMenu();
+  render();
+}
+
+function detachedWindowName(key) {
+  return `draft-panel-${String(key).replace(/[^a-z0-9]+/gi, "-")}`;
+}
+
+function postDetachedPanelMessage(message) {
+  detachedPanelChannel?.postMessage({ source: "main", ...message });
+}
+
+function broadcastDetachedUnit(key) {
+  const unit = snapshotForDetachedUnit(key);
+  if (!unit) return;
+  postDetachedPanelMessage({ type: "unit:state", key, unit });
+}
+
+function reattachDetachedUnit(key, options = {}) {
+  const record = detachedPanelWindows.get(key);
+  if (record?.timer) window.clearInterval(record.timer);
+  detachedPanelWindows.delete(key);
+
+  if (!detachedUnitKeys.delete(key)) return;
+  refreshDetachedUnitFromServer(key).finally(() => {
+    render();
+    setPagesOnScreen(pagesOnScreen);
+    const focusKey = key === STORY_KEY ? STORY_KEY : draftContentKey(parseDetachedUnitKey(key)?.draftId);
+    if (options.focus && focusKey) focusPageEditor(focusKey);
+  });
+}
+
+function detachUnit(key) {
+  if (!state) return;
+  syncFromInputs();
+
+  const unit = snapshotForDetachedUnit(key);
+  if (!unit) return;
+
+  detachedUnitKeys.add(key);
+
+  const url = new URL("/panel.html", window.location.href);
+  url.searchParams.set("unit", key);
+  url.searchParams.set("title", unit.title);
+
+  const panelWindow = window.open(
+    url.toString(),
+    detachedWindowName(key),
+    "popup=yes,width=760,height=820"
+  );
+
+  if (!panelWindow) {
+    detachedUnitKeys.delete(key);
+    setStatus("Panel window blocked");
+    return;
+  }
+
+  const timer = window.setInterval(() => {
+    if (panelWindow.closed) reattachDetachedUnit(key);
+  }, 750);
+
+  detachedPanelWindows.set(key, { window: panelWindow, timer });
+  render();
+  setPagesOnScreen(pagesOnScreen);
+  window.setTimeout(() => broadcastDetachedUnit(key), 150);
+}
+
+function handleDetachedUnitUpdate(key, unit) {
+  if (!detachedUnitKeys.has(key)) return;
+  if (!applyDetachedUnitSnapshot(unit)) return;
+
+  markStateChanged();
+  rememberLinkedProjectState();
+  refreshRenderedPageLabels();
+  renderDraftTabs();
+  renderDiff();
+  setStatus(isSaving ? "Saving..." : "Unsaved changes");
+  queueSave();
+}
+
+async function refreshDetachedUnitFromServer(key) {
+  if (!state) return;
+  try {
+    const response = await fetch("/api/state", { cache: "no-store" });
+    if (!response.ok) return;
+    const payload = await response.json();
+    const remoteState = migrateLegacyDefaultFonts(payload.state);
+    const remoteUnit = unitForKeyInState(remoteState, key);
+    if (remoteUnit) applyDetachedUnitSnapshot(remoteUnit);
+  } catch {}
+}
+
+function unitForKeyInState(projectState, key) {
+  const parsed = parseDetachedUnitKey(key);
+  if (!projectState || !parsed) return null;
+  if (parsed.type === "story") {
+    return {
+      key: STORY_KEY,
+      type: "story",
+      title: PROJECT_NOTES_TITLE,
+      pages: [{
+        key: STORY_KEY,
+        type: "story",
+        title: PROJECT_NOTES_TITLE,
+        kicker: "Page",
+        editableTitle: false,
+        page: projectState.initialNotes
+      }]
+    };
+  }
+
+  const draft = projectState.drafts?.find(item => item.id === parsed.draftId);
+  if (!draft) return null;
+  return {
+    key: draftUnitKey(draft.id),
+    type: "draft",
+    draftId: draft.id,
+    title: draft.title,
+    pages: [
+      {
+        key: draftContentKey(draft.id),
+        type: "draft",
+        title: draft.title,
+        kicker: "Draft",
+        editableTitle: true,
+        page: draft
+      },
+      {
+        key: draftNotesKey(draft.id),
+        type: "notes",
+        title: `${draft.title} notes`,
+        kicker: "Notes",
+        editableTitle: false,
+        page: draft.notes
+      }
+    ]
+  };
 }
 
 function getNotesPanePercent(draftId) {
@@ -1626,6 +1959,7 @@ function applyEditorFormat(editorEl, format) {
   const normalized = normalizeFormat(format);
   editorEl.style.fontFamily = normalized.fontFamily;
   editorEl.style.fontSize = `${normalized.fontSize}px`;
+  editorEl.style.lineHeight = normalized.lineHeight;
 }
 
 function syncToolbarValues(editorKey) {
@@ -1703,7 +2037,8 @@ function syncRichPage(page, editorEl) {
     page.contentHtml !== nextContentHtml ||
     page.content !== nextContent ||
     page.format.fontFamily !== nextFormat.fontFamily ||
-    page.format.fontSize !== nextFormat.fontSize
+    page.format.fontSize !== nextFormat.fontSize ||
+    page.format.lineHeight !== nextFormat.lineHeight
   ) {
     page.updatedAt = nowIso();
   }
@@ -2939,6 +3274,25 @@ function updateTabDensity() {
   strip.classList.toggle("scrollable-tabs", strip.scrollWidth > strip.clientWidth + 1);
 }
 
+function updateNotesHeadingDensity(heading) {
+  if (!heading) return;
+
+  heading.classList.remove("notes-heading-is-tight");
+
+  const main = heading.querySelector(".notes-heading-main");
+  const tools = heading.querySelector(".notes-heading-tools");
+  if (!main || !tools) return;
+
+  const requiredWidth = main.scrollWidth + tools.scrollWidth + 14;
+  heading.classList.toggle("notes-heading-is-tight", requiredWidth > heading.clientWidth);
+}
+
+function updateAllNotesHeadingDensity() {
+  els.pageCanvas
+    ?.querySelectorAll(".notes-toggle-heading")
+    .forEach(updateNotesHeadingDensity);
+}
+
 function scrollTabsToEnd() {
   const strip = els.storyTab?.closest(".tab-strip");
   if (!strip) return;
@@ -2993,6 +3347,7 @@ function formatRibbonHtml(pageKey, label, options = {}) {
       <div class="fr-group">
         ${formatPickerHtml("fontFamily", "Page font", FONT_FAMILY_OPTIONS, "family")}
         ${formatPickerHtml("fontSize", "Page font size", FONT_SIZE_OPTIONS, "size")}
+        ${formatPickerHtml("lineHeight", "Line spacing", LINE_HEIGHT_OPTIONS, "line-height")}
       </div>
       <div class="fr-group">
         <button class="fr-btn" type="button" data-command="undo" title="Undo" aria-label="Undo">${toolbarIcons.undo}</button>
@@ -3094,6 +3449,18 @@ function editorPanelHtml(item, options = {}) {
       >${toolbarIcons.format}</button>
     `
     : "";
+  const detachUnitKey = options.detachUnitKey || "";
+  const detachButton = panelDragEnabled && detachUnitKey && !detachedUnitKeys.has(detachUnitKey)
+    ? `
+      <button
+        class="panel-detach-button"
+        type="button"
+        data-detach-unit-key="${escapeHtml(detachUnitKey)}"
+        title="Extract panel"
+        aria-label="Extract ${escapeHtml(options.detachTitle || item.title)} to a separate window"
+      >${toolbarIcons.detach}</button>
+    `
+    : "";
   const headingInner = isNotesPanel
     ? `
       <div class="notes-heading-main">
@@ -3102,12 +3469,14 @@ function editorPanelHtml(item, options = {}) {
       </div>
       <div class="notes-heading-tools">
         ${formatButton}
+        ${detachButton}
         ${notesHeaderStats}
       </div>
     `
     : `
       ${headingContent}
       ${formatButton}
+      ${detachButton}
       <span class="meta" title="Created ${createdDateText}">${headerDateText}</span>
     `;
   const placeholder = item.type === "story"
@@ -3163,9 +3532,12 @@ function hydrateVisibleEditors(items) {
 
 function visibleEditorItems() {
   const items = [];
-  if (displayedPageKeys.has(STORY_KEY)) items.push(pageItemForKey(STORY_KEY));
+  if (displayedPageKeys.has(STORY_KEY) && !detachedUnitKeys.has(STORY_KEY)) {
+    items.push(pageItemForKey(STORY_KEY));
+  }
   state.drafts.forEach(draft => {
     if (!displayedPageKeys.has(draftContentKey(draft.id))) return;
+    if (detachedUnitKeys.has(draftUnitKey(draft.id))) return;
     items.push(pageItemForKey(draftContentKey(draft.id)));
     if (!collapsedNotesIds.has(draft.id)) items.push(pageItemForKey(draftNotesKey(draft.id)));
   });
@@ -3173,13 +3545,19 @@ function visibleEditorItems() {
 }
 
 function draftStackHtml(draft) {
+  if (detachedUnitKeys.has(draftUnitKey(draft.id))) return "";
+
   const draftItem = pageItemForKey(draftContentKey(draft.id));
   const notesItem = pageItemForKey(draftNotesKey(draft.id));
   const collapsed = collapsedNotesIds.has(draft.id);
 
   return `
     <section class="draft-stack-page display-page${collapsed ? " notes-are-collapsed" : ""}" data-draft-stack-id="${escapeHtml(draft.id)}" style="--draft-pane-height: ${getNotesPanePercent(draft.id)}%;" aria-label="${escapeHtml(draft.title)}">
-      ${editorPanelHtml(draftItem, { standalone: false })}
+      ${editorPanelHtml(draftItem, {
+        standalone: false,
+        detachUnitKey: draftUnitKey(draft.id),
+        detachTitle: `${draft.title} and notes`
+      })}
       ${collapsed ? "" : `
         <div
           class="notes-resizer"
@@ -3207,9 +3585,9 @@ function renderEditor() {
   });
 
   const selectedDrafts = state.drafts.filter(draft => displayedPageKeys.has(draftContentKey(draft.id)));
-  const hasStory = displayedPageKeys.has(STORY_KEY);
+  const hasStory = displayedPageKeys.has(STORY_KEY) && !detachedUnitKeys.has(STORY_KEY);
   const pageHtml = [
-    hasStory ? editorPanelHtml(pageItemForKey(STORY_KEY)) : "",
+    hasStory ? editorPanelHtml(pageItemForKey(STORY_KEY), { detachUnitKey: STORY_KEY, detachTitle: PROJECT_NOTES_TITLE }) : "",
     ...selectedDrafts.map(draftStackHtml)
   ].filter(Boolean);
 
@@ -3219,6 +3597,7 @@ function renderEditor() {
     : `<p class="empty-state page-empty-state">No pages selected.</p>`;
 
   hydrateVisibleEditors(visibleEditorItems());
+  window.requestAnimationFrame(updateAllNotesHeadingDensity);
 }
 
 function refreshRenderedPageLabels() {
@@ -3246,6 +3625,7 @@ function refreshRenderedPageLabels() {
       draftLastEdited.textContent = `Last edited: ${formatDate(item.draft.updatedAt || item.draft.createdAt)}`;
     }
   });
+  window.requestAnimationFrame(updateAllNotesHeadingDensity);
 }
 
 function richPageHtml(page) {
@@ -3993,7 +4373,11 @@ function applyPageFormat(editorKey, field, value) {
     ...toolbarFormatValues(editorKey),
     [field]: value
   });
-  if (page.format.fontFamily === nextFormat.fontFamily && page.format.fontSize === nextFormat.fontSize) return;
+  if (
+    page.format.fontFamily === nextFormat.fontFamily &&
+    page.format.fontSize === nextFormat.fontSize &&
+    page.format.lineHeight === nextFormat.lineHeight
+  ) return;
 
   recordUndoSnapshot();
   page.format = nextFormat;
@@ -4005,7 +4389,7 @@ function applyPageFormat(editorKey, field, value) {
 
 function applyUniversalFormat(field, value) {
   const normalizedValue = String(value || "");
-  const allowedValues = field === "fontFamily" ? allowedFontFamilies : allowedFontSizes;
+  const allowedValues = allowedFormatValuesForField(field);
   if (!allowedValues.has(normalizedValue)) {
     syncGlobalFormatControls();
     return;
@@ -4324,6 +4708,10 @@ els.pagesOnScreen.addEventListener("click", event => {
   if (els.viewMenu) els.viewMenu.open = false;
 });
 
+els.viewEnablePanelDrag?.addEventListener("click", () => {
+  setPanelDragEnabled(!panelDragEnabled);
+});
+
 els.pageCanvas.addEventListener("focusin", event => {
   const editorEl = event.target.closest("[data-editor-key]");
   if (editorEl) {
@@ -4453,6 +4841,12 @@ els.pageCanvas.addEventListener("mousedown", event => {
 });
 
 els.pageCanvas.addEventListener("click", event => {
+  const detachButton = event.target.closest("[data-detach-unit-key]");
+  if (detachButton) {
+    detachUnit(detachButton.dataset.detachUnitKey);
+    return;
+  }
+
   const ribbonToggle = event.target.closest("[data-ribbon-toggle]");
   if (ribbonToggle) {
     toggleEditorRibbon(ribbonToggle);
@@ -4529,6 +4923,25 @@ els.toggleChanges.addEventListener("click", () => {
   renderDiff();
 });
 
+detachedPanelChannel?.addEventListener("message", event => {
+  const message = event.data || {};
+  if (message.source !== "panel") return;
+
+  if (message.type === "unit:ready" && detachedUnitKeys.has(message.key)) {
+    broadcastDetachedUnit(message.key);
+    return;
+  }
+
+  if (message.type === "unit:update") {
+    handleDetachedUnitUpdate(message.key, message.unit);
+    return;
+  }
+
+  if (message.type === "unit:closed") {
+    reattachDetachedUnit(message.key);
+  }
+});
+
 document.addEventListener("click", event => {
   const topMenu =
     event.target instanceof Element ? event.target.closest("#file-menu, #edit-menu, #view-menu") : null;
@@ -4558,6 +4971,7 @@ document.addEventListener("keydown", event => {
 document.addEventListener("scroll", positionOpenFormatPickers, true);
 window.addEventListener("resize", positionOpenFormatPickers);
 window.addEventListener("resize", updateTabDensity);
+window.addEventListener("resize", updateAllNotesHeadingDensity);
 
 window.addEventListener("beforeunload", () => {
   if (!state || isClosingApp) return;
@@ -4568,6 +4982,7 @@ window.addEventListener("beforeunload", () => {
 
 populateGlobalFormatControls();
 updateMenuShortcutLabels();
+syncPanelDragMenu();
 pingServer();
 window.setInterval(pingServer, 5_000);
 

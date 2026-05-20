@@ -48,7 +48,8 @@ function asText(value) {
 
 const DEFAULT_FORMAT = {
   fontFamily: "Consolas",
-  fontSize: "16"
+  fontSize: "16",
+  lineHeight: "1.62"
 };
 
 const allowedFontFamilies = new Set([
@@ -56,12 +57,24 @@ const allowedFontFamilies = new Set([
   "Segoe UI",
   "Arial",
   "Calibri",
+  "Cambria",
+  "Candara",
+  "Constantia",
+  "Corbel",
   "Georgia",
+  "Garamond",
+  "Book Antiqua",
+  "Palatino Linotype",
   "Times New Roman",
-  "Courier New"
+  "Courier New",
+  "Lucida Console",
+  "Verdana",
+  "Tahoma",
+  "Trebuchet MS"
 ]);
 
 const allowedFontSizes = new Set(["12", "14", "16", "18", "20", "24", "28", "32"]);
+const allowedLineHeights = new Set(["1.2", "1.4", "1.62", "1.8", "2"]);
 
 function escapeHtml(value) {
   return asText(value)
@@ -148,7 +161,10 @@ function normalizeFormat(format) {
   const fontSize = allowedFontSizes.has(String(format?.fontSize))
     ? String(format.fontSize)
     : DEFAULT_FORMAT.fontSize;
-  return { fontFamily, fontSize };
+  const lineHeight = allowedLineHeights.has(String(format?.lineHeight))
+    ? String(format.lineHeight)
+    : DEFAULT_FORMAT.lineHeight;
+  return { fontFamily, fontSize, lineHeight };
 }
 
 function upgradeLegacyDefaultFormat(format, shouldUpgrade) {
@@ -506,6 +522,109 @@ function parseStatePayload(body) {
   };
 }
 
+function parseDraftPageKey(key) {
+  if (key === "story") return { type: "story" };
+  const match = /^draft:(.+):(content|notes)$/.exec(asText(key));
+  if (!match) return null;
+  return { draftId: match[1], type: match[2] };
+}
+
+function parseDetachedUnitKey(key) {
+  if (key === "story") return { type: "story" };
+  const match = /^draft:(.+)$/.exec(asText(key));
+  if (!match) return null;
+  return { draftId: match[1], type: "draft" };
+}
+
+function pageForKey(state, key) {
+  const parsed = parseDraftPageKey(key);
+  if (!parsed) return null;
+  if (parsed.type === "story") return state.initialNotes;
+
+  const draft = state.drafts.find(item => item.id === parsed.draftId);
+  if (!draft) return null;
+  return parsed.type === "notes" ? draft.notes : draft;
+}
+
+function applyPagePayload(state, key, payload) {
+  const parsed = parseDraftPageKey(key);
+  const page = pageForKey(state, key);
+  if (!parsed || !page || !payload || typeof payload !== "object") return false;
+
+  if (typeof payload.content === "string") page.content = payload.content;
+  if (typeof payload.contentHtml === "string") page.contentHtml = payload.contentHtml;
+  if (payload.format && typeof payload.format === "object") {
+    page.format = normalizeFormat({ ...(page.format || {}), ...payload.format });
+  }
+
+  if (parsed.type === "content" && typeof payload.title === "string") {
+    const nextTitle = payload.title.trim() || "Untitled draft";
+    page.title = nextTitle;
+    if (page.notes) page.notes.title = `${nextTitle} Notes`;
+  }
+
+  page.updatedAt = nowIso();
+  return true;
+}
+
+function unitForKey(state, key) {
+  const parsed = parseDetachedUnitKey(key);
+  if (!parsed) return null;
+
+  if (parsed.type === "story") {
+    return {
+      key: "story",
+      type: "story",
+      title: PROJECT_NOTES_TITLE,
+      pages: [{
+        key: "story",
+        type: "story",
+        title: PROJECT_NOTES_TITLE,
+        page: state.initialNotes
+      }]
+    };
+  }
+
+  const draft = state.drafts.find(item => item.id === parsed.draftId);
+  if (!draft) return null;
+
+  return {
+    key,
+    type: "draft",
+    draftId: draft.id,
+    title: draft.title,
+    pages: [
+      {
+        key: `draft:${draft.id}:content`,
+        type: "draft",
+        title: draft.title,
+        page: draft
+      },
+      {
+        key: `draft:${draft.id}:notes`,
+        type: "notes",
+        title: `${draft.title} notes`,
+        page: draft.notes
+      }
+    ]
+  };
+}
+
+function applyUnitPayload(state, key, payload) {
+  const unit = unitForKey(state, key);
+  if (!unit || !payload || typeof payload !== "object") return false;
+
+  const pages = Array.isArray(payload.pages) ? payload.pages : [];
+  let applied = false;
+  pages.forEach(entry => {
+    const pageKey = asText(entry?.key);
+    if (!unit.pages.some(page => page.key === pageKey)) return;
+    if (applyPagePayload(state, pageKey, entry.page || entry)) applied = true;
+  });
+
+  return applied;
+}
+
 function powershellString(value) {
   return `'${String(value).replaceAll("'", "''")}'`;
 }
@@ -676,6 +795,48 @@ async function handleApi(req, res, pathname) {
       statePath: STATE_FILE,
       linkedTextPath,
       linkedTextFileName: linkedTextPath ? path.basename(linkedTextPath) : null
+    });
+    return;
+  }
+
+  if ((req.method === "PATCH" || req.method === "POST") && pathname === "/api/page") {
+    markClientActive();
+    const body = await readBody(req);
+    const payload = body ? JSON.parse(body) : {};
+    const key = asText(payload.key);
+    const state = readState();
+
+    if (!applyPagePayload(state, key, payload.page)) {
+      sendJson(res, 404, { error: "Page not found" });
+      return;
+    }
+
+    const savedState = writeAll(state);
+    sendJson(res, 200, {
+      ok: true,
+      state: savedState,
+      page: pageForKey(savedState, key)
+    });
+    return;
+  }
+
+  if ((req.method === "PATCH" || req.method === "POST") && pathname === "/api/unit") {
+    markClientActive();
+    const body = await readBody(req);
+    const payload = body ? JSON.parse(body) : {};
+    const key = asText(payload.key || payload.unitKey);
+    const state = readState();
+
+    if (!applyUnitPayload(state, key, payload)) {
+      sendJson(res, 404, { error: "Panel unit not found" });
+      return;
+    }
+
+    const savedState = writeAll(state);
+    sendJson(res, 200, {
+      ok: true,
+      state: savedState,
+      unit: unitForKey(savedState, key)
     });
     return;
   }

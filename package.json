@@ -24,10 +24,19 @@
       "server.js",
       "package.json"
     ],
+    "extraResources": [
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      }
+    ],
+    "afterPack": "scripts/after-pack.js",
     "directories": {
+      "buildResources": "build",
       "output": "dist"
     },
     "win": {
+      "icon": "build/icon.ico",
       "signAndEditExecutable": false,
       "target": [
         "nsis",
