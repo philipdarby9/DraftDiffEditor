@@ -15,7 +15,7 @@ const PORT = Number(process.env.PORT || 4173);
 const PROJECT_NOTES_TITLE = "Project notes";
 const FORMAT_DEFAULT_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
-const SERVER_BUILD = "server-common-edge-word-diff-2026-05-20";
+const SERVER_BUILD = "server-compare-created-label-2026-05-20";
 const AUTO_EXIT_ON_IDLE = process.env.DRAFT_DIFF_AUTO_EXIT === "1";
 const CLIENT_IDLE_EXIT_MS = 5 * 60_000;
 const STARTUP_IDLE_EXIT_MS = 120_000;
@@ -171,6 +171,7 @@ function normalizePage(page, fallback, options = {}) {
     id: page?.id || fallback.id,
     title: page?.title || fallback.title,
     createdAt: page?.createdAt || fallback.createdAt,
+    updatedAt: page?.updatedAt || fallback.updatedAt || page?.createdAt || fallback.createdAt,
     content,
     contentHtml: shouldPreservePlainTextLines ? textToHtml(content) : providedContentHtml || textToHtml(content),
     format: upgradeLegacyDefaultFormat(
@@ -186,6 +187,7 @@ function createDraft(index, content = "") {
     id: id("draft"),
     title: `Draft ${index}`,
     createdAt,
+    updatedAt: createdAt,
     content,
     contentHtml: textToHtml(content),
     format: { ...DEFAULT_FORMAT },
@@ -193,6 +195,7 @@ function createDraft(index, content = "") {
       id: id("notes"),
       title: `Draft ${index} Notes`,
       createdAt,
+      updatedAt: createdAt,
       content: "",
       contentHtml: "",
       format: { ...DEFAULT_FORMAT }
@@ -212,6 +215,7 @@ function defaultState() {
       id: "initial-notes",
       title: PROJECT_NOTES_TITLE,
       createdAt,
+      updatedAt: createdAt,
       content: "",
       contentHtml: "",
       format: { ...DEFAULT_FORMAT }
@@ -238,6 +242,7 @@ function normalizeState(input, options = {}) {
       id: raw.initialNotes?.id || "initial-notes",
       title: raw.initialNotes?.title || PROJECT_NOTES_TITLE,
       createdAt: raw.initialNotes?.createdAt || createdAt,
+      updatedAt: raw.initialNotes?.updatedAt || raw.initialNotes?.createdAt || createdAt,
       content: ""
     }, { upgradeLegacyDefaultFont, defaultFormat }),
     drafts: drafts.map((draft, index) => {
@@ -247,6 +252,7 @@ function normalizeState(input, options = {}) {
         id: draft?.id || id("draft"),
         title: draft?.title || `Draft ${draftNumber}`,
         createdAt: draftCreatedAt,
+        updatedAt: draft?.updatedAt || draftCreatedAt,
         content: ""
       }, { upgradeLegacyDefaultFont, defaultFormat });
       return {
@@ -255,6 +261,7 @@ function normalizeState(input, options = {}) {
           id: draft?.notes?.id || id("notes"),
           title: draft?.notes?.title || `Draft ${draftNumber} Notes`,
           createdAt: draft?.notes?.createdAt || draftCreatedAt,
+          updatedAt: draft?.notes?.updatedAt || draft?.notes?.createdAt || draftCreatedAt,
           content: ""
         }, { upgradeLegacyDefaultFont, defaultFormat })
       };
@@ -663,6 +670,24 @@ async function handleApi(req, res, pathname) {
       writeAll(readState());
     }
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/shutdown") {
+    const body = await readBody(req);
+    if (body) {
+      const payload = parseStatePayload(body);
+      writeAll(payload.state);
+    } else {
+      writeAll(readState());
+    }
+
+    sendJson(res, 200, { ok: true });
+    setTimeout(() => {
+      flushOnExit();
+      server.close(() => process.exit(0));
+      windowlessExitFallback();
+    }, 50).unref();
     return;
   }
 

@@ -8,6 +8,7 @@ const els = {
   fileOpen: document.querySelector("#file-open"),
   fileOpenLocation: document.querySelector("#file-open-location"),
   fileSaveAs: document.querySelector("#file-save-as"),
+  fileClose: document.querySelector("#file-close"),
   editUndo: document.querySelector("#edit-undo"),
   editRedo: document.querySelector("#edit-redo"),
   editGlobalFont: document.querySelector("#edit-global-font"),
@@ -57,6 +58,7 @@ let linkedTextPath = "";
 let stateRevision = 0;
 let saveQueued = false;
 let saveRetryCount = 0;
+let isClosingApp = false;
 
 let fileViewStates = readStoredFileViewStates();
 let displayedPageKeys = new Set();
@@ -385,6 +387,7 @@ function createDraft(copyFrom, indexOverride, defaultFormatOverride = null) {
     id: makeId("draft"),
     title: `Draft ${index}`,
     createdAt,
+    updatedAt: createdAt,
     content: copyFrom?.content || "",
     contentHtml: copyFrom?.contentHtml || textToHtml(copyFrom?.content || ""),
     format: copyFrom?.format ? { ...normalizeFormat(copyFrom.format) } : { ...defaultFormat },
@@ -392,6 +395,7 @@ function createDraft(copyFrom, indexOverride, defaultFormatOverride = null) {
       id: makeId("notes"),
       title: `Draft ${index} Notes`,
       createdAt,
+      updatedAt: createdAt,
       content: "",
       contentHtml: "",
       format: { ...defaultFormat }
@@ -412,6 +416,7 @@ function createDefaultState() {
       id: "initial-notes",
       title: PROJECT_NOTES_TITLE,
       createdAt,
+      updatedAt: createdAt,
       content: "",
       contentHtml: "",
       format: { ...defaultFormat }
@@ -676,6 +681,139 @@ function restoreHistorySnapshot(snapshot) {
   isRestoringHistory = false;
 }
 
+function pageEntriesForProjectState(projectState) {
+  const entries = new Map();
+  if (!projectState) return entries;
+
+  if (projectState.initialNotes) {
+    entries.set(STORY_KEY, {
+      key: STORY_KEY,
+      page: projectState.initialNotes,
+      type: "story"
+    });
+  }
+
+  projectState.drafts?.forEach(draft => {
+    if (!draft?.id) return;
+    entries.set(draftContentKey(draft.id), {
+      key: draftContentKey(draft.id),
+      page: draft,
+      type: "draft"
+    });
+    if (draft.notes) {
+      entries.set(draftNotesKey(draft.id), {
+        key: draftNotesKey(draft.id),
+        page: draft.notes,
+        type: "notes"
+      });
+    }
+  });
+
+  return entries;
+}
+
+function comparablePageSnapshot(entry) {
+  if (!entry?.page) return "";
+  const format = normalizeFormat(entry.page.format);
+  return JSON.stringify({
+    title: entry.page.title || "",
+    content: entry.page.content || "",
+    contentHtml: entry.page.contentHtml || "",
+    format
+  });
+}
+
+function pagePlainTextForHistory(entry) {
+  if (!entry?.page) return "";
+  return entry.page.content || plainTextFromHtml(entry.page.contentHtml || "");
+}
+
+function firstChangedTextOffset(beforeText, afterText) {
+  const before = String(beforeText || "");
+  const after = String(afterText || "");
+  let offset = 0;
+  const limit = Math.min(before.length, after.length);
+
+  while (offset < limit && before[offset] === after[offset]) {
+    offset += 1;
+  }
+
+  return Math.min(offset, after.length);
+}
+
+function historyChangeCandidateKeys(fromEntries, toEntries, preferredKey) {
+  const keys = new Set();
+  if (preferredKey) keys.add(preferredKey);
+  if (selectedDraftId) {
+    keys.add(draftContentKey(selectedDraftId));
+    keys.add(draftNotesKey(selectedDraftId));
+  }
+  keys.add(STORY_KEY);
+  toEntries.forEach((_, key) => keys.add(key));
+  fromEntries.forEach((_, key) => keys.add(key));
+  return Array.from(keys);
+}
+
+function findHistoryChangeTarget(fromState, toState, preferredKey = activeEditorKey) {
+  const fromEntries = pageEntriesForProjectState(fromState);
+  const toEntries = pageEntriesForProjectState(toState);
+  const keys = historyChangeCandidateKeys(fromEntries, toEntries, preferredKey);
+
+  for (const key of keys) {
+    const beforeEntry = fromEntries.get(key);
+    const afterEntry = toEntries.get(key);
+    if (!beforeEntry && !afterEntry) continue;
+    if (comparablePageSnapshot(beforeEntry) === comparablePageSnapshot(afterEntry)) continue;
+
+    const targetEntry = afterEntry || beforeEntry;
+    const beforeText = pagePlainTextForHistory(beforeEntry);
+    const afterText = pagePlainTextForHistory(afterEntry);
+    const titleChanged = (beforeEntry?.page?.title || "") !== (afterEntry?.page?.title || "");
+    const textChanged = beforeText !== afterText || (beforeEntry?.page?.contentHtml || "") !== (afterEntry?.page?.contentHtml || "");
+
+    return {
+      key: targetEntry.key,
+      type: textChanged ? "text" : (titleChanged ? "title" : "panel"),
+      offset: firstChangedTextOffset(beforeText, afterText)
+    };
+  }
+
+  return null;
+}
+
+function makeHistoryTargetVisible(target) {
+  if (!target?.key) return;
+
+  if (target.key === STORY_KEY) {
+    displayPage(STORY_KEY, true);
+    activeArea = "story";
+    activeEditorKey = STORY_KEY;
+    return;
+  }
+
+  const parsed = parseDraftPageKey(target.key);
+  if (!parsed?.draftId || !draftExists(parsed.draftId)) return;
+
+  selectedDraftId = parsed.draftId;
+  activeArea = "draft";
+  activeEditorKey = target.key;
+  displayPage(draftContentKey(parsed.draftId), true);
+  if (parsed.type === "notes") collapsedNotesIds.delete(parsed.draftId);
+}
+
+function restoreHistorySnapshotWithTarget(snapshot, target) {
+  isRestoringHistory = true;
+  state = projectStateFromSnapshot(snapshot);
+  editorSelections = {};
+  reconcileViewAfterHistoryRestore();
+  makeHistoryTargetVisible(target);
+  render();
+  scheduleSave();
+  updateUndoRedoControls();
+  revealHistoryChange(target);
+  isRestoringHistory = false;
+}
+
 function undoProjectChange() {
   if (!undoStack.length) {
     updateUndoRedoControls();
@@ -683,10 +821,12 @@ function undoProjectChange() {
   }
 
   syncFromInputs();
+  const fromState = projectStateFromSnapshot(serializeProjectState());
   const currentSnapshot = serializeProjectState();
   const previousSnapshot = undoStack.pop();
+  const toState = projectStateFromSnapshot(previousSnapshot);
   if (currentSnapshot && currentSnapshot !== previousSnapshot) redoStack.push(currentSnapshot);
-  restoreHistorySnapshot(previousSnapshot);
+  restoreHistorySnapshotWithTarget(previousSnapshot, findHistoryChangeTarget(fromState, toState));
 }
 
 function redoProjectChange() {
@@ -696,13 +836,15 @@ function redoProjectChange() {
   }
 
   syncFromInputs();
+  const fromState = projectStateFromSnapshot(serializeProjectState());
   const currentSnapshot = serializeProjectState();
   const nextSnapshot = redoStack.pop();
+  const toState = projectStateFromSnapshot(nextSnapshot);
   if (currentSnapshot && currentSnapshot !== nextSnapshot) {
     undoStack.push(currentSnapshot);
     if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
   }
-  restoreHistorySnapshot(nextSnapshot);
+  restoreHistorySnapshotWithTarget(nextSnapshot, findHistoryChangeTarget(fromState, toState));
 }
 
 function editableHistoryTarget(target) {
@@ -711,6 +853,8 @@ function editableHistoryTarget(target) {
 }
 
 function ensurePageFields(page) {
+  page.createdAt = page.createdAt || nowIso();
+  page.updatedAt = page.updatedAt || page.createdAt;
   page.content = typeof page.content === "string" ? page.content : "";
   page.contentHtml = typeof page.contentHtml === "string" ? page.contentHtml : textToHtml(page.content);
   if (page.contentHtml) {
@@ -1187,6 +1331,21 @@ function pageForEditorKey(editorKey) {
   return pageItemForKey(editorKey)?.page;
 }
 
+function wordCountForText(text) {
+  const matches = String(text || "").match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu);
+  return matches ? matches.length : 0;
+}
+
+function pageWordCount(page) {
+  ensurePageFields(page);
+  return wordCountForText(page.content || plainTextFromHtml(page.contentHtml || ""));
+}
+
+function formatWordCount(count) {
+  const value = Number(count) || 0;
+  return `${value.toLocaleString()} ${value === 1 ? "word" : "words"}`;
+}
+
 function sanitizeStyleMarks(styleValue = "") {
   const style = styleValue.toLowerCase();
   return {
@@ -1377,10 +1536,17 @@ function preservedFormat(previousPage) {
 function pageFromImportedBlock(block, fallbackTitle, previousPage = null) {
   const title = block?.title || fallbackTitle;
   const content = block?.content || "";
+  const importedCreatedAt = block?.createdAt || nowIso();
+  const createdAt = previousPage?.createdAt || importedCreatedAt;
+  const previousContent = previousPage
+    ? previousPage.content || plainTextFromHtml(previousPage.contentHtml || "")
+    : null;
+  const contentChanged = previousPage && previousContent !== content;
   return {
     id: previousPage?.id || makeId("page"),
     title,
-    createdAt: block?.createdAt || nowIso(),
+    createdAt,
+    updatedAt: contentChanged ? nowIso() : previousPage?.updatedAt || createdAt,
     content,
     contentHtml: textToHtml(content),
     format: preservedFormat(previousPage)
@@ -1403,7 +1569,7 @@ function stateFromExportText(text, previousState = null) {
     return title === "project notes" || title === "story notes";
   });
   const storyBlock = pages[storyIndex >= 0 ? storyIndex : 0];
-  const createdAt = storyBlock.createdAt || nowIso();
+  const createdAt = previousState?.createdAt || storyBlock.createdAt || nowIso();
   const afterStory = pages.slice((storyIndex >= 0 ? storyIndex : 0) + 1);
   const drafts = [];
 
@@ -1530,9 +1696,20 @@ function syncGlobalFormatControls() {
 
 function syncRichPage(page, editorEl) {
   ensurePageFields(page);
-  page.contentHtml = sanitizeRichHtml(editorEl.innerHTML);
-  page.content = editorPlainText(editorEl);
-  page.format = normalizeFormat(page.format);
+  const nextContentHtml = sanitizeRichHtml(editorEl.innerHTML);
+  const nextContent = editorPlainText(editorEl);
+  const nextFormat = normalizeFormat(page.format);
+  if (
+    page.contentHtml !== nextContentHtml ||
+    page.content !== nextContent ||
+    page.format.fontFamily !== nextFormat.fontFamily ||
+    page.format.fontSize !== nextFormat.fontSize
+  ) {
+    page.updatedAt = nowIso();
+  }
+  page.contentHtml = nextContentHtml;
+  page.content = nextContent;
+  page.format = nextFormat;
 }
 
 function splitLines(text) {
@@ -2848,6 +3025,17 @@ function formatRibbonHtml(pageKey, label, options = {}) {
 function editorPanelHtml(item, options = {}) {
   const page = ensurePageFields(item.page);
   const isNotesPanel = Boolean(options.notesDraftId);
+  const notesHeaderStats = isNotesPanel && item.draft
+    ? `
+      <div class="notes-heading-stats" aria-label="${escapeHtml(item.draft.title)} statistics">
+        <span class="notes-heading-word-count" data-draft-word-count>${formatWordCount(pageWordCount(item.draft))}</span>
+        <span class="notes-heading-stat-divider" aria-hidden="true"></span>
+        <span class="notes-heading-last-edited" data-draft-last-edited>Last edited: ${formatDate(item.draft.updatedAt || item.draft.createdAt)}</span>
+      </div>
+    `
+    : "";
+  const createdDateText = formatDate(item.createdAt);
+  const headerDateText = item.type === "draft" ? `Created: ${createdDateText}` : createdDateText;
   const hasToolbar = !options.collapsed;
   const ribbonId = `format-ribbon-${item.key}`;
   const titleRow = item.editableTitle
@@ -2876,19 +3064,22 @@ function editorPanelHtml(item, options = {}) {
   const collapsedClass = options.collapsed ? " notes-collapsed" : "";
   const headingClass = isNotesPanel ? "panel-heading notes-toggle-heading" : "panel-heading";
   const headingAttributes = isNotesPanel
-    ? ` data-toggle-notes="${escapeHtml(options.notesDraftId)}" role="button" tabindex="0" aria-expanded="${String(!options.collapsed)}" title="${options.collapsed ? "Show notes" : "Collapse notes"}"`
+    ? ` data-toggle-notes="${escapeHtml(options.notesDraftId)}" role="button" tabindex="0" aria-expanded="${String(!options.collapsed)}" title="Toggle notes"`
     : "";
-  const notesCaret = isNotesPanel
+  const notesCollapseButton = isNotesPanel
     ? `
-      <span class="notes-caret" aria-hidden="true">
+      <button
+        class="notes-collapse-toggle"
+        type="button"
+        data-notes-collapse-toggle
+        title="Toggle notes"
+        aria-label="Toggle notes"
+      >
         <svg viewBox="0 0 12 12">
           <path d="M3 7.5 6 4.5l3 3"></path>
         </svg>
-      </span>
+      </button>
     `
-    : "";
-  const notesHint = isNotesPanel
-    ? `<span class="notes-collapse-hint">${options.collapsed ? "Click to expand" : "Click to collapse"}</span>`
     : "";
   const formatButton = hasToolbar
     ? `
@@ -2906,17 +3097,18 @@ function editorPanelHtml(item, options = {}) {
   const headingInner = isNotesPanel
     ? `
       <div class="notes-heading-main">
-        ${notesCaret}
+        ${notesCollapseButton}
         ${headingContent}
       </div>
-      ${formatButton}
-      <span class="meta" title="Created ${formatDate(item.createdAt)}">${formatDate(item.createdAt)}</span>
-      ${notesHint}
+      <div class="notes-heading-tools">
+        ${formatButton}
+        ${notesHeaderStats}
+      </div>
     `
     : `
       ${headingContent}
       ${formatButton}
-      <span class="meta" title="Created ${formatDate(item.createdAt)}">${formatDate(item.createdAt)}</span>
+      <span class="meta" title="Created ${createdDateText}">${headerDateText}</span>
     `;
   const placeholder = item.type === "story"
     ? "Project notes..."
@@ -3043,6 +3235,16 @@ function refreshRenderedPageLabels() {
 
     const toolbar = toolbarForEditor(item.key);
     if (toolbar) toolbar.setAttribute("aria-label", `${item.title} formatting`);
+
+    const draftWordCount = panel.querySelector("[data-draft-word-count]");
+    if (draftWordCount && item.type === "notes" && item.draft) {
+      draftWordCount.textContent = formatWordCount(pageWordCount(item.draft));
+    }
+
+    const draftLastEdited = panel.querySelector("[data-draft-last-edited]");
+    if (draftLastEdited && item.type === "notes" && item.draft) {
+      draftLastEdited.textContent = `Last edited: ${formatDate(item.draft.updatedAt || item.draft.createdAt)}`;
+    }
   });
 }
 
@@ -3139,7 +3341,7 @@ function baseComparePageHtml(draft, subtitle = "BASELINE") {
         <div class="title-row">
           <div class="title">${escapeHtml(draft.title)}</div>
         </div>
-        <div class="meta">${formatDate(draft.createdAt)}</div>
+        <div class="meta">Created: ${formatDate(draft.createdAt)}</div>
       </div>
       <div class="compare-page-body" style="${fontStyle(draft.format)}">
         ${comparePageContentHtml(draft)}
@@ -3170,7 +3372,7 @@ function markedComparePageHtml(pair) {
           <div class="vs">vs ${escapeHtml(pair.before.title)}</div>
         </div>
         <div class="meta">
-          <div>${formatDate(pair.after.createdAt)}</div>
+          <div>Created: ${formatDate(pair.after.createdAt)}</div>
           <div class="compare-stats">
             <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
             <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
@@ -3313,7 +3515,11 @@ function syncFromInputs() {
   els.pageCanvas.querySelectorAll("[data-title-draft-id]").forEach(input => {
     const draft = draftById(input.dataset.titleDraftId);
     if (!draft) return;
-    draft.title = input.value || "Untitled draft";
+    const nextTitle = input.value || "Untitled draft";
+    if (draft.title !== nextTitle) {
+      draft.title = nextTitle;
+      draft.updatedAt = nowIso();
+    }
     draft.notes.title = `${draft.title} Notes`;
   });
 
@@ -3552,6 +3758,33 @@ async function openFileLocation() {
   }
 }
 
+async function closeApp() {
+  closeFileMenu();
+  window.clearTimeout(saveTimer);
+
+  try {
+    if (state) syncFromInputs();
+    isClosingApp = true;
+    setStatus("Closing...");
+
+    const response = await fetch("/api/shutdown", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: state ? JSON.stringify(state) : ""
+    });
+    if (!response.ok) throw new Error(await response.text());
+
+    window.setTimeout(() => {
+      window.close();
+      document.body.innerHTML = '<main class="closed-screen"><h1>Draft Diff Editor closed</h1><p>You can close this tab.</p></main>';
+    }, 120);
+  } catch (error) {
+    console.error(error);
+    isClosingApp = false;
+    setStatus(readableSaveFailure(error?.message || "Close failed"));
+  }
+}
+
 async function saveNow() {
   if (!state) return false;
 
@@ -3656,6 +3889,62 @@ function focusPageEditor(pageKey) {
       restoreEditorScrollPosition(editor);
     }
     alignPageInCanvas(pageKey);
+  });
+}
+
+function scrollEditorOffsetIntoView(editor, offset) {
+  if (!editor) return;
+  const range = rangeFromTextOffsets(editor, offset, offset);
+  const marker = document.createElement("span");
+  marker.className = "history-reveal-marker";
+  marker.textContent = "\u200b";
+
+  range.insertNode(marker);
+  marker.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+  marker.remove();
+
+  const selectionRange = rangeFromTextOffsets(editor, offset, offset);
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(selectionRange);
+}
+
+function revealHistoryChange(target) {
+  if (!target?.key) {
+    focusPageEditor(activeEditorKey);
+    return;
+  }
+
+  window.requestAnimationFrame(() => {
+    alignPageInCanvas(target.key);
+
+    if (target.type === "title") {
+      const parsed = parseDraftPageKey(target.key);
+      const titleInput = parsed?.draftId
+        ? els.pageCanvas.querySelector(`[data-title-draft-id="${cssEscape(parsed.draftId)}"]`)
+        : null;
+      if (titleInput) {
+        titleInput.focus({ preventScroll: true });
+        titleInput.select();
+        titleInput.scrollIntoView({ block: "center", inline: "nearest", behavior: "smooth" });
+        return;
+      }
+    }
+
+    const editor = editorElementForKey(target.key);
+    if (!editor) {
+      focusPageEditor(activeEditorKey);
+      return;
+    }
+
+    const offset = Math.max(0, Number(target.offset) || 0);
+    editorSelections[target.key] = {
+      ...editorSelections[target.key],
+      startTextOffset: offset,
+      endTextOffset: offset
+    };
+    editor.focus({ preventScroll: true });
+    scrollEditorOffsetIntoView(editor, offset);
   });
 }
 
@@ -3937,6 +4226,7 @@ els.fileNew.addEventListener("click", newTextProject);
 els.fileOpen.addEventListener("click", openTextProject);
 els.fileOpenLocation.addEventListener("click", openFileLocation);
 els.fileSaveAs.addEventListener("click", () => saveAsTextProject());
+els.fileClose.addEventListener("click", closeApp);
 els.editUndo.addEventListener("click", () => {
   undoProjectChange();
   closeTopMenus();
@@ -4270,7 +4560,7 @@ window.addEventListener("resize", positionOpenFormatPickers);
 window.addEventListener("resize", updateTabDensity);
 
 window.addEventListener("beforeunload", () => {
-  if (!state) return;
+  if (!state || isClosingApp) return;
   syncFromInputs();
   const blob = new Blob([JSON.stringify(state)], { type: "application/json" });
   navigator.sendBeacon("/api/close", blob);
