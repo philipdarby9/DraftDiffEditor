@@ -10,6 +10,8 @@ const els = {
   fileSaveAs: document.querySelector("#file-save-as"),
   editUndo: document.querySelector("#edit-undo"),
   editRedo: document.querySelector("#edit-redo"),
+  editGlobalFont: document.querySelector("#edit-global-font"),
+  editGlobalFontSize: document.querySelector("#edit-global-font-size"),
   fileOpenInput: document.querySelector("#file-open-input"),
   storyTab: document.querySelector("#story-tab"),
   storyDisplayToggle: document.querySelector("#story-display-toggle"),
@@ -38,6 +40,7 @@ const FILE_VIEW_STATES_STORAGE_KEY = "draftDiff.fileViewStates";
 const PROJECT_STATE_CACHE_STORAGE_KEY = "draftDiff.projectStatesByPath";
 const DEFAULT_PAGES_ON_SCREEN = 2;
 const HISTORY_LIMIT = 100;
+const MAX_SAVE_RETRIES = 3;
 const FORMAT_DEFAULT_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
 
@@ -53,6 +56,7 @@ let projectFileName = "draft-history.txt";
 let linkedTextPath = "";
 let stateRevision = 0;
 let saveQueued = false;
+let saveRetryCount = 0;
 
 let fileViewStates = readStoredFileViewStates();
 let displayedPageKeys = new Set();
@@ -373,32 +377,35 @@ function draftById(draftId) {
   return state.drafts.find(draft => draft.id === draftId);
 }
 
-function createDraft(copyFrom, indexOverride) {
+function createDraft(copyFrom, indexOverride, defaultFormatOverride = null) {
   const index = indexOverride || ((state?.drafts?.length || 0) + 1);
   const createdAt = nowIso();
+  const defaultFormat = normalizeFormat(defaultFormatOverride || currentDefaultFormat(state));
   return {
     id: makeId("draft"),
     title: `Draft ${index}`,
     createdAt,
     content: copyFrom?.content || "",
     contentHtml: copyFrom?.contentHtml || textToHtml(copyFrom?.content || ""),
-    format: copyFrom?.format ? { ...normalizeFormat(copyFrom.format) } : { ...DEFAULT_FORMAT },
+    format: copyFrom?.format ? { ...normalizeFormat(copyFrom.format) } : { ...defaultFormat },
     notes: {
       id: makeId("notes"),
       title: `Draft ${index} Notes`,
       createdAt,
       content: "",
       contentHtml: "",
-      format: { ...DEFAULT_FORMAT }
+      format: { ...defaultFormat }
     }
   };
 }
 
 function createDefaultState() {
   const createdAt = nowIso();
+  const defaultFormat = { ...DEFAULT_FORMAT };
   return {
     version: 1,
     formatDefaultVersion: FORMAT_DEFAULT_VERSION,
+    defaultFormat,
     createdAt,
     updatedAt: createdAt,
     initialNotes: {
@@ -407,9 +414,9 @@ function createDefaultState() {
       createdAt,
       content: "",
       contentHtml: "",
-      format: { ...DEFAULT_FORMAT }
+      format: { ...defaultFormat }
     },
-    drafts: [createDraft(null, 1)]
+    drafts: [createDraft(null, 1, defaultFormat)]
   };
 }
 
@@ -557,8 +564,19 @@ function upgradeLegacyDefaultFormat(format = {}, shouldUpgrade = false) {
     : normalized;
 }
 
+function currentDefaultFormat(projectState = null) {
+  return normalizeFormat(projectState?.defaultFormat || DEFAULT_FORMAT);
+}
+
 function migrateLegacyDefaultFonts(projectState) {
-  if (!projectState || projectState.formatDefaultVersion >= FORMAT_DEFAULT_VERSION) return projectState;
+  if (!projectState) return projectState;
+
+  const shouldUpgrade = projectState.formatDefaultVersion !== FORMAT_DEFAULT_VERSION;
+  projectState.defaultFormat = upgradeLegacyDefaultFormat(
+    projectState.defaultFormat || DEFAULT_FORMAT,
+    shouldUpgrade
+  );
+  if (!shouldUpgrade) return projectState;
 
   const upgradePage = page => {
     if (page) page.format = upgradeLegacyDefaultFormat(page.format, true);
@@ -703,7 +721,7 @@ function ensurePageFields(page) {
       page.content = htmlContent;
     }
   }
-  page.format = normalizeFormat(page.format);
+  page.format = normalizeFormat({ ...currentDefaultFormat(state), ...(page.format || {}) });
   return page;
 }
 
@@ -1421,6 +1439,7 @@ function stateFromExportText(text, previousState = null) {
   return {
     version: 1,
     formatDefaultVersion: FORMAT_DEFAULT_VERSION,
+    defaultFormat: currentDefaultFormat(previousState),
     createdAt,
     updatedAt: nowIso(),
     initialNotes: {
@@ -1466,6 +1485,47 @@ function syncToolbarValues(editorKey) {
       option.setAttribute("aria-selected", String(option.dataset.formatOption === value));
     });
   });
+}
+
+function editablePages(projectState = state) {
+  if (!projectState) return [];
+
+  const pages = [];
+  if (projectState.initialNotes) pages.push(projectState.initialNotes);
+  projectState.drafts?.forEach(draft => {
+    if (!draft) return;
+    pages.push(draft);
+    if (draft.notes) pages.push(draft.notes);
+  });
+  return pages;
+}
+
+function sharedPageFormatValue(field) {
+  const pages = editablePages();
+  if (!pages.length) return currentDefaultFormat(state)[field];
+
+  const values = new Set(pages.map(page => {
+    ensurePageFields(page);
+    return page.format[field];
+  }));
+  return values.size === 1 ? values.values().next().value : "";
+}
+
+function globalFormatOptions(values) {
+  return [
+    '<option value="" disabled>Mixed</option>',
+    ...values.map(value => `<option value="${escapeHtml(value)}">${escapeHtml(value)}</option>`)
+  ].join("");
+}
+
+function populateGlobalFormatControls() {
+  if (els.editGlobalFont) els.editGlobalFont.innerHTML = globalFormatOptions(FONT_FAMILY_OPTIONS);
+  if (els.editGlobalFontSize) els.editGlobalFontSize.innerHTML = globalFormatOptions(FONT_SIZE_OPTIONS);
+}
+
+function syncGlobalFormatControls() {
+  if (els.editGlobalFont) els.editGlobalFont.value = sharedPageFormatValue("fontFamily");
+  if (els.editGlobalFontSize) els.editGlobalFontSize.value = sharedPageFormatValue("fontSize");
 }
 
 function syncRichPage(page, editorEl) {
@@ -1613,6 +1673,116 @@ function shouldCoalesceInterleavedReplacementWindow(segment) {
 
   if (anchors > 5) return false;
   return changedWords / words >= 0.55;
+}
+
+function changedWordTypes(segment) {
+  return segment
+    .filter(part => isChangedDiffPart(part) && isDiffSequenceWordText(part.text))
+    .map(part => part.type);
+}
+
+function changedWordInfos(segment) {
+  return segment
+    .map((part, index) => ({ part, index }))
+    .filter(({ part }) => isChangedDiffPart(part) && isDiffSequenceWordText(part.text))
+    .map(({ part, index }) => ({ type: part.type, index }));
+}
+
+function changedTypesAreCoalescableAlternation(types) {
+  if (types.length < 6) return false;
+
+  const added = types.filter(type => type === "added").length;
+  const removed = types.length - added;
+  if (added < 3 || removed < 3) return false;
+
+  return types.every((type, index) => index === 0 || type !== types[index - 1]);
+}
+
+function shouldCoalesceAlternatingChangedWords(segment) {
+  return changedTypesAreCoalescableAlternation(changedWordTypes(segment));
+}
+
+function alternatingChangedWordRunBounds(segment) {
+  const infos = changedWordInfos(segment);
+  if (infos.length < 6) return null;
+
+  let best = null;
+  let runStart = 0;
+  const considerRun = end => {
+    const run = infos.slice(runStart, end);
+    const types = run.map(info => info.type);
+    if (!changedTypesAreCoalescableAlternation(types)) return;
+
+    if (!best || run.length > best.wordCount) {
+      best = {
+        start: run[0].index,
+        end: run[run.length - 1].index + 1,
+        wordCount: run.length
+      };
+    }
+  };
+
+  for (let index = 1; index <= infos.length; index += 1) {
+    if (index === infos.length || infos[index].type === infos[index - 1].type) {
+      considerRun(index);
+      runStart = index;
+    }
+  }
+
+  return best;
+}
+
+function coalesceAlternatingChangedWordRun(segment) {
+  const bounds = alternatingChangedWordRunBounds(segment);
+  if (!bounds) return segment;
+
+  return [
+    ...segment.slice(0, bounds.start),
+    ...coalesceInterleavedReplacementWindow(segment.slice(bounds.start, bounds.end)),
+    ...coalesceAlternatingChangedWordRun(segment.slice(bounds.end))
+  ];
+}
+
+function coalesceAlternatingChangedWordSubsegments(segment) {
+  const coalesced = [];
+  let start = 0;
+
+  for (let index = 0; index <= segment.length; index += 1) {
+    const isBoundary = index === segment.length || segment[index].text === "\n";
+    if (!isBoundary) continue;
+
+    coalesced.push(...coalesceAlternatingChangedWordRun(segment.slice(start, index)));
+
+    if (index < segment.length) coalesced.push(segment[index]);
+    start = index + 1;
+  }
+
+  return coalesced;
+}
+
+function coalesceAlternatingChangedWordSegments(parts) {
+  const coalesced = [];
+  let index = 0;
+
+  while (index < parts.length) {
+    if (parts[index].type === "same" && isDiffSequenceWordText(parts[index].text)) {
+      coalesced.push(parts[index]);
+      index += 1;
+      continue;
+    }
+
+    const segmentStart = index;
+    while (
+      index < parts.length &&
+      !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
+    ) {
+      index += 1;
+    }
+
+    coalesced.push(...coalesceAlternatingChangedWordSubsegments(parts.slice(segmentStart, index)));
+  }
+
+  return coalesced;
 }
 
 function coalesceInterleavedReplacementSubsegment(segment) {
@@ -1771,6 +1941,80 @@ function diffChangedTokenRun(before, after) {
   return result;
 }
 
+function sameDiffPartFromChangedPair(removedPart, addedPart) {
+  return {
+    ...addedPart,
+    type: "same",
+    marks: addedPart.marks || removedPart.marks || {},
+    beforeIndex: removedPart.beforeIndex,
+    afterIndex: addedPart.afterIndex
+  };
+}
+
+function changedRunContentCount(parts) {
+  return parts.filter(part => String(part.text || "").trim()).length;
+}
+
+function isMeaningfulCommonChangedRun(parts) {
+  if (!parts.length) return false;
+  const wordCount = parts.filter(part => isDiffSequenceWordText(part.text)).length;
+  return wordCount >= 1;
+}
+
+function commonChangedPrefixLength(removed, added) {
+  let length = 0;
+  while (
+    length < removed.length &&
+    length < added.length &&
+    diffPartKey(removed[length]) === diffPartKey(added[length])
+  ) {
+    length += 1;
+  }
+  return length;
+}
+
+function commonChangedSuffixLength(removed, added, prefixLength) {
+  let length = 0;
+  while (
+    length < removed.length - prefixLength &&
+    length < added.length - prefixLength &&
+    diffPartKey(removed[removed.length - 1 - length]) === diffPartKey(added[added.length - 1 - length])
+  ) {
+    length += 1;
+  }
+  return length;
+}
+
+function restoreCommonChangedAffixes(segment) {
+  const removed = segment.filter(part => part.type === "removed");
+  const added = segment.filter(part => part.type === "added");
+  if (!removed.length || !added.length) return segment;
+
+  let prefixLength = commonChangedPrefixLength(removed, added);
+  if (!isMeaningfulCommonChangedRun(removed.slice(0, prefixLength))) prefixLength = 0;
+
+  let suffixLength = commonChangedSuffixLength(removed, added, prefixLength);
+  if (!isMeaningfulCommonChangedRun(removed.slice(removed.length - suffixLength))) suffixLength = 0;
+
+  if (!prefixLength && !suffixLength) return segment;
+
+  const prefix = removed
+    .slice(0, prefixLength)
+    .map((part, index) => sameDiffPartFromChangedPair(part, added[index]));
+  const suffixRemovedStart = removed.length - suffixLength;
+  const suffixAddedStart = added.length - suffixLength;
+  const suffix = removed
+    .slice(suffixRemovedStart)
+    .map((part, index) => sameDiffPartFromChangedPair(part, added[suffixAddedStart + index]));
+
+  return [
+    ...prefix,
+    ...removed.slice(prefixLength, suffixRemovedStart),
+    ...added.slice(prefixLength, suffixAddedStart),
+    ...suffix
+  ];
+}
+
 function shouldRestoreChangedTokenRun(segment) {
   const changedParts = segment.filter(part => part.type === "added" || part.type === "removed");
   if (!changedParts.some(part => part.type === "added")) return false;
@@ -1799,6 +2043,12 @@ function restoreIdenticalChangedTokens(parts) {
     }
 
     const segment = parts.slice(segmentStart, index);
+    const affixRestored = restoreCommonChangedAffixes(segment);
+    if (affixRestored !== segment) {
+      restored.push(...affixRestored);
+      continue;
+    }
+
     if (!shouldRestoreChangedTokenRun(segment)) {
       restored.push(...segment);
       continue;
@@ -1848,7 +2098,9 @@ function cleanupWeakReplacementAnchors(parts) {
   }) : parts;
 
   return restoreIdenticalChangedTokens(coalesceReplacementSegments(
-    coalesceInterleavedReplacementSegments(absorbedParts)
+    coalesceInterleavedReplacementSegments(
+      coalesceAlternatingChangedWordSegments(absorbedParts)
+    )
   ));
 }
 
@@ -3050,6 +3302,7 @@ function render() {
   renderEditor();
   renderChangesVisibility();
   renderDiff();
+  syncGlobalFormatControls();
 }
 
 function syncFromInputs() {
@@ -3072,6 +3325,7 @@ function syncFromInputs() {
 
 function scheduleSave() {
   markStateChanged();
+  saveRetryCount = 0;
   syncFromInputs();
   rememberLinkedProjectState();
   renderDraftTabs();
@@ -3098,6 +3352,41 @@ function resetViewStateForProject() {
 
 function isAbortError(error) {
   return error?.name === "AbortError";
+}
+
+function readableSaveFailure(message = "") {
+  const text = String(message || "");
+  if (/linked text file write failed|EACCES|EPERM|access is denied|denied/i.test(text)) {
+    return "Save failed: linked text file blocked";
+  }
+  if (/Unexpected token|JSON|payload|state/i.test(text)) {
+    return "Save failed: project data was rejected";
+  }
+  if (/Failed to fetch|NetworkError|Load failed/i.test(text)) {
+    return "Save failed: local server unavailable";
+  }
+  return text ? `Save failed: ${text.slice(0, 90)}` : "Save failed";
+}
+
+async function responseSaveFailure(response) {
+  try {
+    const payload = await response.json();
+    return readableSaveFailure(payload?.error);
+  } catch {
+    return readableSaveFailure(response.statusText || `HTTP ${response.status}`);
+  }
+}
+
+function handleSaveFailure(message) {
+  isSaving = false;
+  if (saveRetryCount < MAX_SAVE_RETRIES) {
+    saveRetryCount += 1;
+    setStatus(`${message}; retrying`);
+    queueSave(Math.min(1500 * saveRetryCount, 6000));
+    return;
+  }
+
+  setStatus(message);
 }
 
 function downloadExportText(fileName) {
@@ -3286,8 +3575,7 @@ async function saveNow() {
     });
 
     if (!response.ok) {
-      setStatus("Save failed");
-      isSaving = false;
+      handleSaveFailure(await responseSaveFailure(response));
       return false;
     }
 
@@ -3299,6 +3587,7 @@ async function saveNow() {
     linkedTextPath = payload.linkedTextPath || linkedTextPath || "";
     if (payload.linkedTextFileName) projectFileName = payload.linkedTextFileName;
     isSaving = false;
+    saveRetryCount = 0;
 
     if (!responseMatchesCurrentState || saveQueued) {
       saveQueued = false;
@@ -3317,8 +3606,7 @@ async function saveNow() {
     return Boolean(linkedTextPath);
   } catch (error) {
     console.error(error);
-    setStatus("Save failed");
-    isSaving = false;
+    handleSaveFailure(readableSaveFailure(error?.message));
     return false;
   }
 }
@@ -3422,6 +3710,47 @@ function applyPageFormat(editorKey, field, value) {
   page.format = nextFormat;
   applyEditorFormat(editorEl, page.format);
   syncToolbarValues(editorKey);
+  syncGlobalFormatControls();
+  scheduleSave();
+}
+
+function applyUniversalFormat(field, value) {
+  const normalizedValue = String(value || "");
+  const allowedValues = field === "fontFamily" ? allowedFontFamilies : allowedFontSizes;
+  if (!allowedValues.has(normalizedValue)) {
+    syncGlobalFormatControls();
+    return;
+  }
+
+  syncFromInputs();
+
+  const currentFormat = currentDefaultFormat(state);
+  const nextFormat = normalizeFormat({
+    ...currentFormat,
+    [field]: normalizedValue
+  });
+  const pages = editablePages();
+  const hasPageChange = pages.some(page => {
+    ensurePageFields(page);
+    return page.format[field] !== nextFormat[field];
+  });
+  const hasDefaultChange = currentFormat[field] !== nextFormat[field];
+
+  if (!hasPageChange && !hasDefaultChange) {
+    syncGlobalFormatControls();
+    return;
+  }
+
+  recordUndoSnapshot();
+  state.defaultFormat = nextFormat;
+  pages.forEach(page => {
+    ensurePageFields(page);
+    page.format = normalizeFormat({
+      ...page.format,
+      [field]: nextFormat[field]
+    });
+  });
+  render();
   scheduleSave();
 }
 
@@ -3615,6 +3944,12 @@ els.editUndo.addEventListener("click", () => {
 els.editRedo.addEventListener("click", () => {
   redoProjectChange();
   closeTopMenus();
+});
+els.editGlobalFont.addEventListener("change", event => {
+  applyUniversalFormat("fontFamily", event.target.value);
+});
+els.editGlobalFontSize.addEventListener("change", event => {
+  applyUniversalFormat("fontSize", event.target.value);
 });
 
 els.fileOpenInput.addEventListener("change", async event => {
@@ -3941,6 +4276,7 @@ window.addEventListener("beforeunload", () => {
   navigator.sendBeacon("/api/close", blob);
 });
 
+populateGlobalFormatControls();
 updateMenuShortcutLabels();
 pingServer();
 window.setInterval(pingServer, 5_000);

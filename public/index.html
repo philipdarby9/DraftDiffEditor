@@ -4,7 +4,7 @@
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <title>Draft Diff Editor</title>
-    <link rel="stylesheet" href="/styles.css?v=server-all-drafts-toggle-2026-05-20">
+    <link rel="stylesheet" href="/styles.css?v=server-common-edge-word-diff-2026-05-20">
   </head>
   <body>
     <main class="app-shell">
@@ -35,6 +35,17 @@
             <div class="file-menu-panel">
               <button id="edit-undo" type="button" disabled><span class="menu-check" aria-hidden="true"></span><span>Undo</span><span class="menu-shortcut" data-shortcut="undo">Ctrl+Z</span></button>
               <button id="edit-redo" type="button" disabled><span class="menu-check" aria-hidden="true"></span><span>Redo</span><span class="menu-shortcut" data-shortcut="redo">Ctrl+Y</span></button>
+              <span class="menu-divider" aria-hidden="true"></span>
+              <div class="edit-format-controls" aria-label="Universal editor formatting">
+                <label class="edit-format-control">
+                  <span>Font</span>
+                  <select id="edit-global-font" data-global-format="fontFamily" aria-label="Universal font"></select>
+                </label>
+                <label class="edit-format-control">
+                  <span>Size</span>
+                  <select id="edit-global-font-size" data-global-format="fontSize" aria-label="Universal font size"></select>
+                </label>
+              </div>
             </div>
           </details>
           <details id="view-menu" class="file-menu">
@@ -125,6 +136,6 @@
       </section>
     </main>
 
-    <script src="/app.js?v=server-all-drafts-toggle-2026-05-20"></script>
+    <script src="/app.js?v=server-common-edge-word-diff-2026-05-20"></script>
   </body>
 </html>

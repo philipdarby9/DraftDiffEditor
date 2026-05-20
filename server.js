@@ -15,7 +15,7 @@ const PORT = Number(process.env.PORT || 4173);
 const PROJECT_NOTES_TITLE = "Project notes";
 const FORMAT_DEFAULT_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
-const SERVER_BUILD = "server-all-drafts-toggle-2026-05-20";
+const SERVER_BUILD = "server-common-edge-word-diff-2026-05-20";
 const AUTO_EXIT_ON_IDLE = process.env.DRAFT_DIFF_AUTO_EXIT === "1";
 const CLIENT_IDLE_EXIT_MS = 5 * 60_000;
 const STARTUP_IDLE_EXIT_MS = 120_000;
@@ -155,6 +155,10 @@ function upgradeLegacyDefaultFormat(format, shouldUpgrade) {
     : normalized;
 }
 
+function currentDefaultFormat(state) {
+  return normalizeFormat(state?.defaultFormat || DEFAULT_FORMAT);
+}
+
 function normalizePage(page, fallback, options = {}) {
   const providedContentHtml = asText(page?.contentHtml);
   const providedContent = asText(page?.content);
@@ -169,7 +173,10 @@ function normalizePage(page, fallback, options = {}) {
     createdAt: page?.createdAt || fallback.createdAt,
     content,
     contentHtml: shouldPreservePlainTextLines ? textToHtml(content) : providedContentHtml || textToHtml(content),
-    format: upgradeLegacyDefaultFormat(page?.format, options.upgradeLegacyDefaultFont)
+    format: upgradeLegacyDefaultFormat(
+      { ...normalizeFormat(options.defaultFormat || DEFAULT_FORMAT), ...(page?.format || {}) },
+      options.upgradeLegacyDefaultFont
+    )
   };
 }
 
@@ -198,6 +205,7 @@ function defaultState() {
   return {
     version: 1,
     formatDefaultVersion: FORMAT_DEFAULT_VERSION,
+    defaultFormat: { ...DEFAULT_FORMAT },
     createdAt,
     updatedAt: createdAt,
     initialNotes: {
@@ -218,10 +226,12 @@ function normalizeState(input, options = {}) {
   const createdAt = raw.createdAt || fallback.createdAt;
   const drafts = Array.isArray(raw.drafts) && raw.drafts.length ? raw.drafts : fallback.drafts;
   const upgradeLegacyDefaultFont = raw.formatDefaultVersion !== FORMAT_DEFAULT_VERSION;
+  const defaultFormat = upgradeLegacyDefaultFormat(currentDefaultFormat(raw), upgradeLegacyDefaultFont);
 
   return {
     version: 1,
     formatDefaultVersion: FORMAT_DEFAULT_VERSION,
+    defaultFormat,
     createdAt,
     updatedAt: options.touch ? nowIso() : raw.updatedAt || createdAt,
     initialNotes: normalizePage(raw.initialNotes, {
@@ -229,7 +239,7 @@ function normalizeState(input, options = {}) {
       title: raw.initialNotes?.title || PROJECT_NOTES_TITLE,
       createdAt: raw.initialNotes?.createdAt || createdAt,
       content: ""
-    }, { upgradeLegacyDefaultFont }),
+    }, { upgradeLegacyDefaultFont, defaultFormat }),
     drafts: drafts.map((draft, index) => {
       const draftNumber = index + 1;
       const draftCreatedAt = draft?.createdAt || nowIso();
@@ -238,7 +248,7 @@ function normalizeState(input, options = {}) {
         title: draft?.title || `Draft ${draftNumber}`,
         createdAt: draftCreatedAt,
         content: ""
-      }, { upgradeLegacyDefaultFont });
+      }, { upgradeLegacyDefaultFont, defaultFormat });
       return {
         ...normalizedDraft,
         notes: normalizePage(draft?.notes, {
@@ -246,7 +256,7 @@ function normalizeState(input, options = {}) {
           title: draft?.notes?.title || `Draft ${draftNumber} Notes`,
           createdAt: draft?.notes?.createdAt || draftCreatedAt,
           content: ""
-        }, { upgradeLegacyDefaultFont })
+        }, { upgradeLegacyDefaultFont, defaultFormat })
       };
     })
   };
@@ -368,8 +378,12 @@ function writeAll(state) {
 
   const linkedTextPath = readTextFileLink();
   if (linkedTextPath) {
-    fs.writeFileSync(linkedTextPath, exportText, "utf8");
-    writeTextFileState(linkedTextPath, normalized);
+    try {
+      fs.writeFileSync(linkedTextPath, exportText, "utf8");
+      writeTextFileState(linkedTextPath, normalized);
+    } catch (error) {
+      throw new Error(`Linked text file write failed: ${linkedTextPath} (${error.code || error.message})`);
+    }
   }
 
   return normalized;
