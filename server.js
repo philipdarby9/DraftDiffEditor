@@ -6,7 +6,7 @@ const { URL } = require("node:url");
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
-const DATA_DIR = path.join(ROOT, "data");
+const DATA_DIR = path.resolve(process.env.DRAFT_DIFF_DATA_DIR || path.join(ROOT, "data"));
 const STATE_FILE = path.join(DATA_DIR, "project.json");
 const EXPORT_FILE = path.join(DATA_DIR, "draft-history.txt");
 const TEXT_FILE_LINK_FILE = path.join(DATA_DIR, "text-file-link.json");
@@ -21,6 +21,9 @@ const CLIENT_IDLE_EXIT_MS = 5 * 60_000;
 const STARTUP_IDLE_EXIT_MS = 120_000;
 
 let lastClientSeenAt = 0;
+let activeServer = null;
+let idleTimer = null;
+let processExitRequested = false;
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -436,13 +439,30 @@ function maybeExitWhenIdle(startedAt) {
 
   if (idleMs < limitMs) return;
 
-  flushOnExit();
-  server.close(() => process.exit(0));
-  windowlessExitFallback();
+  closeServerAndExit();
 }
 
 function windowlessExitFallback() {
   setTimeout(() => process.exit(0), 1500).unref();
+}
+
+function closeServerAndExit() {
+  if (processExitRequested) return;
+  processExitRequested = true;
+  flushOnExit();
+
+  if (idleTimer) {
+    clearInterval(idleTimer);
+    idleTimer = null;
+  }
+
+  if (activeServer?.listening) {
+    activeServer.close(() => process.exit(0));
+    windowlessExitFallback();
+    return;
+  }
+
+  process.exit(0);
 }
 
 function readBody(req) {
@@ -684,9 +704,7 @@ async function handleApi(req, res, pathname) {
 
     sendJson(res, 200, { ok: true });
     setTimeout(() => {
-      flushOnExit();
-      server.close(() => process.exit(0));
-      windowlessExitFallback();
+      closeServerAndExit();
     }, 50).unref();
     return;
   }
@@ -774,32 +792,34 @@ async function handleApi(req, res, pathname) {
   sendJson(res, 404, { error: "Not found" });
 }
 
-const server = http.createServer(async (req, res) => {
-  try {
-    const { pathname } = new URL(req.url, `http://${req.headers.host || "localhost"}`);
+function createHttpServer() {
+  return http.createServer(async (req, res) => {
+    try {
+      const { pathname } = new URL(req.url, `http://${req.headers.host || "localhost"}`);
 
-    if (pathname.startsWith("/api/")) {
-      await handleApi(req, res, pathname);
-      return;
+      if (pathname.startsWith("/api/")) {
+        await handleApi(req, res, pathname);
+        return;
+      }
+
+      const filePath = safeStaticPath(pathname);
+      if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
+        res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
+        res.end("Not found");
+        return;
+      }
+
+      const ext = path.extname(filePath);
+      res.writeHead(200, {
+        "content-type": mimeTypes[ext] || "application/octet-stream",
+        "cache-control": "no-store"
+      });
+      fs.createReadStream(filePath).pipe(res);
+    } catch (error) {
+      sendJson(res, 500, { error: error.message });
     }
-
-    const filePath = safeStaticPath(pathname);
-    if (!filePath || !fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) {
-      res.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
-      res.end("Not found");
-      return;
-    }
-
-    const ext = path.extname(filePath);
-    res.writeHead(200, {
-      "content-type": mimeTypes[ext] || "application/octet-stream",
-      "cache-control": "no-store"
-    });
-    fs.createReadStream(filePath).pipe(res);
-  } catch (error) {
-    sendJson(res, 500, { error: error.message });
-  }
-});
+  });
+}
 
 function flushOnExit() {
   try {
@@ -809,24 +829,92 @@ function flushOnExit() {
   }
 }
 
-process.on("SIGINT", () => {
-  flushOnExit();
-  process.exit(0);
-});
+function startServer(options = {}) {
+  const port = Number(options.port ?? PORT);
+  const host = options.host;
+  const server = createHttpServer();
+  const serverStartedAt = Date.now();
+  lastClientSeenAt = 0;
+  readState();
 
-process.on("SIGTERM", () => {
-  flushOnExit();
-  process.exit(0);
-});
+  return new Promise((resolve, reject) => {
+    const onError = error => {
+      if (activeServer === server) activeServer = null;
+      reject(error);
+    };
 
-readState();
-const serverStartedAt = Date.now();
-server.listen(PORT, () => {
-  console.log(`Draft Diff Editor running at http://localhost:${PORT}`);
-  console.log(`Companion text file: ${EXPORT_FILE}`);
+    server.once("error", onError);
+    server.listen(port, host, () => {
+      server.off("error", onError);
+      activeServer = server;
 
-  if (AUTO_EXIT_ON_IDLE) {
-    const timer = setInterval(() => maybeExitWhenIdle(serverStartedAt), 5_000);
-    timer.unref();
+      const address = server.address();
+      const actualPort = typeof address === "object" && address ? address.port : port;
+      const urlHost = host && host !== "0.0.0.0" && host !== "::" ? host : "localhost";
+
+      if (AUTO_EXIT_ON_IDLE) {
+        if (idleTimer) clearInterval(idleTimer);
+        idleTimer = setInterval(() => maybeExitWhenIdle(serverStartedAt), 5_000);
+        idleTimer.unref();
+      }
+
+      resolve({
+        server,
+        port: actualPort,
+        url: `http://${urlHost}:${actualPort}/`,
+        exportFile: EXPORT_FILE,
+        stateFile: STATE_FILE
+      });
+    });
+  });
+}
+
+function stopServer(serverToStop = activeServer) {
+  if (idleTimer) {
+    clearInterval(idleTimer);
+    idleTimer = null;
   }
-});
+
+  flushOnExit();
+
+  if (!serverToStop) return Promise.resolve();
+
+  return new Promise(resolve => {
+    try {
+      serverToStop.close(error => {
+        if (error && error.code !== "ERR_SERVER_NOT_RUNNING") console.error(error);
+        if (activeServer === serverToStop) activeServer = null;
+        resolve();
+      });
+    } catch (error) {
+      if (error.code !== "ERR_SERVER_NOT_RUNNING") console.error(error);
+      if (activeServer === serverToStop) activeServer = null;
+      resolve();
+    }
+  });
+}
+
+process.on("SIGINT", closeServerAndExit);
+
+process.on("SIGTERM", closeServerAndExit);
+
+if (require.main === module) {
+  startServer({ port: PORT })
+    .then(({ url }) => {
+      console.log(`Draft Diff Editor running at ${url}`);
+      console.log(`Companion text file: ${EXPORT_FILE}`);
+    })
+    .catch(error => {
+      console.error(error);
+      process.exit(1);
+    });
+}
+
+module.exports = {
+  DATA_DIR,
+  EXPORT_FILE,
+  SERVER_BUILD,
+  flushOnExit,
+  startServer,
+  stopServer
+};

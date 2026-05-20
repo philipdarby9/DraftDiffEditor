@@ -3,11 +3,40 @@
   "version": "0.1.0",
   "private": true,
   "description": "A local writing editor for managing drafts, notes, comparisons, and a companion text export.",
+  "author": "Philip Darby",
+  "main": "desktop/main.js",
   "scripts": {
     "start": "node server.js",
-    "dev": "node server.js"
+    "dev": "node server.js",
+    "desktop": "electron .",
+    "desktop:dev": "electron .",
+    "package:win": "electron-builder --win --x64"
   },
   "engines": {
     "node": ">=20"
+  },
+  "build": {
+    "appId": "com.philipdarby.draftdiffeditor",
+    "productName": "Draft Diff Editor",
+    "files": [
+      "desktop/**/*",
+      "public/**/*",
+      "server.js",
+      "package.json"
+    ],
+    "directories": {
+      "output": "dist"
+    },
+    "win": {
+      "signAndEditExecutable": false,
+      "target": [
+        "nsis",
+        "portable"
+      ]
+    }
+  },
+  "devDependencies": {
+    "electron": "^42.2.0",
+    "electron-builder": "^26.8.1"
   }
 }

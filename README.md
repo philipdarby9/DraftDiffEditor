@@ -10,6 +10,18 @@ npm start
 
 Then open `http://localhost:4173`.
 
+For the desktop shell:
+
+```sh
+npm run desktop
+```
+
+To create a Windows build:
+
+```sh
+npm run package:win
+```
+
 ## What It Does
 
 - Keeps initial notes, drafts, and notes for each draft.
