@@ -3264,10 +3264,18 @@ function draftIndexForId(draftId) {
 }
 
 function renderDraftTabs() {
+  const storyDisabled = showChanges;
   els.storyTab.classList.toggle("active", !showChanges && activeArea === "story");
+  els.storyTab.classList.toggle("is-disabled", storyDisabled);
+  els.storyTab.setAttribute("aria-disabled", String(storyDisabled));
   els.storyDisplayToggle.checked = showChanges ? false : displayedPageKeys.has(STORY_KEY);
-  els.storyDisplayToggle.disabled = showChanges;
+  els.storyDisplayToggle.disabled = storyDisabled;
   els.storyDisplayToggle.setAttribute("aria-label", showChanges ? "Project notes are not compared" : "Display Project notes");
+  const storyFocusButton = els.storyTab.querySelector("[data-story-focus]");
+  if (storyFocusButton) {
+    storyFocusButton.disabled = storyDisabled;
+    storyFocusButton.setAttribute("aria-disabled", String(storyDisabled));
+  }
   const selectedDrafts = selectedDraftDisplayCount();
   const hasDrafts = Boolean(state.drafts.length);
   const allSelected = hasDrafts && selectedDrafts === state.drafts.length;
@@ -4766,6 +4774,7 @@ els.fileOpenInput.addEventListener("change", async event => {
 
 els.storyTab.addEventListener("click", event => {
   if (!event.target.closest("[data-story-focus]")) return;
+  if (showChanges) return;
   syncFromInputs();
   activeArea = "story";
   renderDraftTabs();
