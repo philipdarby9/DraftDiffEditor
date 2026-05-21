@@ -3329,7 +3329,7 @@ function tabScrollMetrics() {
 
   const scrollable = strip.scrollWidth > strip.clientWidth + 1;
   const maxScrollLeft = Math.max(0, strip.scrollWidth - strip.clientWidth);
-  const trackWidth = strip.clientWidth;
+  const trackWidth = track.clientWidth;
   const thumbWidth = scrollable && trackWidth
     ? Math.max(26, Math.round((strip.clientWidth / strip.scrollWidth) * trackWidth))
     : 0;
@@ -3343,7 +3343,10 @@ function updateTabScrollbar() {
   if (!metrics) return;
 
   const { strip, track, thumb, scrollable, maxScrollLeft, thumbWidth, maxThumbLeft } = metrics;
-  els.tabStripFrame?.classList.toggle("has-tab-overflow", scrollable);
+  const frame = els.tabStripFrame;
+  frame?.classList.toggle("has-tab-overflow", scrollable);
+  frame?.classList.toggle("can-scroll-left", scrollable && strip.scrollLeft > 1);
+  frame?.classList.toggle("can-scroll-right", scrollable && strip.scrollLeft < maxScrollLeft - 1);
   track.hidden = !scrollable;
 
   if (!scrollable) return;
@@ -3393,14 +3396,23 @@ function endTabScrollbarDrag() {
 function updateNotesHeadingDensity(heading) {
   if (!heading) return;
 
-  heading.classList.remove("notes-heading-is-tight");
+  heading.classList.remove("notes-heading-hide-label", "notes-heading-is-tight");
 
   const main = heading.querySelector(".notes-heading-main");
-  const tools = heading.querySelector(".notes-heading-tools");
-  if (!main || !tools) return;
+  if (!main) return;
 
-  const requiredWidth = main.scrollWidth + tools.scrollWidth + 14;
-  heading.classList.toggle("notes-heading-is-tight", requiredWidth > heading.clientWidth);
+  const styles = window.getComputedStyle(heading);
+  const gap = parseFloat(styles.columnGap || styles.gap) || 0;
+  const horizontalPadding = (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+  const children = Array.from(heading.children);
+  const requiredWidth = children.reduce((total, child) => total + child.scrollWidth, 0)
+    + Math.max(0, children.length - 1) * gap;
+  const availableWidth = heading.clientWidth - horizontalPadding;
+
+  heading.classList.toggle("notes-heading-hide-label", requiredWidth > availableWidth);
+
+  const mainIsClipped = main.scrollWidth > main.clientWidth + 1;
+  heading.classList.toggle("notes-heading-is-tight", mainIsClipped);
 }
 
 function updateAllNotesHeadingDensity() {
@@ -3535,22 +3547,19 @@ function editorPanelHtml(item, options = {}) {
   const collapsedClass = options.collapsed ? " notes-collapsed" : "";
   const headingClass = isNotesPanel ? "panel-heading notes-toggle-heading" : "panel-heading";
   const headingAttributes = isNotesPanel
-    ? ` data-toggle-notes="${escapeHtml(options.notesDraftId)}" role="button" tabindex="0" aria-expanded="${String(!options.collapsed)}" title="Toggle notes"`
+    ? ` data-toggle-notes="${escapeHtml(options.notesDraftId)}" role="button" tabindex="0" aria-expanded="${String(!options.collapsed)}" title="${options.collapsed ? "Show notes" : "Collapse notes"}"`
     : "";
-  const notesCollapseButton = isNotesPanel
+  const notesCaret = isNotesPanel
     ? `
-      <button
-        class="notes-collapse-toggle"
-        type="button"
-        data-notes-collapse-toggle
-        title="Toggle notes"
-        aria-label="Toggle notes"
-      >
+      <span class="notes-caret" aria-hidden="true">
         <svg viewBox="0 0 12 12">
           <path d="M3 7.5 6 4.5l3 3"></path>
         </svg>
-      </button>
+      </span>
     `
+    : "";
+  const notesHint = isNotesPanel
+    ? `<span class="notes-collapse-hint">${options.collapsed ? "Click to expand" : "Click to collapse"}</span>`
     : "";
   const formatButton = hasToolbar
     ? `
@@ -3580,14 +3589,13 @@ function editorPanelHtml(item, options = {}) {
   const headingInner = isNotesPanel
     ? `
       <div class="notes-heading-main">
-        ${notesCollapseButton}
+        ${notesCaret}
         ${headingContent}
       </div>
-      <div class="notes-heading-tools">
-        ${formatButton}
-        ${detachButton}
-        ${notesHeaderStats}
-      </div>
+      ${notesHint}
+      ${formatButton}
+      ${detachButton}
+      ${notesHeaderStats}
     `
     : `
       ${headingContent}

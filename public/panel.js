@@ -40,7 +40,6 @@ const DETACHED_PANEL_CHANNEL = "draftDiff.detachedPanels";
 const channel = "BroadcastChannel" in window ? new BroadcastChannel(DETACHED_PANEL_CHANNEL) : null;
 
 const toolbarIcons = {
-  collapse: '<svg viewBox="0 0 12 12" aria-hidden="true"><path d="M3 7.5 6 4.5l3 3"></path></svg>',
   format: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h10"></path><path d="M5.5 3v3M10.5 6.5v3M7.5 10v3"></path></svg>',
   undo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 5 10l4-4"></path><path d="M5 10h11a4 4 0 1 1 0 8h-1"></path></svg>',
   redo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 4-4-4-4"></path><path d="M19 10H8a4 4 0 1 0 0 8h1"></path></svg>',
@@ -74,6 +73,110 @@ function escapeHtml(value) {
 
 function textToHtml(value) {
   return escapeHtml(value).replace(/\n/g, "<br>");
+}
+
+function formatDate(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.valueOf())) return String(iso || "");
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short"
+  }).format(date);
+}
+
+function plainTextFromHtml(html) {
+  const template = document.createElement("template");
+  template.innerHTML = String(html || "");
+  return template.content.textContent.replace(/\u00a0/g, " ").trimEnd();
+}
+
+function wordCountForText(text) {
+  const matches = String(text || "").match(/[\p{L}\p{N}]+(?:['-][\p{L}\p{N}]+)*/gu);
+  return matches ? matches.length : 0;
+}
+
+function pageWordCount(page) {
+  return wordCountForText(page?.content || plainTextFromHtml(page?.contentHtml || ""));
+}
+
+function formatWordCount(count) {
+  const value = Number(count) || 0;
+  return `${value.toLocaleString()} ${value === 1 ? "word" : "words"}`;
+}
+
+function pageMetaHtml(page) {
+  const created = formatDate(page.page.createdAt);
+  const label = page.type === "draft" ? `Created: ${created}` : created;
+  return `<span class="meta" title="Created ${escapeHtml(created)}">${escapeHtml(label)}</span>`;
+}
+
+function detachedDraftPage() {
+  return unit?.pages?.find(page => page.type === "draft")?.page || null;
+}
+
+function notesHeaderStatsHtml() {
+  const draftPage = detachedDraftPage();
+  if (!draftPage) return "";
+
+  const lastEdited = formatDate(draftPage.updatedAt || draftPage.createdAt);
+  return `
+    <div class="notes-heading-stats" aria-label="${escapeHtml(unit?.title || "Draft")} statistics">
+      <span class="notes-heading-word-count" data-detached-draft-word-count>${formatWordCount(pageWordCount(draftPage))}</span>
+      <span class="notes-heading-stat-divider" aria-hidden="true"></span>
+      <span class="notes-heading-last-edited" data-detached-draft-last-edited>Last edited: ${escapeHtml(lastEdited)}</span>
+    </div>
+  `;
+}
+
+function updateDetachedNotesStats(lastEditedIso = null) {
+  const draftEditor = els.pages.querySelector(".draft-detached-page [data-editor-key]");
+  const wordCountEl = els.pages.querySelector("[data-detached-draft-word-count]");
+  const lastEditedEl = els.pages.querySelector("[data-detached-draft-last-edited]");
+  if (!draftEditor || !wordCountEl || !lastEditedEl) return;
+
+  wordCountEl.textContent = formatWordCount(wordCountForText(editorPlainText(draftEditor)));
+  const timestamp = lastEditedIso || detachedDraftPage()?.updatedAt || detachedDraftPage()?.createdAt;
+  lastEditedEl.textContent = `Last edited: ${formatDate(timestamp)}`;
+}
+
+function setDetachedNotesCollapsed(section, isCollapsed) {
+  const isExpanded = !isCollapsed;
+  const heading = section?.querySelector("[data-detached-toggle-notes-heading]");
+  const hint = section?.querySelector(".notes-collapse-hint");
+
+  section?.classList.toggle("notes-collapsed", isCollapsed);
+  heading?.setAttribute("aria-expanded", String(isExpanded));
+  heading?.setAttribute("title", isCollapsed ? "Show notes" : "Collapse notes");
+  if (hint) hint.textContent = isCollapsed ? "Click to expand" : "Click to collapse";
+  updateDetachedNotesHeadingDensity(heading);
+}
+
+function updateDetachedNotesHeadingDensity(heading) {
+  if (!heading) return;
+
+  heading.classList.remove("notes-heading-hide-label", "notes-heading-is-tight");
+
+  const main = heading.querySelector(".notes-heading-main");
+  if (!main) return;
+
+  const styles = window.getComputedStyle(heading);
+  const gap = parseFloat(styles.columnGap || styles.gap) || 0;
+  const horizontalPadding = (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+  const children = Array.from(heading.children);
+  const requiredWidth = children.reduce((total, child) => total + child.scrollWidth, 0)
+    + Math.max(0, children.length - 1) * gap;
+  const availableWidth = heading.clientWidth - horizontalPadding;
+
+  heading.classList.toggle("notes-heading-hide-label", requiredWidth > availableWidth);
+
+  const mainIsClipped = main.scrollWidth > main.clientWidth + 1;
+  heading.classList.toggle("notes-heading-is-tight", mainIsClipped);
+}
+
+function updateAllDetachedNotesHeadingDensity() {
+  els.pages
+    ?.querySelectorAll(".notes-toggle-heading")
+    .forEach(updateDetachedNotesHeadingDensity);
 }
 
 function editorPlainText(editorEl) {
@@ -242,17 +345,19 @@ function formatRibbonHtml(page, format) {
 
 function pageSectionHtml(page) {
   const format = normalizeFormat(page.page.format);
-  const notesToggle = page.type === "notes"
+  const meta = pageMetaHtml(page);
+  const notesHeaderStats = page.type === "notes" ? notesHeaderStatsHtml() : "";
+  const notesCaret = page.type === "notes"
     ? `
-      <button
-        class="notes-collapse-toggle detached-notes-collapse-toggle"
-        type="button"
-        data-detached-toggle-notes
-        title="Toggle notes"
-        aria-label="Toggle notes"
-        aria-expanded="true"
-      >${toolbarIcons.collapse}</button>
+      <span class="notes-caret" aria-hidden="true">
+        <svg viewBox="0 0 12 12">
+          <path d="M3 7.5 6 4.5l3 3"></path>
+        </svg>
+      </span>
     `
+    : "";
+  const notesHint = page.type === "notes"
+    ? '<span class="notes-collapse-hint">Click to collapse</span>'
     : "";
   const titleControl = page.editableTitle
     ? `<input class="draft-title-input" data-page-title="${escapeHtml(page.key)}" type="text" autocomplete="off" value="${escapeHtml(page.page.title || page.title)}" aria-label="Draft title">`
@@ -260,7 +365,7 @@ function pageSectionHtml(page) {
   const headingClass = page.type === "notes" ? "panel-heading notes-toggle-heading" : "panel-heading";
   const ribbonId = `format-ribbon-${page.key}`;
   const headingAttributes = page.type === "notes"
-    ? ' data-detached-toggle-notes-heading role="button" tabindex="0" aria-expanded="true" title="Toggle notes"'
+    ? ' data-detached-toggle-notes-heading role="button" tabindex="0" aria-expanded="true" title="Collapse notes"'
     : "";
 
   return `
@@ -269,20 +374,20 @@ function pageSectionHtml(page) {
         <div class="${headingClass}"${headingAttributes}>
           ${page.type === "notes" ? `
             <div class="notes-heading-main">
-              ${notesToggle}
+              ${notesCaret}
               <span class="panel-kicker">Notes</span>
             </div>
-            <div class="notes-heading-tools">
-              <button
-                class="panel-format-toggle"
-                type="button"
-                data-ribbon-toggle="${escapeHtml(page.key)}"
-                aria-expanded="false"
-                aria-controls="${escapeHtml(ribbonId)}"
-                title="Formatting"
-                aria-label="Show ${escapeHtml(page.title)} formatting"
-              >${toolbarIcons.format}</button>
-            </div>
+            ${notesHint}
+            <button
+              class="panel-format-toggle"
+              type="button"
+              data-ribbon-toggle="${escapeHtml(page.key)}"
+              aria-expanded="false"
+              aria-controls="${escapeHtml(ribbonId)}"
+              title="Formatting"
+              aria-label="Show ${escapeHtml(page.title)} formatting"
+            >${toolbarIcons.format}</button>
+            ${notesHeaderStats}
           ` : `
             <div class="panel-title-row">
               ${titleControl}
@@ -296,7 +401,7 @@ function pageSectionHtml(page) {
               title="Formatting"
               aria-label="Show ${escapeHtml(page.title)} formatting"
             >${toolbarIcons.format}</button>
-            <span class="meta">${escapeHtml(page.kicker || "Draft")}</span>
+            ${meta}
           `}
         </div>
         ${formatRibbonHtml(page, format)}
@@ -437,6 +542,7 @@ function renderUnit(nextUnit) {
     applyEditorFormat(editorEl, page.page.format);
   });
 
+  window.requestAnimationFrame(updateAllDetachedNotesHeadingDensity);
   setStatus("Saved");
 }
 
@@ -547,6 +653,9 @@ els.pages.addEventListener("input", event => {
   if (titleInput && unit) {
     unit.title = titleInput.value || "Untitled draft";
   }
+  if (event.target.closest("[data-editor-key]")?.closest(".draft-detached-page")) {
+    updateDetachedNotesStats(new Date().toISOString());
+  }
   queueSave();
 });
 
@@ -575,22 +684,10 @@ els.pages.addEventListener("paste", event => {
 });
 
 els.pages.addEventListener("click", event => {
-  const notesToggle = event.target.closest("[data-detached-toggle-notes]");
-  if (notesToggle) {
-    const section = notesToggle.closest("[data-page-key]");
-    const isCollapsed = section.classList.toggle("notes-collapsed");
-    notesToggle.setAttribute("aria-expanded", String(!isCollapsed));
-    section.querySelector("[data-detached-toggle-notes-heading]")?.setAttribute("aria-expanded", String(!isCollapsed));
-    return;
-  }
-
   const notesHeading = event.target.closest("[data-detached-toggle-notes-heading]");
   if (notesHeading && !event.target.closest("button")) {
     const section = notesHeading.closest("[data-page-key]");
-    const toggle = section?.querySelector("[data-detached-toggle-notes]");
-    const isCollapsed = section.classList.toggle("notes-collapsed");
-    notesHeading.setAttribute("aria-expanded", String(!isCollapsed));
-    toggle?.setAttribute("aria-expanded", String(!isCollapsed));
+    setDetachedNotesCollapsed(section, !section.classList.contains("notes-collapsed"));
     return;
   }
 
@@ -634,10 +731,7 @@ document.addEventListener("keydown", event => {
   if (notesHeading && (event.key === "Enter" || event.key === " ")) {
     event.preventDefault();
     const section = notesHeading.closest("[data-page-key]");
-    const toggle = section?.querySelector("[data-detached-toggle-notes]");
-    const isCollapsed = section.classList.toggle("notes-collapsed");
-    notesHeading.setAttribute("aria-expanded", String(!isCollapsed));
-    toggle?.setAttribute("aria-expanded", String(!isCollapsed));
+    setDetachedNotesCollapsed(section, !section.classList.contains("notes-collapsed"));
   }
 });
 
@@ -647,7 +741,10 @@ document.addEventListener("click", event => {
 });
 
 document.addEventListener("scroll", positionOpenFormatPickers, true);
-window.addEventListener("resize", positionOpenFormatPickers);
+window.addEventListener("resize", () => {
+  positionOpenFormatPickers();
+  updateAllDetachedNotesHeadingDensity();
+});
 
 window.addEventListener("beforeunload", () => {
   if (unit) {
