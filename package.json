@@ -10,7 +10,10 @@
     "dev": "node server.js",
     "desktop": "electron .",
     "desktop:dev": "electron .",
-    "package:win": "electron-builder --win --x64"
+    "package:win": "electron-builder --win --x64",
+    "package:linux": "electron-builder --linux tar.gz --x64",
+    "package:linux:deb": "electron-builder --linux deb --x64",
+    "package:linux:appimage": "electron-builder --linux AppImage --x64"
   },
   "engines": {
     "node": ">=20"
@@ -28,6 +31,10 @@
       {
         "from": "build/icon.ico",
         "to": "icon.ico"
+      },
+      {
+        "from": "icon.png",
+        "to": "icon.png"
       }
     ],
     "afterPack": "scripts/after-pack.js",
@@ -41,6 +48,15 @@
       "target": [
         "nsis",
         "portable"
+      ]
+    },
+    "linux": {
+      "icon": "icon.png",
+      "category": "Office",
+      "maintainer": "Philip Darby <draft-diff-editor@localhost>",
+      "target": [
+        "tar.gz",
+        "deb"
       ]
     }
   },

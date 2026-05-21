@@ -22,6 +22,30 @@ To create a Windows build:
 npm run package:win
 ```
 
+To create a Linux build:
+
+```sh
+npm run package:linux
+```
+
+This creates `dist/draft-diff-editor-0.1.0.tar.gz`. Extract the archive on Linux and run `draft-diff-editor`.
+
+To create a double-clickable Debian/Ubuntu installer:
+
+```sh
+npm run package:linux:deb
+```
+
+This creates `dist/draft-diff-editor_0.1.0_amd64.deb`, which can be opened from the Linux file manager to install the app. Build this package from Linux/WSL; on Windows, Electron Builder needs the Linux `fpm` packaging tool and may fail with `spawn fpm ENOENT`.
+
+An AppImage target is also available:
+
+```sh
+npm run package:linux:appimage
+```
+
+On Windows, AppImage packaging may require symlink privileges. If Windows reports that a required privilege is not held by the client, build the AppImage from Linux/WSL or enable Windows Developer Mode and rerun the command.
+
 ## What It Does
 
 - Keeps initial notes, drafts, and notes for each draft.

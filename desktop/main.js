@@ -8,6 +8,11 @@ let serverHandle = null;
 const MIN_ZOOM_FACTOR = 0.5;
 const MAX_ZOOM_FACTOR = 2;
 const ZOOM_STEP = 0.1;
+const APP_USER_MODEL_ID = "com.philipdarby.draftdiffeditor";
+
+if (process.platform === "win32") {
+  app.setAppUserModelId(APP_USER_MODEL_ID);
+}
 
 function setWindowZoom(direction) {
   if (!mainWindow || mainWindow.isDestroyed()) return;
@@ -27,9 +32,10 @@ function setWindowZoom(direction) {
 }
 
 function getIconPath() {
+  const iconName = process.platform === "win32" ? "icon.ico" : "icon.png";
   return app.isPackaged
-    ? path.join(process.resourcesPath, "icon.ico")
-    : path.join(app.getAppPath(), "build", "icon.ico");
+    ? path.join(process.resourcesPath, iconName)
+    : path.join(app.getAppPath(), process.platform === "win32" ? "build" : "", iconName);
 }
 
 function loadServerApi() {
