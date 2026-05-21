@@ -1,5 +1,5 @@
 const path = require("node:path");
-const { app, BrowserWindow, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, shell } = require("electron");
 
 let mainWindow = null;
 let serverApi = null;
@@ -8,6 +8,23 @@ let serverHandle = null;
 const MIN_ZOOM_FACTOR = 0.5;
 const MAX_ZOOM_FACTOR = 2;
 const ZOOM_STEP = 0.1;
+
+function setWindowZoom(direction) {
+  if (!mainWindow || mainWindow.isDestroyed()) return;
+
+  if (direction === "reset") {
+    mainWindow.webContents.setZoomFactor(1);
+    return;
+  }
+
+  const step = direction === "out" ? -ZOOM_STEP : ZOOM_STEP;
+  const currentZoom = mainWindow.webContents.getZoomFactor();
+  const nextZoom = Math.min(
+    MAX_ZOOM_FACTOR,
+    Math.max(MIN_ZOOM_FACTOR, Number((currentZoom + step).toFixed(2)))
+  );
+  mainWindow.webContents.setZoomFactor(nextZoom);
+}
 
 function getIconPath() {
   return app.isPackaged
@@ -41,6 +58,7 @@ async function createWindow() {
     icon: getIconPath(),
     show: false,
     webPreferences: {
+      preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true
@@ -64,17 +82,12 @@ async function createWindow() {
     event.preventDefault();
 
     if (key === "0") {
-      mainWindow.webContents.setZoomFactor(1);
+      setWindowZoom("reset");
       return;
     }
 
     const direction = key === "-" || key === "_" || key === "subtract" ? -1 : 1;
-    const currentZoom = mainWindow.webContents.getZoomFactor();
-    const nextZoom = Math.min(
-      MAX_ZOOM_FACTOR,
-      Math.max(MIN_ZOOM_FACTOR, Number((currentZoom + direction * ZOOM_STEP).toFixed(2)))
-    );
-    mainWindow.webContents.setZoomFactor(nextZoom);
+    setWindowZoom(direction < 0 ? "out" : "in");
   });
 
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -87,7 +100,12 @@ async function createWindow() {
 }
 
 app.whenReady()
-  .then(createWindow)
+  .then(() => {
+    ipcMain.handle("draft-diff:zoom", (_event, direction) => {
+      setWindowZoom(direction);
+    });
+    return createWindow();
+  })
   .catch(error => {
     console.error(error);
     app.quit();

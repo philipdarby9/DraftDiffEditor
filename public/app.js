@@ -14,11 +14,17 @@ const els = {
   editGlobalFont: document.querySelector("#edit-global-font"),
   editGlobalFontSize: document.querySelector("#edit-global-font-size"),
   viewEnablePanelDrag: document.querySelector("#view-enable-panel-drag"),
+  viewZoomIn: document.querySelector("#view-zoom-in"),
+  viewZoomOut: document.querySelector("#view-zoom-out"),
   fileOpenInput: document.querySelector("#file-open-input"),
   storyTab: document.querySelector("#story-tab"),
   storyDisplayToggle: document.querySelector("#story-display-toggle"),
   allDraftsTab: document.querySelector("#all-drafts-tab"),
   allDraftsToggle: document.querySelector("#all-drafts-toggle"),
+  tabStrip: document.querySelector(".tab-strip"),
+  tabStripFrame: document.querySelector(".tab-strip-frame"),
+  tabScrollbar: document.querySelector("#tab-scrollbar"),
+  tabScrollbarThumb: document.querySelector("#tab-scrollbar-thumb"),
   draftTabs: document.querySelector("#draft-tabs"),
   pageCanvas: document.querySelector("#page-canvas"),
   newDraftCopy: document.querySelector("#new-draft-copy"),
@@ -76,6 +82,8 @@ let isRestoringHistory = false;
 let panelDragEnabled = false;
 let detachedUnitKeys = new Set();
 let detachedPanelWindows = new Map();
+let tabScrollbarDrag = null;
+let fallbackZoomFactor = 1;
 
 const DETACHED_PANEL_CHANNEL = "draftDiff.detachedPanels";
 const detachedPanelChannel = "BroadcastChannel" in window
@@ -128,9 +136,12 @@ const MENU_SHORTCUT_LABELS = {
   open: { mac: "⌘O", default: "Ctrl+O" },
   openLocation: { mac: "⌘⌥O", default: "Ctrl+Alt+O" },
   saveAs: { mac: "⌘⇧S", default: "Ctrl+Shift+S" },
+  close: { mac: "⌘W", default: "Ctrl+W" },
   undo: { mac: "⌘Z", default: "Ctrl+Z" },
   redo: { mac: "⌘⇧Z", default: "Ctrl+Y" },
   panelDrag: { mac: "Cmd+Opt+P", default: "Ctrl+Alt+P" },
+  zoomIn: { mac: "⌘+", default: "Ctrl++" },
+  zoomOut: { mac: "⌘-", default: "Ctrl+-" },
   pages1: { mac: "⌘1", default: "Ctrl+1" },
   pages2: { mac: "⌘2", default: "Ctrl+2" },
   pages3: { mac: "⌘3", default: "Ctrl+3" },
@@ -182,6 +193,22 @@ function hasPlatformShortcutModifier(event) {
   return isMacPlatform()
     ? event.metaKey && !event.ctrlKey
     : event.ctrlKey && !event.metaKey;
+}
+
+function setFallbackZoom(direction) {
+  const step = direction === "out" ? -0.1 : 0.1;
+  fallbackZoomFactor = Math.min(2, Math.max(0.5, Number((fallbackZoomFactor + step).toFixed(2))));
+  document.documentElement.style.zoom = String(fallbackZoomFactor);
+}
+
+function zoomView(direction) {
+  if (direction === "in") {
+    window.draftDiffDesktop?.zoomIn?.();
+  } else {
+    window.draftDiffDesktop?.zoomOut?.();
+  }
+
+  if (!window.draftDiffDesktop) setFallbackZoom(direction);
 }
 
 function handleGlobalShortcut(event) {
@@ -241,6 +268,24 @@ function handleGlobalShortcut(event) {
   if (event.shiftKey && key === "s") {
     event.preventDefault();
     saveAsTextProject();
+    return true;
+  }
+
+  if (!event.shiftKey && key === "w") {
+    event.preventDefault();
+    closeApp();
+    return true;
+  }
+
+  if (key === "+" || key === "=") {
+    event.preventDefault();
+    zoomView("in");
+    return true;
+  }
+
+  if (key === "-" || key === "_") {
+    event.preventDefault();
+    zoomView("out");
     return true;
   }
 
@@ -3265,13 +3310,84 @@ function renderDraftTabs() {
 }
 
 function updateTabDensity() {
-  const strip = els.storyTab?.closest(".tab-strip");
+  const strip = els.tabStrip || els.storyTab?.closest(".tab-strip");
   if (!strip || !state) return;
 
   strip.classList.remove("compact-tabs", "scrollable-tabs");
   const needsCompactLabels = strip.scrollWidth > strip.clientWidth + 1;
   strip.classList.toggle("compact-tabs", needsCompactLabels);
   strip.classList.toggle("scrollable-tabs", strip.scrollWidth > strip.clientWidth + 1);
+  updateTabScrollbar();
+  requestAnimationFrame(updateTabScrollbar);
+}
+
+function tabScrollMetrics() {
+  const strip = els.tabStrip;
+  const track = els.tabScrollbar;
+  const thumb = els.tabScrollbarThumb;
+  if (!strip || !track || !thumb) return null;
+
+  const scrollable = strip.scrollWidth > strip.clientWidth + 1;
+  const maxScrollLeft = Math.max(0, strip.scrollWidth - strip.clientWidth);
+  const trackWidth = strip.clientWidth;
+  const thumbWidth = scrollable && trackWidth
+    ? Math.max(26, Math.round((strip.clientWidth / strip.scrollWidth) * trackWidth))
+    : 0;
+  const maxThumbLeft = Math.max(0, trackWidth - thumbWidth);
+
+  return { strip, track, thumb, scrollable, maxScrollLeft, trackWidth, thumbWidth, maxThumbLeft };
+}
+
+function updateTabScrollbar() {
+  const metrics = tabScrollMetrics();
+  if (!metrics) return;
+
+  const { strip, track, thumb, scrollable, maxScrollLeft, thumbWidth, maxThumbLeft } = metrics;
+  els.tabStripFrame?.classList.toggle("has-tab-overflow", scrollable);
+  track.hidden = !scrollable;
+
+  if (!scrollable) return;
+
+  const thumbLeft = maxScrollLeft
+    ? Math.round((strip.scrollLeft / maxScrollLeft) * maxThumbLeft)
+    : 0;
+  thumb.style.width = `${thumbWidth}px`;
+  thumb.style.transform = `translateX(${thumbLeft}px)`;
+}
+
+function scrollTabsFromTrackClientX(clientX) {
+  const metrics = tabScrollMetrics();
+  if (!metrics?.scrollable) return;
+
+  const { strip, track, thumbWidth, maxScrollLeft, maxThumbLeft } = metrics;
+  const rect = track.getBoundingClientRect();
+  const thumbLeft = Math.max(0, Math.min(maxThumbLeft, clientX - rect.left - (thumbWidth / 2)));
+  strip.scrollLeft = maxThumbLeft ? (thumbLeft / maxThumbLeft) * maxScrollLeft : 0;
+  updateTabScrollbar();
+}
+
+function beginTabScrollbarDrag(event) {
+  const metrics = tabScrollMetrics();
+  if (!metrics?.scrollable) return;
+
+  event.preventDefault();
+  tabScrollbarDrag = true;
+  els.tabStripFrame?.classList.add("is-dragging-scrollbar");
+  scrollTabsFromTrackClientX(event.clientX);
+  window.addEventListener("pointermove", dragTabScrollbar);
+  window.addEventListener("pointerup", endTabScrollbarDrag, { once: true });
+}
+
+function dragTabScrollbar(event) {
+  if (!tabScrollbarDrag) return;
+  event.preventDefault();
+  scrollTabsFromTrackClientX(event.clientX);
+}
+
+function endTabScrollbarDrag() {
+  tabScrollbarDrag = null;
+  els.tabStripFrame?.classList.remove("is-dragging-scrollbar");
+  window.removeEventListener("pointermove", dragTabScrollbar);
 }
 
 function updateNotesHeadingDensity(heading) {
@@ -4698,6 +4814,8 @@ els.draftTabs.addEventListener("change", event => {
   scheduleSave();
 });
 
+els.tabStrip?.addEventListener("scroll", updateTabScrollbar, { passive: true });
+els.tabScrollbar?.addEventListener("pointerdown", beginTabScrollbarDrag);
 els.newDraftBlank.addEventListener("click", () => addDraft(false));
 els.newDraftCopy.addEventListener("click", () => addDraft(true));
 
@@ -4710,6 +4828,16 @@ els.pagesOnScreen.addEventListener("click", event => {
 
 els.viewEnablePanelDrag?.addEventListener("click", () => {
   setPanelDragEnabled(!panelDragEnabled);
+});
+els.viewZoomIn?.addEventListener("click", event => {
+  event.preventDefault();
+  event.stopPropagation();
+  zoomView("in");
+});
+els.viewZoomOut?.addEventListener("click", event => {
+  event.preventDefault();
+  event.stopPropagation();
+  zoomView("out");
 });
 
 els.pageCanvas.addEventListener("focusin", event => {

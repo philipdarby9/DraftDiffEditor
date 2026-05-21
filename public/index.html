@@ -29,7 +29,7 @@
               <span class="menu-divider" aria-hidden="true"></span>
               <button id="file-save-as" type="button"><span class="menu-check">✓</span><span>Save as</span><span class="menu-shortcut" data-shortcut="saveAs">Ctrl+Shift+S</span></button>
               <span class="menu-divider" aria-hidden="true"></span>
-              <button id="file-close" type="button"><span class="menu-check" aria-hidden="true"></span><span>Close</span><span class="menu-shortcut"></span></button>
+              <button id="file-close" type="button"><span class="menu-check" aria-hidden="true"></span><span>Close</span><span class="menu-shortcut" data-shortcut="close">Ctrl+W</span></button>
             </div>
           </details>
           <details id="edit-menu" class="file-menu">
@@ -55,6 +55,21 @@
             <div class="file-menu-panel">
               <button id="view-enable-panel-drag" type="button" aria-pressed="false"><span class="menu-check"></span><span>Enable panel drag</span><span class="menu-shortcut" data-shortcut="panelDrag">Ctrl+Alt+P</span></button>
               <span class="menu-divider" aria-hidden="true"></span>
+              <div class="zoom-menu-control" aria-label="Zoom controls">
+                <span class="menu-check" aria-hidden="true"></span>
+                <span class="zoom-menu-label">Zoom</span>
+                <span class="zoom-menu-buttons">
+                  <button id="view-zoom-out" class="zoom-step-button" type="button" aria-label="Zoom out">
+                    <span class="zoom-step-symbol" aria-hidden="true">−</span>
+                    <span class="menu-shortcut" data-shortcut="zoomOut">Ctrl+-</span>
+                  </button>
+                  <button id="view-zoom-in" class="zoom-step-button" type="button" aria-label="Zoom in">
+                    <span class="zoom-step-symbol" aria-hidden="true">+</span>
+                    <span class="menu-shortcut" data-shortcut="zoomIn">Ctrl++</span>
+                  </button>
+                </span>
+              </div>
+              <span class="menu-divider" aria-hidden="true"></span>
               <div id="pages-on-screen" class="view-options" aria-label="Pages on screen">
                 <button type="button" data-pages-on-screen="1"><span class="menu-check">✓</span><span>1 on screen</span><span class="menu-shortcut" data-shortcut="pages1">Ctrl+1</span></button>
                 <button type="button" data-pages-on-screen="2" aria-pressed="true"><span class="menu-check">✓</span><span>2 on screen</span><span class="menu-shortcut" data-shortcut="pages2">Ctrl+2</span></button>
@@ -66,23 +81,28 @@
         </div>
         <input id="file-open-input" type="file" accept=".txt,text/plain" hidden>
 
-        <div class="tab-strip" aria-label="Pages">
-          <div id="story-tab" class="page-tab story-tab">
-            <input id="story-display-toggle" type="checkbox" data-display-story aria-label="Display Project notes">
-            <button class="tab-label" type="button" data-story-focus aria-label="Project notes">
-              <span class="tab-label-full">Project notes</span>
-              <span class="tab-label-short" aria-hidden="true">PN</span>
-            </button>
+        <div class="tab-strip-frame">
+          <div class="tab-strip" aria-label="Pages">
+            <div id="story-tab" class="page-tab story-tab">
+              <input id="story-display-toggle" type="checkbox" data-display-story aria-label="Display Project notes">
+              <button class="tab-label" type="button" data-story-focus aria-label="Project notes">
+                <span class="tab-label-full">Project notes</span>
+                <span class="tab-label-short" aria-hidden="true">PN</span>
+              </button>
+            </div>
+            <div id="all-drafts-tab" class="page-tab all-drafts-tab">
+              <input id="all-drafts-toggle" type="checkbox" data-display-all-drafts aria-label="Display all drafts">
+              <button class="tab-label" type="button" data-all-drafts-toggle aria-label="All drafts">
+                <span class="tab-label-full">All drafts</span>
+                <span class="tab-label-short" aria-hidden="true">AD</span>
+              </button>
+            </div>
+            <div id="draft-tabs" class="draft-tabs"></div>
+            <button id="new-draft-blank" class="add-tab" type="button" title="Add draft" aria-label="Add draft">+</button>
           </div>
-          <div id="all-drafts-tab" class="page-tab all-drafts-tab">
-            <input id="all-drafts-toggle" type="checkbox" data-display-all-drafts aria-label="Display all drafts">
-            <button class="tab-label" type="button" data-all-drafts-toggle aria-label="All drafts">
-              <span class="tab-label-full">All drafts</span>
-              <span class="tab-label-short" aria-hidden="true">All</span>
-            </button>
+          <div id="tab-scrollbar" class="tab-scrollbar" aria-hidden="true" hidden>
+            <div id="tab-scrollbar-thumb" class="tab-scrollbar-thumb"></div>
           </div>
-          <div id="draft-tabs" class="draft-tabs"></div>
-          <button id="new-draft-blank" class="add-tab" type="button" title="Add draft" aria-label="Add draft">+</button>
         </div>
 
         <div class="ribbon-actions">
