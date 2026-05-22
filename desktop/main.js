@@ -4,6 +4,7 @@ const { app, BrowserWindow, ipcMain, shell } = require("electron");
 let mainWindow = null;
 let serverApi = null;
 let serverHandle = null;
+let allowWindowClose = false;
 
 const MIN_ZOOM_FACTOR = 0.5;
 const MAX_ZOOM_FACTOR = 2;
@@ -53,6 +54,7 @@ function loadServerApi() {
 async function createWindow() {
   const { startServer } = loadServerApi();
   serverHandle = await startServer({ port: 0, host: "127.0.0.1" });
+  allowWindowClose = false;
 
   mainWindow = new BrowserWindow({
     width: 1320,
@@ -73,6 +75,25 @@ async function createWindow() {
 
   mainWindow.removeMenu();
   mainWindow.once("ready-to-show", () => mainWindow.show());
+  mainWindow.on("close", event => {
+    if (allowWindowClose) return;
+
+    event.preventDefault();
+    const windowToClose = mainWindow;
+    let settled = false;
+    const finishClose = () => {
+      if (settled) return;
+      settled = true;
+      allowWindowClose = true;
+      if (windowToClose && !windowToClose.isDestroyed()) windowToClose.close();
+    };
+
+    setTimeout(finishClose, 1500);
+    windowToClose.webContents.executeJavaScript(
+      "window.draftDiffPersistBeforeClose ? window.draftDiffPersistBeforeClose() : true",
+      true
+    ).then(finishClose, finishClose);
+  });
   mainWindow.on("closed", () => {
     mainWindow = null;
   });

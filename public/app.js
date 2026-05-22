@@ -47,6 +47,7 @@ const PAGES_ON_SCREEN_STORAGE_KEY = "draftDiff.pagesOnScreen";
 const FILE_VIEW_STATES_STORAGE_KEY = "draftDiff.fileViewStates";
 const PROJECT_STATE_CACHE_STORAGE_KEY = "draftDiff.projectStatesByPath";
 const DEFAULT_PAGES_ON_SCREEN = 2;
+const VIEW_STATE_VERSION = 2;
 const HISTORY_LIMIT = 100;
 const MAX_SAVE_RETRIES = 3;
 const FORMAT_DEFAULT_VERSION = 2;
@@ -66,6 +67,9 @@ let stateRevision = 0;
 let saveQueued = false;
 let saveRetryCount = 0;
 let isClosingApp = false;
+let viewStateSaveTimer = null;
+let isSavingViewState = false;
+let viewStateSaveQueued = false;
 
 let fileViewStates = readStoredFileViewStates();
 let displayedPageKeys = new Set();
@@ -389,6 +393,17 @@ function readStoredFileViewStates() {
   } catch {
     return {};
   }
+}
+
+function viewStateUpdatedAtMs(viewState) {
+  const time = Date.parse(viewState?.updatedAt || "");
+  return Number.isFinite(time) ? time : 0;
+}
+
+function newestViewState(...viewStates) {
+  return viewStates
+    .filter(viewState => viewState && typeof viewState === "object" && !Array.isArray(viewState))
+    .sort((left, right) => viewStateUpdatedAtMs(right) - viewStateUpdatedAtMs(left))[0] || null;
 }
 
 function projectFileNameKey(fileName = projectFileName) {
@@ -1192,10 +1207,64 @@ function displayKeysFromStoredDraftIndexes(indexes, includeStory) {
   return keys;
 }
 
+function draftFromStoredRef(draftId, draftIndex) {
+  return state.drafts.find(draft => draft.id === draftId)
+    || state.drafts[Number(draftIndex)]
+    || state.drafts[0]
+    || null;
+}
+
+function normalizeStoredEditorSelection(selection) {
+  if (!selection || typeof selection !== "object" || Array.isArray(selection)) return null;
+
+  const normalized = {};
+  ["startOffset", "endOffset", "startTextOffset", "endTextOffset", "scrollTop", "scrollLeft"].forEach(field => {
+    const value = Number(selection[field]);
+    if (Number.isFinite(value)) normalized[field] = Math.max(0, value);
+  });
+
+  ["startPath", "endPath"].forEach(field => {
+    if (!Array.isArray(selection[field])) return;
+    normalized[field] = selection[field]
+      .map(value => Number(value))
+      .filter(value => Number.isInteger(value) && value >= 0);
+  });
+
+  return Object.keys(normalized).length ? normalized : null;
+}
+
+function storedEditorSelections() {
+  const selections = {};
+  Object.entries(editorSelections).forEach(([key, selection]) => {
+    if (!pageKeyExists(key)) return;
+    const normalized = normalizeStoredEditorSelection(selection);
+    if (normalized) selections[key] = normalized;
+  });
+  return selections;
+}
+
+function restoreEditorSelections(stored) {
+  editorSelections = {};
+  if (!stored || typeof stored !== "object" || Array.isArray(stored)) return;
+
+  Object.entries(stored).forEach(([key, selection]) => {
+    if (!pageKeyExists(key)) return;
+    const normalized = normalizeStoredEditorSelection(selection);
+    if (normalized) editorSelections[key] = normalized;
+  });
+}
+
 function saveCurrentViewState() {
   if (!state) return;
 
+  saveCurrentEditorViewState();
+  saveVisibleEditorScrollPositions();
+
   const selectedDraftIndex = draftIndexForId(selectedDraftId);
+  const selectedDraft = state.drafts[selectedDraftIndex] || state.drafts[0] || null;
+  const activePage = parseDraftPageKey(activeEditorKey);
+  const activeDraftIndex = activePage?.draftId ? draftIndexForId(activePage.draftId) : selectedDraftIndex;
+  const activeDraft = state.drafts[activeDraftIndex] || selectedDraft || null;
   const collapsedNotesIndexes = draftIndexesFromIds([...collapsedNotesIds]);
   const notesPanePercentsByIndex = {};
   Object.entries(notesPanePercents).forEach(([draftId, value]) => {
@@ -1203,22 +1272,92 @@ function saveCurrentViewState() {
     if (index >= 0 && Number.isFinite(Number(value))) notesPanePercentsByIndex[index] = Number(value);
   });
 
-  fileViewStates[projectViewStateKey()] = {
-    version: 1,
+  const viewState = {
+    version: VIEW_STATE_VERSION,
+    updatedAt: nowIso(),
     hasStoredDisplaySelection,
     displayedStory: displayedPageKeys.has(STORY_KEY),
     displayedDraftIndexes: state.drafts
       .map((draft, index) => displayedPageKeys.has(draftContentKey(draft.id)) ? index : null)
       .filter(index => index !== null),
+    displayedDraftIds: state.drafts
+      .filter(draft => displayedPageKeys.has(draftContentKey(draft.id)))
+      .map(draft => draft.id),
     collapsedNotesIndexes,
+    collapsedNotesIds: [...collapsedNotesIds],
     notesPanePercents: notesPanePercentsByIndex,
     pagesOnScreen,
+    selectedDraftId: selectedDraft?.id || null,
     selectedDraftIndex: selectedDraftIndex >= 0 ? selectedDraftIndex : 0,
+    activeDraftId: activeDraft?.id || null,
+    activeDraftIndex: activeDraftIndex >= 0 ? activeDraftIndex : selectedDraftIndex >= 0 ? selectedDraftIndex : 0,
+    activePageType: activeEditorKey === STORY_KEY ? "story" : activePage?.type || "content",
+    activeEditorKey,
+    editorSelections: storedEditorSelections(),
     activeArea,
     showChanges,
     compareMode: els.compareMode.value
   };
+  state.viewState = viewState;
+  fileViewStates[projectViewStateKey()] = viewState;
   saveFileViewStates();
+}
+
+async function saveViewStateNow(options = {}) {
+  if (!state) return false;
+
+  if (isSavingViewState) {
+    viewStateSaveQueued = true;
+    return false;
+  }
+
+  saveCurrentViewState();
+  isSavingViewState = true;
+
+  try {
+    const response = await fetch("/api/view-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ viewState: state.viewState }),
+      keepalive: Boolean(options.keepalive)
+    });
+
+    if (response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      if (payload.viewState) state.viewState = payload.viewState;
+    }
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    isSavingViewState = false;
+    if (viewStateSaveQueued) {
+      viewStateSaveQueued = false;
+      queueViewStateSave(0);
+    }
+  }
+}
+
+function queueViewStateSave(delay = 350) {
+  if (!state) return;
+  window.clearTimeout(viewStateSaveTimer);
+  viewStateSaveTimer = window.setTimeout(() => {
+    saveViewStateNow();
+  }, delay);
+}
+
+function sendViewStateBeacon() {
+  if (!state) return;
+  saveCurrentViewState();
+  const body = JSON.stringify({ viewState: state.viewState });
+  if (!navigator.sendBeacon?.("/api/view-state", new Blob([body], { type: "application/json" }))) {
+    void fetch("/api/view-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+      keepalive: true
+    }).catch(() => {});
+  }
 }
 
 function restoreStoredViewState(stored) {
@@ -1228,8 +1367,18 @@ function restoreStoredViewState(stored) {
   displayedPageKeys = hasStored
     ? displayKeysFromStoredDraftIndexes(stored.displayedDraftIndexes, stored.displayedStory)
     : new Set();
+  if (hasStored && Array.isArray(stored.displayedDraftIds)) {
+    stored.displayedDraftIds.forEach(draftId => {
+      if (draftExists(draftId)) displayedPageKeys.add(draftContentKey(draftId));
+    });
+  }
 
   collapsedNotesIds = new Set(draftIdsFromIndexes(stored?.collapsedNotesIndexes));
+  if (Array.isArray(stored?.collapsedNotesIds)) {
+    stored.collapsedNotesIds.forEach(draftId => {
+      if (draftExists(draftId)) collapsedNotesIds.add(draftId);
+    });
+  }
   notesPanePercents = {};
   Object.entries(stored?.notesPanePercents || {}).forEach(([index, value]) => {
     const draftId = state.drafts[Number(index)]?.id;
@@ -1238,10 +1387,19 @@ function restoreStoredViewState(stored) {
 
   pagesOnScreen = clampPagesOnScreen(stored?.pagesOnScreen);
 
-  const selectedDraft = state.drafts[Number(stored?.selectedDraftIndex)] || state.drafts[0];
+  const selectedDraft = draftFromStoredRef(stored?.selectedDraftId, stored?.selectedDraftIndex);
   selectedDraftId = selectedDraft?.id || null;
   activeArea = stored?.activeArea === "draft" ? "draft" : "story";
-  activeEditorKey = activeArea === "story" ? STORY_KEY : draftContentKey(selectedDraftId);
+  const activeDraft = draftFromStoredRef(stored?.activeDraftId, stored?.activeDraftIndex ?? stored?.selectedDraftIndex);
+  const activePageType = stored?.activePageType === "notes" ? "notes" : "content";
+  if (activeArea === "draft" && activeDraft) {
+    selectedDraftId = activeDraft.id;
+    activeEditorKey = activePageType === "notes" ? draftNotesKey(activeDraft.id) : draftContentKey(activeDraft.id);
+  } else {
+    activeArea = "story";
+    activeEditorKey = STORY_KEY;
+  }
+  restoreEditorSelections(stored?.editorSelections);
   showChanges = Boolean(stored?.showChanges);
 
   if (stored?.compareMode === "first" || stored?.compareMode === "consecutive") {
@@ -1253,7 +1411,9 @@ function restoreStoredViewState(stored) {
 function restoreViewStateForProject(options = {}) {
   const key = projectViewStateKey();
   const fileNameOnlyKey = projectFileNameKey();
-  const stored = options.fresh ? null : fileViewStates[key] || fileViewStates[fileNameOnlyKey];
+  const stored = options.fresh
+    ? null
+    : newestViewState(fileViewStates[key], fileViewStates[fileNameOnlyKey], state?.viewState);
   const fallback = !stored && fileNameOnlyKey === projectFileNameKey(fileNameFromPath(exportPath))
     ? legacyViewState()
     : null;
@@ -1333,6 +1493,7 @@ function setPagesOnScreen(value) {
     });
   }
   saveCurrentViewState();
+  queueViewStateSave(500);
   window.requestAnimationFrame(() => {
     alignPageInCanvas(activeDisplayKey());
     updateAllNotesHeadingDensity();
@@ -1625,7 +1786,10 @@ function saveCurrentEditorSelection() {
   const anchor = selection?.anchorNode;
   const anchorElement = anchor?.nodeType === Node.ELEMENT_NODE ? anchor : anchor?.parentElement;
   const editorEl = anchorElement?.closest?.("[data-editor-key]");
-  if (editorEl && els.pageCanvas.contains(editorEl)) saveEditorSelection(editorEl);
+  if (editorEl && els.pageCanvas.contains(editorEl)) {
+    saveEditorSelection(editorEl);
+    queueViewStateSave(1000);
+  }
 }
 
 function saveCurrentEditorViewState() {
@@ -1986,6 +2150,7 @@ function stateFromExportText(text, previousState = null) {
     defaultFormat: currentDefaultFormat(previousState),
     createdAt,
     updatedAt: nowIso(),
+    viewState: previousState?.viewState || null,
     initialNotes: {
       ...pageFromImportedBlock(storyBlock, PROJECT_NOTES_TITLE, previousState?.initialNotes),
       id: "initial-notes",
@@ -4045,6 +4210,7 @@ function scheduleSave() {
   markStateChanged();
   saveRetryCount = 0;
   syncFromInputs();
+  saveCurrentViewState();
   rememberLinkedProjectState();
   renderDraftTabs();
   refreshRenderedPageLabels();
@@ -4131,7 +4297,7 @@ async function applyTextProject(text, fileName, options = {}) {
   const savedToLinkedFile = await saveNow();
   resetHistory();
   setStatus(savedToLinkedFile ? `Opened ${projectFileName}; autosave linked` : "Opened; saved companion");
-  focusPageEditor(STORY_KEY);
+  focusPageEditor(activeEditorKey);
 }
 
 async function clearLinkedTextFile() {
@@ -4147,7 +4313,10 @@ async function clearLinkedTextFile() {
 async function saveAsTextProject(stateOverride = null, suggestedFileName = null) {
   if (!state && !stateOverride) return false;
   closeFileMenu();
-  if (!stateOverride) syncFromInputs();
+  if (!stateOverride) {
+    syncFromInputs();
+    saveCurrentViewState();
+  }
 
   const stateToSave = stateOverride || state;
   const fileNameToSuggest = ensureTxtExtension(
@@ -4220,6 +4389,7 @@ async function openTextProject() {
   try {
     if (state) {
       syncFromInputs();
+      saveCurrentViewState();
       rememberLinkedProjectState();
       await cacheLinkedProjectStateOnServer();
       window.clearTimeout(saveTimer);
@@ -4275,7 +4445,11 @@ async function closeApp() {
   window.clearTimeout(saveTimer);
 
   try {
-    if (state) syncFromInputs();
+    if (state) {
+      syncFromInputs();
+      saveCurrentViewState();
+      await saveViewStateNow();
+    }
     isClosingApp = true;
     setStatus("Closing...");
 
@@ -4307,6 +4481,7 @@ async function saveNow() {
   }
 
   syncFromInputs();
+  saveCurrentViewState();
   rememberLinkedProjectState();
   const requestRevision = stateRevision;
   isSaving = true;
@@ -4371,6 +4546,7 @@ async function loadState() {
   setStatus(linkedTextPath ? `Saved ${formatDate(state.updatedAt)}` : "Saved companion; no text file linked");
   render();
   resetHistory();
+  focusPageEditor(activeEditorKey);
 }
 
 function setActiveFromPageKey(pageKey) {
@@ -4381,6 +4557,7 @@ function setActiveFromPageKey(pageKey) {
     activeArea = "story";
     renderDraftTabs();
     saveCurrentViewState();
+    queueViewStateSave(0);
     return;
   }
 
@@ -4389,6 +4566,7 @@ function setActiveFromPageKey(pageKey) {
     activeArea = "draft";
     renderDraftTabs();
     saveCurrentViewState();
+    queueViewStateSave(0);
   }
 }
 
@@ -4464,10 +4642,12 @@ function selectDraft(draftId) {
   syncFromInputs();
   selectedDraftId = draftId;
   activeArea = "draft";
-  displayPage(draftContentKey(draftId), true);
+  activeEditorKey = draftContentKey(draftId);
+  displayPage(activeEditorKey, true);
   render();
   scheduleSave();
-  focusPageEditor(draftContentKey(draftId));
+  queueViewStateSave(0);
+  focusPageEditor(activeEditorKey);
 }
 
 function addDraft(copyFromSelected) {
@@ -4477,11 +4657,13 @@ function addDraft(copyFromSelected) {
   state.drafts.push(draft);
   selectedDraftId = draft.id;
   activeArea = "draft";
-  displayPage(draftContentKey(draft.id), true);
+  activeEditorKey = draftContentKey(draft.id);
+  displayPage(activeEditorKey, true);
   render();
   scheduleSave();
+  queueViewStateSave(0);
   scrollTabsToEnd();
-  focusPageEditor(draftContentKey(draft.id));
+  focusPageEditor(activeEditorKey);
 }
 
 function toolbarFormatValues(editorKey) {
@@ -4722,10 +4904,12 @@ function deleteDraft(draftId) {
 
   selectedDraftId = state.drafts[0]?.id;
   activeArea = "draft";
-  displayPage(draftContentKey(selectedDraftId), true);
+  activeEditorKey = draftContentKey(selectedDraftId);
+  displayPage(activeEditorKey, true);
   ensureDisplaySelection();
   render();
   scheduleSave();
+  queueViewStateSave(0);
 }
 
 function resizeNotesPane(draftId, clientY) {
@@ -4777,8 +4961,10 @@ els.storyTab.addEventListener("click", event => {
   if (showChanges) return;
   syncFromInputs();
   activeArea = "story";
+  activeEditorKey = STORY_KEY;
   renderDraftTabs();
   saveCurrentViewState();
+  queueViewStateSave(0);
   focusPageEditor(STORY_KEY);
 });
 
@@ -4871,12 +5057,16 @@ els.pageCanvas.addEventListener("focusin", event => {
     activeEditorKey = draftContentKey(selectedDraftId);
     renderDraftTabs();
     saveCurrentViewState();
+    queueViewStateSave(0);
   }
 });
 
 els.pageCanvas.addEventListener("focusout", event => {
   const editorEl = event.target.closest("[data-editor-key]");
-  if (editorEl) saveEditorViewState(editorEl);
+  if (editorEl) {
+    saveEditorViewState(editorEl);
+    queueViewStateSave(250);
+  }
 });
 
 els.pageCanvas.addEventListener("beforeinput", event => {
@@ -4910,22 +5100,36 @@ els.pageCanvas.addEventListener("input", event => {
 
 els.pageCanvas.addEventListener("keyup", event => {
   const editorEl = event.target.closest("[data-editor-key]");
-  if (editorEl) saveEditorViewState(editorEl);
+  if (editorEl) {
+    saveEditorViewState(editorEl);
+    queueViewStateSave(750);
+  }
 });
 
 els.pageCanvas.addEventListener("pointerup", event => {
   const editorEl = event.target.closest("[data-editor-key]");
-  if (editorEl) saveEditorViewState(editorEl);
+  if (editorEl) {
+    saveEditorViewState(editorEl);
+    queueViewStateSave(750);
+  }
 });
 
 els.pageCanvas.addEventListener("scroll", event => {
   const editorEl = event.target.closest?.("[data-editor-key]");
-  if (editorEl) saveEditorScrollPosition(editorEl);
+  if (editorEl) {
+    saveEditorScrollPosition(editorEl);
+    queueViewStateSave(1000);
+  }
 }, true);
 
 els.pageCanvas.addEventListener("wheel", event => {
   const editorEl = event.target.closest?.("[data-editor-key]");
-  if (editorEl) window.requestAnimationFrame(() => saveEditorScrollPosition(editorEl));
+  if (editorEl) {
+    window.requestAnimationFrame(() => {
+      saveEditorScrollPosition(editorEl);
+      queueViewStateSave(1000);
+    });
+  }
 });
 
 els.pageCanvas.addEventListener("keydown", event => {
@@ -5121,9 +5325,18 @@ window.addEventListener("resize", updateAllNotesHeadingDensity);
 window.addEventListener("beforeunload", () => {
   if (!state || isClosingApp) return;
   syncFromInputs();
+  sendViewStateBeacon();
   const blob = new Blob([JSON.stringify(state)], { type: "application/json" });
   navigator.sendBeacon("/api/close", blob);
 });
+
+window.draftDiffPersistBeforeClose = async () => {
+  if (!state) return true;
+  window.clearTimeout(viewStateSaveTimer);
+  syncFromInputs();
+  await saveViewStateNow();
+  return true;
+};
 
 populateGlobalFormatControls();
 updateMenuShortcutLabels();

@@ -14,6 +14,7 @@ const TEXT_FILE_STATES_FILE = path.join(DATA_DIR, "text-file-states.json");
 const PORT = Number(process.env.PORT || 4173);
 const PROJECT_NOTES_TITLE = "Project notes";
 const FORMAT_DEFAULT_VERSION = 2;
+const VIEW_STATE_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
 const SERVER_BUILD = "server-compare-created-label-2026-05-20";
 const AUTO_EXIT_ON_IDLE = process.env.DRAFT_DIFF_AUTO_EXIT === "1";
@@ -200,6 +201,153 @@ function normalizePage(page, fallback, options = {}) {
   };
 }
 
+function normalizeIndexArray(values, maxLength) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map(value => Number(value))
+    .filter(value => Number.isInteger(value) && value >= 0 && value < maxLength))]
+    .sort((a, b) => a - b);
+}
+
+function normalizeIdArray(values, validIds) {
+  return [...new Set((Array.isArray(values) ? values : [])
+    .map(value => asText(value))
+    .filter(value => validIds.has(value)))];
+}
+
+function normalizeNotesPanePercents(values, maxLength) {
+  const normalized = {};
+  if (!values || typeof values !== "object" || Array.isArray(values)) return normalized;
+
+  Object.entries(values).forEach(([index, value]) => {
+    const numericIndex = Number(index);
+    const numericValue = Number(value);
+    if (
+      Number.isInteger(numericIndex) &&
+      numericIndex >= 0 &&
+      numericIndex < maxLength &&
+      Number.isFinite(numericValue)
+    ) {
+      normalized[numericIndex] = Math.min(90, Math.max(10, numericValue));
+    }
+  });
+  return normalized;
+}
+
+function draftIndexById(drafts, draftId) {
+  return drafts.findIndex(draft => draft.id === draftId);
+}
+
+function draftRefFromViewState(drafts, draftId, draftIndex) {
+  const byIdIndex = draftIndexById(drafts, asText(draftId));
+  const byIndex = Number(draftIndex);
+  const normalizedIndex = byIdIndex >= 0
+    ? byIdIndex
+    : Number.isInteger(byIndex) && byIndex >= 0 && byIndex < drafts.length
+      ? byIndex
+      : 0;
+  return {
+    draft: drafts[normalizedIndex] || null,
+    index: normalizedIndex
+  };
+}
+
+function normalizeEditorSelection(selection) {
+  if (!selection || typeof selection !== "object" || Array.isArray(selection)) return null;
+
+  const normalized = {};
+  ["startOffset", "endOffset", "startTextOffset", "endTextOffset", "scrollTop", "scrollLeft"].forEach(field => {
+    const value = Number(selection[field]);
+    if (Number.isFinite(value)) normalized[field] = Math.max(0, value);
+  });
+
+  ["startPath", "endPath"].forEach(field => {
+    if (!Array.isArray(selection[field])) return;
+    normalized[field] = selection[field]
+      .map(value => Number(value))
+      .filter(value => Number.isInteger(value) && value >= 0);
+  });
+
+  return Object.keys(normalized).length ? normalized : null;
+}
+
+function validEditorKeys(drafts) {
+  return new Set([
+    "story",
+    ...drafts.flatMap(draft => [
+      `draft:${draft.id}:content`,
+      `draft:${draft.id}:notes`
+    ])
+  ]);
+}
+
+function normalizeEditorSelections(selections, drafts) {
+  const normalized = {};
+  if (!selections || typeof selections !== "object" || Array.isArray(selections)) return normalized;
+
+  const keys = validEditorKeys(drafts);
+  Object.entries(selections).forEach(([key, selection]) => {
+    if (!keys.has(key)) return;
+    const normalizedSelection = normalizeEditorSelection(selection);
+    if (normalizedSelection) normalized[key] = normalizedSelection;
+  });
+  return normalized;
+}
+
+function normalizeViewState(viewState, drafts) {
+  if (!viewState || typeof viewState !== "object" || Array.isArray(viewState)) return null;
+
+  const validDraftIds = new Set(drafts.map(draft => draft.id));
+  const displayedDraftIndexes = normalizeIndexArray(viewState.displayedDraftIndexes, drafts.length);
+  const displayedDraftIds = normalizeIdArray(viewState.displayedDraftIds, validDraftIds);
+  displayedDraftIndexes.forEach(index => {
+    const draftId = drafts[index]?.id;
+    if (draftId && !displayedDraftIds.includes(draftId)) displayedDraftIds.push(draftId);
+  });
+
+  const collapsedNotesIndexes = normalizeIndexArray(viewState.collapsedNotesIndexes, drafts.length);
+  const collapsedNotesIds = normalizeIdArray(viewState.collapsedNotesIds, validDraftIds);
+  collapsedNotesIndexes.forEach(index => {
+    const draftId = drafts[index]?.id;
+    if (draftId && !collapsedNotesIds.includes(draftId)) collapsedNotesIds.push(draftId);
+  });
+
+  const selectedRef = draftRefFromViewState(drafts, viewState.selectedDraftId, viewState.selectedDraftIndex);
+  const activeRef = draftRefFromViewState(
+    drafts,
+    viewState.activeDraftId || viewState.selectedDraftId,
+    viewState.activeDraftIndex ?? viewState.selectedDraftIndex
+  );
+  const activeArea = viewState.activeArea === "draft" && activeRef.draft ? "draft" : "story";
+  const activePageType = activeArea === "story" ? "story" : viewState.activePageType === "notes" ? "notes" : "content";
+  const activeEditorKey = activeArea === "story"
+    ? "story"
+    : `draft:${activeRef.draft.id}:${activePageType === "notes" ? "notes" : "content"}`;
+  const pagesOnScreen = Math.min(4, Math.max(1, Number(viewState.pagesOnScreen) || 2));
+
+  return {
+    version: VIEW_STATE_VERSION,
+    updatedAt: viewState.updatedAt || nowIso(),
+    hasStoredDisplaySelection: Boolean(viewState.hasStoredDisplaySelection),
+    displayedStory: Boolean(viewState.displayedStory),
+    displayedDraftIndexes,
+    displayedDraftIds,
+    collapsedNotesIndexes,
+    collapsedNotesIds,
+    notesPanePercents: normalizeNotesPanePercents(viewState.notesPanePercents, drafts.length),
+    pagesOnScreen,
+    selectedDraftId: selectedRef.draft?.id || null,
+    selectedDraftIndex: selectedRef.index,
+    activeDraftId: activeRef.draft?.id || null,
+    activeDraftIndex: activeRef.index,
+    activePageType,
+    activeEditorKey,
+    editorSelections: normalizeEditorSelections(viewState.editorSelections, drafts),
+    activeArea,
+    showChanges: Boolean(viewState.showChanges),
+    compareMode: viewState.compareMode === "consecutive" ? "consecutive" : "first"
+  };
+}
+
 function createDraft(index, content = "") {
   const createdAt = nowIso();
   return {
@@ -250,8 +398,29 @@ function normalizeState(input, options = {}) {
   const drafts = Array.isArray(raw.drafts) && raw.drafts.length ? raw.drafts : fallback.drafts;
   const upgradeLegacyDefaultFont = raw.formatDefaultVersion !== FORMAT_DEFAULT_VERSION;
   const defaultFormat = upgradeLegacyDefaultFormat(currentDefaultFormat(raw), upgradeLegacyDefaultFont);
+  const normalizedDrafts = drafts.map((draft, index) => {
+    const draftNumber = index + 1;
+    const draftCreatedAt = draft?.createdAt || nowIso();
+    const normalizedDraft = normalizePage(draft, {
+      id: draft?.id || id("draft"),
+      title: draft?.title || `Draft ${draftNumber}`,
+      createdAt: draftCreatedAt,
+      updatedAt: draft?.updatedAt || draftCreatedAt,
+      content: ""
+    }, { upgradeLegacyDefaultFont, defaultFormat });
+    return {
+      ...normalizedDraft,
+      notes: normalizePage(draft?.notes, {
+        id: draft?.notes?.id || id("notes"),
+        title: draft?.notes?.title || `Draft ${draftNumber} Notes`,
+        createdAt: draft?.notes?.createdAt || draftCreatedAt,
+        updatedAt: draft?.notes?.updatedAt || draft?.notes?.createdAt || draftCreatedAt,
+        content: ""
+      }, { upgradeLegacyDefaultFont, defaultFormat })
+    };
+  });
 
-  return {
+  const normalized = {
     version: 1,
     formatDefaultVersion: FORMAT_DEFAULT_VERSION,
     defaultFormat,
@@ -264,28 +433,11 @@ function normalizeState(input, options = {}) {
       updatedAt: raw.initialNotes?.updatedAt || raw.initialNotes?.createdAt || createdAt,
       content: ""
     }, { upgradeLegacyDefaultFont, defaultFormat }),
-    drafts: drafts.map((draft, index) => {
-      const draftNumber = index + 1;
-      const draftCreatedAt = draft?.createdAt || nowIso();
-      const normalizedDraft = normalizePage(draft, {
-        id: draft?.id || id("draft"),
-        title: draft?.title || `Draft ${draftNumber}`,
-        createdAt: draftCreatedAt,
-        updatedAt: draft?.updatedAt || draftCreatedAt,
-        content: ""
-      }, { upgradeLegacyDefaultFont, defaultFormat });
-      return {
-        ...normalizedDraft,
-        notes: normalizePage(draft?.notes, {
-          id: draft?.notes?.id || id("notes"),
-          title: draft?.notes?.title || `Draft ${draftNumber} Notes`,
-          createdAt: draft?.notes?.createdAt || draftCreatedAt,
-          updatedAt: draft?.notes?.updatedAt || draft?.notes?.createdAt || draftCreatedAt,
-          content: ""
-        }, { upgradeLegacyDefaultFont, defaultFormat })
-      };
-    })
+    drafts: normalizedDrafts
   };
+  const viewState = normalizeViewState(raw.viewState, normalizedDrafts);
+  if (viewState) normalized.viewState = viewState;
+  return normalized;
 }
 
 function formatDate(iso) {
@@ -393,6 +545,21 @@ function writeTextFileState(filePath, state) {
     state: normalizeState(state)
   };
   writeTextFileStates(states);
+}
+
+function writeProjectStateOnly(state, options = {}) {
+  ensureDataDir();
+  const normalized = normalizeState(state, { touch: Boolean(options.touch) });
+  fs.writeFileSync(STATE_FILE, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+
+  const linkedTextPath = readTextFileLink();
+  if (linkedTextPath) {
+    try {
+      writeTextFileState(linkedTextPath, normalized);
+    } catch {}
+  }
+
+  return normalized;
 }
 
 function writeAll(state) {
@@ -837,6 +1004,23 @@ async function handleApi(req, res, pathname) {
       ok: true,
       state: savedState,
       unit: unitForKey(savedState, key)
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/view-state") {
+    markClientActive();
+    const body = await readBody(req);
+    const payload = body ? JSON.parse(body) : {};
+    const state = readState();
+    if (payload.viewState && typeof payload.viewState === "object") {
+      state.viewState = payload.viewState;
+    }
+
+    const savedState = writeProjectStateOnly(state);
+    sendJson(res, 200, {
+      ok: true,
+      viewState: savedState.viewState || null
     });
     return;
   }
