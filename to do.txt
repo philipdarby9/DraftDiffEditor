@@ -6,3 +6,9 @@ This is quite a big change: there should be an option in View for extracting win
 Redesign formatting ribbon to make it look neater and a bit more writerly.
 Redesign the formatting boxes in Edit view so you cannot see the actual boxes unless they are hovered over like in the normal formatting ribbon. 
 Redesign the tabs and the check boxes in the main page to make them look more writerly, the checkboxes could be white with a black tick which extends outside the borders of the box and has a more handwritten kind of style.
+
+23/06/26:
+-Under Edit there should be a global search option, you click the Search button and it lets you search in each individual draft page or all, and the results are displayed in each draft page, with a section at the top of each draft displaying the number of occurrences and letting you move on to the next or previous result in the draft. All drafts are scrolled to the first instance of searched for item which is highlighted (the function should follow the conventions of the search function). The shortcut should be ctrl+f in windows (and an appropriate shortcut in mac).
+-There should also be a search button in each formatting ribbon for searching only that draft page, which does not have a shortcut, the shortcut goes to the global search function.
+-When you click 'Show changes' and it takes a while to load the screen, there should be a loading bar which says 'Loading changes' rather than just leaving the user waiting.
+-At the moment it is checking spelling but it doesn't have the functionality to correct, we should add the right-click function which suggests spelling corrections or has the option to ignore or add to dictionary (it should add it to the computer's dictionary, not the programs own dictionary).

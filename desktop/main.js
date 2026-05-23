@@ -1,5 +1,5 @@
 const path = require("node:path");
-const { app, BrowserWindow, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, shell } = require("electron");
 
 let mainWindow = null;
 let serverApi = null;
@@ -39,6 +39,85 @@ function getIconPath() {
     : path.join(app.getAppPath(), process.platform === "win32" ? "build" : "", iconName);
 }
 
+function configureSpellChecker(session) {
+  session.setSpellCheckerEnabled(true);
+  const preferredLanguages = ["en-GB", "en-US"].filter(language => (
+    session.availableSpellCheckerLanguages.includes(language)
+  ));
+  if (preferredLanguages.length && process.platform !== "darwin") {
+    session.setSpellCheckerLanguages(preferredLanguages);
+  }
+}
+
+function spellcheckLabel(text, word) {
+  const safeWord = String(word || "").slice(0, 48);
+  return safeWord ? `${text} "${safeWord}"` : text;
+}
+
+function buildEditorContextMenu(browserWindow, params) {
+  const webContents = browserWindow.webContents;
+  const template = [];
+  const misspelledWord = String(params.misspelledWord || "");
+  const suggestions = Array.isArray(params.dictionarySuggestions)
+    ? params.dictionarySuggestions.slice(0, 6)
+    : [];
+
+  if (params.spellcheckEnabled && misspelledWord) {
+    if (suggestions.length) {
+      suggestions.forEach(suggestion => {
+        template.push({
+          label: suggestion,
+          click: () => webContents.replaceMisspelling(suggestion)
+        });
+      });
+    } else {
+      template.push({ label: "No spelling suggestions", enabled: false });
+    }
+
+    template.push(
+      { type: "separator" },
+      {
+        label: spellcheckLabel("Ignore", misspelledWord),
+        click: () => webContents.replaceMisspelling(misspelledWord)
+      },
+      {
+        label: spellcheckLabel("Add to dictionary", misspelledWord),
+        click: () => {
+          webContents.session.addWordToSpellCheckerDictionary(misspelledWord);
+          webContents.replaceMisspelling(misspelledWord);
+        }
+      },
+      { type: "separator" }
+    );
+  }
+
+  if (!params.isEditable && params.selectionText) {
+    template.push({ role: "copy", label: "Copy" }, { type: "separator" });
+  }
+
+  if (params.isEditable) {
+    template.push(
+      { role: "cut", label: "Cut" },
+      { role: "copy", label: "Copy", enabled: Boolean(params.selectionText) },
+      { role: "paste", label: "Paste" },
+      { type: "separator" }
+    );
+  }
+
+  template.push({ role: "selectAll", label: "Select all" });
+
+  return Menu.buildFromTemplate(template);
+}
+
+function attachEditorContextMenu(browserWindow) {
+  browserWindow.webContents.on("context-menu", (event, params) => {
+    const hasSpellcheckAction = Boolean(params.spellcheckEnabled && params.misspelledWord);
+    if (!params.isEditable && !params.selectionText && !hasSpellcheckAction) return;
+    event.preventDefault();
+    buildEditorContextMenu(browserWindow, params).popup({ window: browserWindow });
+  });
+}
+
 function loadServerApi() {
   if (!serverApi) {
     if (app.isPackaged) {
@@ -69,11 +148,17 @@ async function createWindow() {
       preload: path.join(__dirname, "preload.js"),
       contextIsolation: true,
       nodeIntegration: false,
-      sandbox: true
+      sandbox: true,
+      spellcheck: true
     }
   });
 
   mainWindow.removeMenu();
+  configureSpellChecker(mainWindow.webContents.session);
+  attachEditorContextMenu(mainWindow);
+  mainWindow.webContents.on("did-create-window", childWindow => {
+    attachEditorContextMenu(childWindow);
+  });
   mainWindow.once("ready-to-show", () => mainWindow.show());
   mainWindow.on("close", event => {
     if (allowWindowClose) return;
@@ -130,6 +215,11 @@ app.whenReady()
   .then(() => {
     ipcMain.handle("draft-diff:zoom", (_event, direction) => {
       setWindowZoom(direction);
+    });
+    ipcMain.handle("draft-diff:add-word-to-dictionary", (event, value) => {
+      const word = String(value || "").trim();
+      if (!word) return false;
+      return event.sender.session.addWordToSpellCheckerDictionary(word);
     });
     return createWindow();
   })
