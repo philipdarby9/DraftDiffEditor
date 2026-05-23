@@ -1,0 +1,4 @@
+interface:
+  display_name: "Draft Diff Importer"
+  short_description: "Convert draft notes into app import text"
+  default_prompt: "Use $draft-diff-importer to convert this messy story or poem draft document into a Draft Diff Editor companion text file."

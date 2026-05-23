@@ -67,9 +67,6 @@ let stateRevision = 0;
 let saveQueued = false;
 let saveRetryCount = 0;
 let isClosingApp = false;
-let viewStateSaveTimer = null;
-let isSavingViewState = false;
-let viewStateSaveQueued = false;
 
 let fileViewStates = readStoredFileViewStates();
 let displayedPageKeys = new Set();
@@ -1303,63 +1300,6 @@ function saveCurrentViewState() {
   saveFileViewStates();
 }
 
-async function saveViewStateNow(options = {}) {
-  if (!state) return false;
-
-  if (isSavingViewState) {
-    viewStateSaveQueued = true;
-    return false;
-  }
-
-  saveCurrentViewState();
-  isSavingViewState = true;
-
-  try {
-    const response = await fetch("/api/view-state", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ viewState: state.viewState }),
-      keepalive: Boolean(options.keepalive)
-    });
-
-    if (response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      if (payload.viewState) state.viewState = payload.viewState;
-    }
-    return response.ok;
-  } catch {
-    return false;
-  } finally {
-    isSavingViewState = false;
-    if (viewStateSaveQueued) {
-      viewStateSaveQueued = false;
-      queueViewStateSave(0);
-    }
-  }
-}
-
-function queueViewStateSave(delay = 350) {
-  if (!state) return;
-  window.clearTimeout(viewStateSaveTimer);
-  viewStateSaveTimer = window.setTimeout(() => {
-    saveViewStateNow();
-  }, delay);
-}
-
-function sendViewStateBeacon() {
-  if (!state) return;
-  saveCurrentViewState();
-  const body = JSON.stringify({ viewState: state.viewState });
-  if (!navigator.sendBeacon?.("/api/view-state", new Blob([body], { type: "application/json" }))) {
-    void fetch("/api/view-state", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body,
-      keepalive: true
-    }).catch(() => {});
-  }
-}
-
 function restoreStoredViewState(stored) {
   const hasStored = Boolean(stored);
 
@@ -1493,8 +1433,6 @@ function setPagesOnScreen(value) {
     });
   }
   saveCurrentViewState();
-  queueViewStateSave(500);
-  if (showChanges) renderDiff();
   window.requestAnimationFrame(() => {
     alignPageInCanvas(activeDisplayKey());
     updateAllNotesHeadingDensity();
@@ -1787,10 +1725,7 @@ function saveCurrentEditorSelection() {
   const anchor = selection?.anchorNode;
   const anchorElement = anchor?.nodeType === Node.ELEMENT_NODE ? anchor : anchor?.parentElement;
   const editorEl = anchorElement?.closest?.("[data-editor-key]");
-  if (editorEl && els.pageCanvas.contains(editorEl)) {
-    saveEditorSelection(editorEl);
-    queueViewStateSave(1000);
-  }
+  if (editorEl && els.pageCanvas.contains(editorEl)) saveEditorSelection(editorEl);
 }
 
 function saveCurrentEditorViewState() {
@@ -4074,10 +4009,6 @@ function beforeIndexForSelectedDraft(indexes, position) {
   return els.compareMode.value === "first" ? indexes[0] : indexes[position - 1];
 }
 
-function compareVisiblePageCount(pageCount) {
-  return Math.min(clampPagesOnScreen(pagesOnScreen), Math.max(1, pageCount));
-}
-
 function renderComparisonStrip(indexes) {
   const pages = [];
 
@@ -4089,7 +4020,7 @@ function renderComparisonStrip(indexes) {
     pages.push(markedComparePageHtml(pair));
   });
 
-  const visiblePages = compareVisiblePageCount(pages.length);
+  const visiblePages = Math.min(4, Math.max(1, pages.length));
   const gapTotal = 0;
   const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: ${gapTotal}px;`;
   return `<div class="compare-strip" style="${style}">${pages.join("")}</div>`;
@@ -4453,7 +4384,6 @@ async function closeApp() {
     if (state) {
       syncFromInputs();
       saveCurrentViewState();
-      await saveViewStateNow();
     }
     isClosingApp = true;
     setStatus("Closing...");
@@ -4562,7 +4492,6 @@ function setActiveFromPageKey(pageKey) {
     activeArea = "story";
     renderDraftTabs();
     saveCurrentViewState();
-    queueViewStateSave(0);
     return;
   }
 
@@ -4571,7 +4500,6 @@ function setActiveFromPageKey(pageKey) {
     activeArea = "draft";
     renderDraftTabs();
     saveCurrentViewState();
-    queueViewStateSave(0);
   }
 }
 
@@ -4651,7 +4579,6 @@ function selectDraft(draftId) {
   displayPage(activeEditorKey, true);
   render();
   scheduleSave();
-  queueViewStateSave(0);
   focusPageEditor(activeEditorKey);
 }
 
@@ -4666,7 +4593,6 @@ function addDraft(copyFromSelected) {
   displayPage(activeEditorKey, true);
   render();
   scheduleSave();
-  queueViewStateSave(0);
   scrollTabsToEnd();
   focusPageEditor(activeEditorKey);
 }
@@ -4914,7 +4840,6 @@ function deleteDraft(draftId) {
   ensureDisplaySelection();
   render();
   scheduleSave();
-  queueViewStateSave(0);
 }
 
 function resizeNotesPane(draftId, clientY) {
@@ -4969,7 +4894,6 @@ els.storyTab.addEventListener("click", event => {
   activeEditorKey = STORY_KEY;
   renderDraftTabs();
   saveCurrentViewState();
-  queueViewStateSave(0);
   focusPageEditor(STORY_KEY);
 });
 
@@ -5062,16 +4986,12 @@ els.pageCanvas.addEventListener("focusin", event => {
     activeEditorKey = draftContentKey(selectedDraftId);
     renderDraftTabs();
     saveCurrentViewState();
-    queueViewStateSave(0);
   }
 });
 
 els.pageCanvas.addEventListener("focusout", event => {
   const editorEl = event.target.closest("[data-editor-key]");
-  if (editorEl) {
-    saveEditorViewState(editorEl);
-    queueViewStateSave(250);
-  }
+  if (editorEl) saveEditorViewState(editorEl);
 });
 
 els.pageCanvas.addEventListener("beforeinput", event => {
@@ -5105,36 +5025,22 @@ els.pageCanvas.addEventListener("input", event => {
 
 els.pageCanvas.addEventListener("keyup", event => {
   const editorEl = event.target.closest("[data-editor-key]");
-  if (editorEl) {
-    saveEditorViewState(editorEl);
-    queueViewStateSave(750);
-  }
+  if (editorEl) saveEditorViewState(editorEl);
 });
 
 els.pageCanvas.addEventListener("pointerup", event => {
   const editorEl = event.target.closest("[data-editor-key]");
-  if (editorEl) {
-    saveEditorViewState(editorEl);
-    queueViewStateSave(750);
-  }
+  if (editorEl) saveEditorViewState(editorEl);
 });
 
 els.pageCanvas.addEventListener("scroll", event => {
   const editorEl = event.target.closest?.("[data-editor-key]");
-  if (editorEl) {
-    saveEditorScrollPosition(editorEl);
-    queueViewStateSave(1000);
-  }
+  if (editorEl) saveEditorScrollPosition(editorEl);
 }, true);
 
 els.pageCanvas.addEventListener("wheel", event => {
   const editorEl = event.target.closest?.("[data-editor-key]");
-  if (editorEl) {
-    window.requestAnimationFrame(() => {
-      saveEditorScrollPosition(editorEl);
-      queueViewStateSave(1000);
-    });
-  }
+  if (editorEl) window.requestAnimationFrame(() => saveEditorScrollPosition(editorEl));
 });
 
 els.pageCanvas.addEventListener("keydown", event => {
@@ -5330,18 +5236,10 @@ window.addEventListener("resize", updateAllNotesHeadingDensity);
 window.addEventListener("beforeunload", () => {
   if (!state || isClosingApp) return;
   syncFromInputs();
-  sendViewStateBeacon();
+  saveCurrentViewState();
   const blob = new Blob([JSON.stringify(state)], { type: "application/json" });
   navigator.sendBeacon("/api/close", blob);
 });
-
-window.draftDiffPersistBeforeClose = async () => {
-  if (!state) return true;
-  window.clearTimeout(viewStateSaveTimer);
-  syncFromInputs();
-  await saveViewStateNow();
-  return true;
-};
 
 populateGlobalFormatControls();
 updateMenuShortcutLabels();

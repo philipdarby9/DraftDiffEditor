@@ -1,0 +1,8 @@
+I want a zoom in/out function accessible with ctrl and +/- like in websites.
+Add more fonts to the formatting ribbon and Edit drop-down.
+Add an option for line spacing to the formatting ribbon.
+The word 'NOTES' and the button are getting squashed when the window is not full size, this should auto-detect and 'Notes' and the button should disappear when the window is not full size and doesn't have room for it.
+This is quite a big change: there should be an option in View for extracting windows for use with a second screen so they can be dragged away from the main window. So under View, you can have an option like 'Enable panel drag' which adds a little symbol to the top right-hand corner of every writing panel in the main view which, when clicked, removes that window from the main page and gives it its own window (the remaining windows in the main page fill the gap left behind), so that if the user is using 2 screens they could move 1 or more writing panel to a different screen. 
+Redesign formatting ribbon to make it look neater and a bit more writerly.
+Redesign the formatting boxes in Edit view so you cannot see the actual boxes unless they are hovered over like in the normal formatting ribbon. 
+Redesign the tabs and the check boxes in the main page to make them look more writerly, the checkboxes could be white with a black tick which extends outside the borders of the box and has a more handwritten kind of style.
