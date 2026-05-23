@@ -60,6 +60,7 @@ const DEFAULT_PAGES_ON_SCREEN = 2;
 const VIEW_STATE_VERSION = 2;
 const HISTORY_LIMIT = 100;
 const MAX_SAVE_RETRIES = 3;
+const AUTOSAVE_DELAY_MS = 2000;
 const FORMAT_DEFAULT_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
 
@@ -775,7 +776,7 @@ function markStateChanged() {
   stateRevision += 1;
 }
 
-function queueSave(delay = 450) {
+function queueSave(delay = AUTOSAVE_DELAY_MS) {
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(saveNow, delay);
 }
@@ -4918,12 +4919,12 @@ function scheduleSave(options = {}) {
   markStateChanged();
   saveRetryCount = 0;
   if (options.syncInputs === false) {
-    saveCurrentEditorViewState();
+    if (options.updateViewState !== false) saveCurrentEditorViewState();
   } else {
     syncFromInputs();
   }
-  saveCurrentViewState();
-  rememberLinkedProjectState();
+  if (options.updateViewState !== false) saveCurrentViewState();
+  if (options.cacheLinkedState !== false) rememberLinkedProjectState();
   if (options.refreshUi !== false) {
     renderDraftTabs();
     refreshRenderedPageLabels();
@@ -4931,7 +4932,7 @@ function scheduleSave(options = {}) {
   if (showChanges && options.refreshDiff !== false) renderDiff();
   scheduleSearchRefresh();
   setStatus(isSaving ? "Saving..." : "Unsaved changes");
-  queueSave();
+  queueSave(options.saveDelay);
 }
 
 function resetViewStateForProject() {
@@ -5809,7 +5810,6 @@ els.pageCanvas.addEventListener("beforeinput", event => {
 els.pageCanvas.addEventListener("input", event => {
   const editorEl = event.target.closest("[data-editor-key]");
   const titleInput = event.target.closest("[data-title-draft-id]");
-  if (editorEl || titleInput) recordUndoSnapshot();
   if (editorEl) {
     const page = pageForEditorKey(editorEl.dataset.editorKey);
     if (page) syncRichPage(page, editorEl);
@@ -5818,7 +5818,13 @@ els.pageCanvas.addEventListener("input", event => {
 
   if (editorEl || titleInput) {
     scheduleSave(editorEl
-      ? { syncInputs: false, refreshUi: false, refreshDiff: false }
+      ? {
+        syncInputs: false,
+        updateViewState: false,
+        cacheLinkedState: false,
+        refreshUi: false,
+        refreshDiff: false
+      }
       : undefined
     );
   }
