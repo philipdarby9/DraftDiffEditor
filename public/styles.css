@@ -279,7 +279,7 @@ textarea,
 
 .search-popover-row {
   display: grid;
-  grid-template-columns: minmax(220px, 420px) minmax(170px, 240px) 22px 22px 22px;
+  grid-template-columns: minmax(220px, 420px) minmax(170px, 240px) auto auto 22px;
   align-items: end;
   gap: 2px;
 }
@@ -378,18 +378,19 @@ textarea,
 
 .search-nav-button,
 .search-close-button {
-  width: 22px;
+  width: auto;
   height: 22px;
   min-height: 22px;
   align-self: end;
-  padding: 0;
+  padding: 0 5px;
   border-color: transparent;
   background: transparent;
-  font-size: 13px;
+  font-size: 11.5px;
   line-height: 1;
 }
 
 .search-close-button {
+  width: 22px;
   padding: 0;
 }
 

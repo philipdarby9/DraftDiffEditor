@@ -5915,10 +5915,6 @@ els.pageCanvas.addEventListener("mousedown", event => {
   if (event.target.closest(".editor-format-ribbon button")) event.preventDefault();
 });
 
-els.pageCanvas.addEventListener("contextmenu", event => {
-  handleEditorContextMenu(event);
-});
-
 els.pageCanvas.addEventListener("click", event => {
   const detachButton = event.target.closest("[data-detach-unit-key]");
   if (detachButton) {
