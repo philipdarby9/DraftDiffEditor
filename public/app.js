@@ -61,6 +61,9 @@ const VIEW_STATE_VERSION = 2;
 const HISTORY_LIMIT = 100;
 const MAX_SAVE_RETRIES = 3;
 const AUTOSAVE_DELAY_MS = 2000;
+const WORD_COUNT_REFRESH_DELAY_MS = 350;
+const UNDO_TYPING_GROUP_WINDOW_MS = 1200;
+const UNDO_TYPING_GROUP_MAX_MS = 5000;
 const FORMAT_DEFAULT_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
 
@@ -81,6 +84,8 @@ let isClosingApp = false;
 let viewStateSaveTimer = null;
 let isSavingViewState = false;
 let viewStateSaveQueued = false;
+let typingUndoGroup = null;
+let draftNoteStatsTimers = new Map();
 
 let fileViewStates = readStoredFileViewStates();
 let displayedPageKeys = new Set();
@@ -799,6 +804,7 @@ function resetHistory() {
 
 function recordUndoSnapshot() {
   if (!state || isRestoringHistory) return;
+  typingUndoGroup = null;
 
   const snapshot = serializeProjectState();
   if (!snapshot || snapshot === undoStack[undoStack.length - 1]) return;
@@ -807,6 +813,55 @@ function recordUndoSnapshot() {
   if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
   redoStack = [];
   updateUndoRedoControls();
+}
+
+function isGroupedTypingInput(inputType) {
+  return /^(insertText|insertCompositionText|insertParagraph|deleteContentBackward|deleteContentForward)$/u
+    .test(String(inputType || ""));
+}
+
+function undoTargetForInputEvent(event) {
+  const editorEl = closestElement(event.target, "[data-editor-key]");
+  if (editorEl) {
+    return {
+      key: editorEl.dataset.editorKey,
+      grouped: isGroupedTypingInput(event.inputType)
+    };
+  }
+
+  const titleInput = closestElement(event.target, "[data-title-draft-id]");
+  if (titleInput) {
+    return {
+      key: `title:${titleInput.dataset.titleDraftId}`,
+      grouped: isGroupedTypingInput(event.inputType)
+    };
+  }
+
+  return null;
+}
+
+function recordUndoSnapshotForInput(event) {
+  const target = undoTargetForInputEvent(event);
+  if (!target) return;
+
+  if (!target.grouped) {
+    recordUndoSnapshot();
+    return;
+  }
+
+  const now = performance.now();
+  const canContinueGroup = typingUndoGroup
+    && typingUndoGroup.key === target.key
+    && now - typingUndoGroup.lastAt <= UNDO_TYPING_GROUP_WINDOW_MS
+    && now - typingUndoGroup.startedAt <= UNDO_TYPING_GROUP_MAX_MS;
+
+  if (canContinueGroup) {
+    typingUndoGroup.lastAt = now;
+    return;
+  }
+
+  recordUndoSnapshot();
+  typingUndoGroup = { key: target.key, startedAt: now, lastAt: now };
 }
 
 function draftExists(draftId) {
@@ -988,6 +1043,7 @@ function restoreHistorySnapshotWithTarget(snapshot, target) {
 }
 
 function undoProjectChange() {
+  typingUndoGroup = null;
   if (!undoStack.length) {
     updateUndoRedoControls();
     return;
@@ -1003,6 +1059,7 @@ function undoProjectChange() {
 }
 
 function redoProjectChange() {
+  typingUndoGroup = null;
   if (!redoStack.length) {
     updateUndoRedoControls();
     return;
@@ -2540,7 +2597,7 @@ function pageForEditorKey(editorKey) {
 }
 
 function wordCountForText(text) {
-  const matches = String(text || "").match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu);
+  const matches = String(text || "").match(/[\p{L}\p{N}]+(?:[\u0027\u2019/-][\p{L}\p{N}]+)*|\*+/gu);
   return matches ? matches.length : 0;
 }
 
@@ -4603,7 +4660,8 @@ function refreshDraftNoteStatsForEditor(editorEl) {
 
   const draftWordCount = notesPanel.querySelector("[data-draft-word-count]");
   if (draftWordCount) {
-    draftWordCount.textContent = formatWordCount(wordCountForText(editorPlainText(editorEl)));
+    const page = pageForEditorKey(editorEl.dataset.editorKey);
+    draftWordCount.textContent = formatWordCount(wordCountForText(page?.content ?? editorPlainText(editorEl)));
   }
 
   const draftLastEdited = notesPanel.querySelector("[data-draft-last-edited]");
@@ -4613,6 +4671,17 @@ function refreshDraftNoteStatsForEditor(editorEl) {
 
   const heading = notesPanel.querySelector(".notes-toggle-heading");
   window.requestAnimationFrame(() => updateNotesHeadingDensity(heading));
+}
+
+function queueDraftNoteStatsRefresh(editorEl, delay = WORD_COUNT_REFRESH_DELAY_MS) {
+  const editorKey = editorEl?.dataset.editorKey;
+  if (!editorKey) return;
+
+  window.clearTimeout(draftNoteStatsTimers.get(editorKey));
+  draftNoteStatsTimers.set(editorKey, window.setTimeout(() => {
+    draftNoteStatsTimers.delete(editorKey);
+    refreshDraftNoteStatsForEditor(editorEl);
+  }, delay));
 }
 
 function refreshRenderedPageLabels() {
@@ -5844,7 +5913,7 @@ els.pageCanvas.addEventListener("beforeinput", event => {
     return;
   }
 
-  recordUndoSnapshot();
+  recordUndoSnapshotForInput(event);
 });
 
 els.pageCanvas.addEventListener("input", event => {
@@ -5853,7 +5922,7 @@ els.pageCanvas.addEventListener("input", event => {
   if (editorEl) {
     const page = pageForEditorKey(editorEl.dataset.editorKey);
     if (page) syncRichPage(page, editorEl);
-    refreshDraftNoteStatsForEditor(editorEl);
+    queueDraftNoteStatsRefresh(editorEl);
     window.requestAnimationFrame(() => saveEditorViewState(editorEl));
   }
 
@@ -5874,7 +5943,6 @@ els.pageCanvas.addEventListener("input", event => {
 els.pageCanvas.addEventListener("keyup", event => {
   const editorEl = closestElement(event.target, "[data-editor-key]");
   if (editorEl) {
-    refreshDraftNoteStatsForEditor(editorEl);
     saveEditorViewState(editorEl);
     queueViewStateSave(750);
   }
@@ -5925,7 +5993,7 @@ els.pageCanvas.addEventListener("keydown", event => {
   document.execCommand("insertText", false, "\t");
   const page = pageForEditorKey(editorEl.dataset.editorKey);
   if (page) syncRichPage(page, editorEl);
-  refreshDraftNoteStatsForEditor(editorEl);
+  queueDraftNoteStatsRefresh(editorEl, 0);
   scheduleSave();
 });
 
@@ -5941,7 +6009,7 @@ els.pageCanvas.addEventListener("paste", event => {
   document.execCommand("insertHTML", false, html ? sanitizeRichHtml(html) : textToHtml(text));
   const page = pageForEditorKey(editorEl.dataset.editorKey);
   if (page) syncRichPage(page, editorEl);
-  refreshDraftNoteStatsForEditor(editorEl);
+  queueDraftNoteStatsRefresh(editorEl, 0);
   scheduleSave();
 });
 

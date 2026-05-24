@@ -37,6 +37,7 @@ const FONT_FAMILY_OPTIONS = [
 const FONT_SIZE_OPTIONS = ["12", "14", "16", "18", "20", "24", "28", "32"];
 const LINE_HEIGHT_OPTIONS = ["1.2", "1.4", "1.62", "1.8", "2"];
 const DETACHED_PANEL_CHANNEL = "draftDiff.detachedPanels";
+const WORD_COUNT_REFRESH_DELAY_MS = 350;
 const channel = "BroadcastChannel" in window ? new BroadcastChannel(DETACHED_PANEL_CHANNEL) : null;
 
 const toolbarIcons = {
@@ -61,6 +62,7 @@ let unit = null;
 let saveTimer = null;
 let isSaving = false;
 let saveQueued = false;
+let detachedNotesStatsTimer = null;
 
 function escapeHtml(value) {
   return String(value ?? "")
@@ -96,7 +98,7 @@ function plainTextFromHtml(html) {
 }
 
 function wordCountForText(text) {
-  const matches = String(text || "").match(/[\p{L}\p{N}]+(?:['-][\p{L}\p{N}]+)*/gu);
+  const matches = String(text || "").match(/[\p{L}\p{N}]+(?:[\u0027\u2019/-][\p{L}\p{N}]+)*|\*+/gu);
   return matches ? matches.length : 0;
 }
 
@@ -142,6 +144,14 @@ function updateDetachedNotesStats(lastEditedIso = null) {
   wordCountEl.textContent = formatWordCount(wordCountForText(editorPlainText(draftEditor)));
   const timestamp = lastEditedIso || detachedDraftPage()?.updatedAt || detachedDraftPage()?.createdAt;
   lastEditedEl.textContent = `Last edited: ${formatDate(timestamp)}`;
+}
+
+function queueDetachedNotesStatsRefresh(lastEditedIso = null, delay = WORD_COUNT_REFRESH_DELAY_MS) {
+  window.clearTimeout(detachedNotesStatsTimer);
+  detachedNotesStatsTimer = window.setTimeout(() => {
+    detachedNotesStatsTimer = null;
+    updateDetachedNotesStats(lastEditedIso);
+  }, delay);
 }
 
 function setDetachedNotesCollapsed(section, isCollapsed) {
@@ -659,7 +669,7 @@ els.pages.addEventListener("input", event => {
     unit.title = titleInput.value || "Untitled draft";
   }
   if (closestElement(event.target, "[data-editor-key]")?.closest(".draft-detached-page")) {
-    updateDetachedNotesStats(new Date().toISOString());
+    queueDetachedNotesStatsRefresh(new Date().toISOString());
   }
   queueSave();
 });
@@ -685,7 +695,7 @@ els.pages.addEventListener("paste", event => {
   const html = event.clipboardData.getData("text/html");
   const text = event.clipboardData.getData("text/plain");
   document.execCommand("insertHTML", false, html || textToHtml(text));
-  if (editorEl.closest(".draft-detached-page")) updateDetachedNotesStats(new Date().toISOString());
+  if (editorEl.closest(".draft-detached-page")) queueDetachedNotesStatsRefresh(new Date().toISOString(), 0);
   queueSave();
 });
 
