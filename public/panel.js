@@ -55,7 +55,8 @@ const toolbarIcons = {
   alignLeft: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M4 12h10"></path><path d="M4 18h14"></path></svg>',
   alignCenter: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M8 12h8"></path><path d="M6 18h12"></path></svg>',
   alignRight: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M10 12h10"></path><path d="M6 18h14"></path></svg>',
-  clear: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 12.3h7.4"></path><path d="m5.3 8.8 3.9-4.2 2.2 2.1-3.9 4.2H5.3z"></path><path d="M4 13.1 12.5 3"></path></svg>'
+  clear: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 12.3h7.4"></path><path d="m5.3 8.8 3.9-4.2 2.2 2.1-3.9 4.2H5.3z"></path><path d="M4 13.1 12.5 3"></path></svg>',
+  history: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2a4.8 4.8 0 1 1-4.3 2.7"></path><path d="M3.2 3.6v2.7h2.7"></path><path d="M8 5.2v3.1l2.1 1.2"></path></svg>'
 };
 
 let unit = null;
@@ -89,6 +90,11 @@ function formatDate(iso) {
     dateStyle: "medium",
     timeStyle: "short"
   }).format(date);
+}
+
+function shortDraftTitleFromTitle(title) {
+  const match = /^Draft\s+(\d+)/i.exec(String(title || ""));
+  return match ? match[1] : "1";
 }
 
 function plainTextFromHtml(html) {
@@ -194,6 +200,46 @@ function updateAllDetachedNotesHeadingDensity() {
     .forEach(updateDetachedNotesHeadingDensity);
 }
 
+const textMeasureCanvas = document.createElement("canvas");
+const textMeasureContext = textMeasureCanvas.getContext("2d");
+
+function measuredTextWidth(text, element) {
+  if (!textMeasureContext || !element) return 0;
+  const styles = window.getComputedStyle(element);
+  textMeasureContext.font = `${styles.fontStyle} ${styles.fontVariant} ${styles.fontWeight} ${styles.fontSize} ${styles.fontFamily}`;
+  const baseWidth = textMeasureContext.measureText(String(text || "")).width;
+  const letterSpacing = parseFloat(styles.letterSpacing);
+  return Number.isFinite(letterSpacing)
+    ? baseWidth + Math.max(0, String(text || "").length - 1) * letterSpacing
+    : baseWidth;
+}
+
+function horizontalPaddingWidth(element) {
+  const styles = window.getComputedStyle(element);
+  return (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+}
+
+function formatPickerLabelWidthStyle(field, values) {
+  if (field !== "fontFamily" || !textMeasureContext) return "";
+  const styles = window.getComputedStyle(document.documentElement);
+  const fontFamily = styles.getPropertyValue("--font-ui").trim() || "Segoe UI, Arial, sans-serif";
+  textMeasureContext.font = `12.5px ${fontFamily}`;
+  const labelWidth = Math.ceil(Math.max(...values.map(value => textMeasureContext.measureText(String(value)).width)));
+  return ` style="--picker-label-width: ${labelWidth}px;"`;
+}
+
+function updateCompactTitleLabels(root = document) {
+  root.querySelectorAll(".draft-title-row").forEach(row => {
+    row.classList.remove("use-short-title");
+    const input = row.querySelector(".draft-title-input");
+    if (!input) return;
+    const textWidth = measuredTextWidth(input.value, input) + horizontalPaddingWidth(input);
+    if (textWidth > input.clientWidth + 1) {
+      row.classList.add("use-short-title");
+    }
+  });
+}
+
 function editorPlainText(editorEl) {
   const clone = editorEl.cloneNode(true);
   clone.querySelectorAll("br").forEach(br => br.replaceWith("\n"));
@@ -286,6 +332,7 @@ function optionHtml(values, currentValue) {
 
 function formatPickerHtml(field, label, values, className, currentValue) {
   const selectedValue = currentValue || DEFAULT_FORMAT[field];
+  const pickerStyle = formatPickerLabelWidthStyle(field, values);
   const options = values.map(value => `
     <button
       class="fr-picker-option"
@@ -297,7 +344,7 @@ function formatPickerHtml(field, label, values, className, currentValue) {
   `).join("");
 
   return `
-    <div class="fr-picker ${className}" data-page-format-picker="${escapeHtml(field)}" data-value="${escapeHtml(selectedValue)}">
+    <div class="fr-picker ${className}" data-page-format-picker="${escapeHtml(field)}" data-value="${escapeHtml(selectedValue)}"${pickerStyle}>
       <button
         class="fr-picker-button"
         type="button"
@@ -317,6 +364,9 @@ function formatPickerHtml(field, label, values, className, currentValue) {
 }
 
 function formatRibbonHtml(page, format) {
+  const versionHistoryButton = page.type === "draft" || page.type === "story"
+    ? `<button class="fr-btn" type="button" data-version-history="${escapeHtml(page.key)}" title="Version history" aria-label="Version history">${toolbarIcons.history}</button>`
+    : "";
   return `
     <div
       id="format-ribbon-${escapeHtml(page.key)}"
@@ -331,6 +381,7 @@ function formatRibbonHtml(page, format) {
         ${formatPickerHtml("lineHeight", "Line spacing", LINE_HEIGHT_OPTIONS, "line-height", format.lineHeight)}
       </div>
       <div class="fr-group">
+        ${versionHistoryButton}
         <button class="fr-btn" type="button" data-command="undo" title="Undo" aria-label="Undo">${toolbarIcons.undo}</button>
         <button class="fr-btn" type="button" data-command="redo" title="Redo" aria-label="Redo">${toolbarIcons.redo}</button>
       </div>
@@ -374,8 +425,21 @@ function pageSectionHtml(page) {
   const notesHint = page.type === "notes"
     ? '<span class="notes-collapse-hint">Click to collapse</span>'
     : "";
+  const draftTitleValue = page.page.title || page.title;
+  const shortDraftTitle = shortDraftTitleFromTitle(draftTitleValue);
   const titleControl = page.editableTitle
-    ? `<input class="draft-title-input" data-page-title="${escapeHtml(page.key)}" type="text" autocomplete="off" value="${escapeHtml(page.page.title || page.title)}" aria-label="Draft title">`
+    ? `
+      <input
+        class="draft-title-input"
+        data-page-title="${escapeHtml(page.key)}"
+        data-short-title="${escapeHtml(shortDraftTitle)}"
+        type="text"
+        autocomplete="off"
+        value="${escapeHtml(draftTitleValue)}"
+        aria-label="Draft title"
+      >
+      <span class="draft-title-short-display" aria-hidden="true">${escapeHtml(shortDraftTitle)}</span>
+    `
     : `<h2>${escapeHtml(page.title)}</h2>`;
   const headingClass = page.type === "notes" ? "panel-heading notes-toggle-heading" : "panel-heading";
   const ribbonId = `format-ribbon-${page.key}`;
@@ -404,7 +468,7 @@ function pageSectionHtml(page) {
             >${toolbarIcons.format}</button>
             ${notesHeaderStats}
           ` : `
-            <div class="panel-title-row">
+            <div class="panel-title-row${page.editableTitle ? " draft-title-row" : ""}">
               ${titleControl}
             </div>
             <button
@@ -557,7 +621,10 @@ function renderUnit(nextUnit) {
     applyEditorFormat(editorEl, page.page.format);
   });
 
-  window.requestAnimationFrame(updateAllDetachedNotesHeadingDensity);
+  window.requestAnimationFrame(() => {
+    updateAllDetachedNotesHeadingDensity();
+    updateCompactTitleLabels();
+  });
   setStatus("Saved");
 }
 
@@ -667,6 +734,7 @@ els.pages.addEventListener("input", event => {
   const titleInput = closestElement(event.target, "[data-page-title]");
   if (titleInput && unit) {
     unit.title = titleInput.value || "Untitled draft";
+    window.requestAnimationFrame(() => updateCompactTitleLabels(titleInput.closest(".panel-title-row") || document));
   }
   if (closestElement(event.target, "[data-editor-key]")?.closest(".draft-detached-page")) {
     queueDetachedNotesStatsRefresh(new Date().toISOString());
@@ -726,6 +794,12 @@ els.pages.addEventListener("click", event => {
     return;
   }
 
+  const versionHistoryButton = event.target.closest("[data-version-history]");
+  if (versionHistoryButton) {
+    postToMain({ type: "version-history:open", pageKey: versionHistoryButton.dataset.versionHistory });
+    return;
+  }
+
   const button = event.target.closest("[data-command]");
   if (!button) return;
   const section = button.closest("[data-page-key]");
@@ -760,6 +834,7 @@ document.addEventListener("scroll", positionOpenFormatPickers, true);
 window.addEventListener("resize", () => {
   positionOpenFormatPickers();
   updateAllDetachedNotesHeadingDensity();
+  updateCompactTitleLabels();
 });
 
 window.addEventListener("beforeunload", () => {

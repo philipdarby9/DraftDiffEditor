@@ -64,6 +64,7 @@ const AUTOSAVE_DELAY_MS = 2000;
 const WORD_COUNT_REFRESH_DELAY_MS = 350;
 const UNDO_TYPING_GROUP_WINDOW_MS = 1200;
 const UNDO_TYPING_GROUP_MAX_MS = 5000;
+const DRAFT_VERSION_CAPTURE_DELAY_MS = 2500;
 const FORMAT_DEFAULT_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
 
@@ -86,6 +87,7 @@ let isSavingViewState = false;
 let viewStateSaveQueued = false;
 let typingUndoGroup = null;
 let draftNoteStatsTimers = new Map();
+let draftVersionTimers = new Map();
 
 let fileViewStates = readStoredFileViewStates();
 let displayedPageKeys = new Set();
@@ -105,6 +107,7 @@ let detachedPanelWindows = new Map();
 let tabScrollbarDrag = null;
 let fallbackZoomFactor = 1;
 let diffRenderToken = 0;
+let versionHistoryDraftId = null;
 let searchRefreshTimer = null;
 let spellcheckMenu = null;
 let spellcheckRange = null;
@@ -203,6 +206,7 @@ const toolbarIcons = {
   clear: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 12.3h7.4"></path><path d="m5.3 8.8 3.9-4.2 2.2 2.1-3.9 4.2H5.3z"></path><path d="M4 13.1 12.5 3"></path></svg>',
   format: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h10"></path><path d="M5.5 3v3M10.5 6.5v3M7.5 10v3"></path></svg>',
   search: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.2"></circle><path d="m10.2 10.2 3.1 3.1"></path></svg>',
+  history: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2a4.8 4.8 0 1 1-4.3 2.7"></path><path d="M3.2 3.6v2.7h2.7"></path><path d="M8 5.2v3.1l2.1 1.2"></path></svg>',
   detach: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.4 3.6H4.1c-.8 0-1.4.6-1.4 1.4v6.9c0 .8.6 1.4 1.4 1.4H11c.8 0 1.4-.6 1.4-1.4v-1.3"></path><path d="M8.2 3.4h4.4v4.4"></path><path d="M7.2 8.8 12.4 3.6"></path></svg>'
 };
 
@@ -358,6 +362,16 @@ function formatDate(iso) {
   }).format(date);
 }
 
+function formatVersionDate(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.valueOf())) return iso;
+  const now = new Date();
+  const options = date.getFullYear() === now.getFullYear()
+    ? { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
+    : { month: "short", day: "numeric", year: "2-digit", hour: "numeric", minute: "2-digit" };
+  return new Intl.DateTimeFormat(undefined, options).format(date);
+}
+
 function formatDateForExport(iso) {
   const date = new Date(iso);
   if (Number.isNaN(date.valueOf())) return iso;
@@ -365,6 +379,15 @@ function formatDateForExport(iso) {
     dateStyle: "full",
     timeStyle: "short"
   }).format(date);
+}
+
+function compactTitleHtml(fullTitle, shortTitle) {
+  return `
+    <span class="compact-title" title="${escapeHtml(fullTitle)}">
+      <span class="compact-title-full">${escapeHtml(fullTitle)}</span>
+      <span class="compact-title-short" aria-hidden="true">${escapeHtml(shortTitle)}</span>
+    </span>
+  `;
 }
 
 function draftContentKey(draftId) {
@@ -487,10 +510,7 @@ function mainDisplayPageCount() {
 }
 
 function normalizePagesOnScreenForSelection(value) {
-  const requestedPagesOnScreen = clampPagesOnScreen(value);
-  const selectedCount = selectedDisplayPageCount();
-  if (selectedCount === 0) return 1;
-  return Math.min(requestedPagesOnScreen, selectedCount);
+  return clampPagesOnScreen(value);
 }
 
 function syncPagesOnScreenToDisplaySelection() {
@@ -553,7 +573,7 @@ function createDraft(copyFrom, indexOverride, defaultFormatOverride = null) {
   const index = indexOverride || ((state?.drafts?.length || 0) + 1);
   const createdAt = nowIso();
   const defaultFormat = normalizeFormat(defaultFormatOverride || currentDefaultFormat(state));
-  return {
+  const draft = {
     id: makeId("draft"),
     title: `Draft ${index}`,
     createdAt,
@@ -571,6 +591,7 @@ function createDraft(copyFrom, indexOverride, defaultFormatOverride = null) {
       format: { ...defaultFormat }
     }
   };
+  return draft;
 }
 
 function createDefaultState() {
@@ -774,8 +795,26 @@ function migrateLegacyDefaultFonts(projectState) {
   return projectState;
 }
 
-function serializeProjectState(projectState = state) {
-  return projectState ? JSON.stringify(projectState) : "";
+function projectStateWithoutVersionHistory(projectState) {
+  if (!projectState) return null;
+  const initialNotes = { ...(projectState.initialNotes || {}) };
+  delete initialNotes.versionHistory;
+  return {
+    ...projectState,
+    initialNotes,
+    drafts: (projectState.drafts || []).map(draft => {
+      const { versionHistory, ...rest } = draft;
+      return rest;
+    })
+  };
+}
+
+function serializeProjectState(projectState = state, options = {}) {
+  if (!projectState) return "";
+  const serializableState = options.includeVersionHistory === false
+    ? projectStateWithoutVersionHistory(projectState)
+    : projectState;
+  return JSON.stringify(serializableState);
 }
 
 function projectStateFromSnapshot(snapshot) {
@@ -806,7 +845,7 @@ function recordUndoSnapshot() {
   if (!state || isRestoringHistory) return;
   typingUndoGroup = null;
 
-  const snapshot = serializeProjectState();
+  const snapshot = serializeProjectState(state, { includeVersionHistory: false });
   if (!snapshot || snapshot === undoStack[undoStack.length - 1]) return;
 
   undoStack.push(snapshot);
@@ -899,7 +938,9 @@ function reconcileViewAfterHistoryRestore() {
 
 function restoreHistorySnapshot(snapshot) {
   isRestoringHistory = true;
+  const versionHistories = draftVersionHistoriesById();
   state = projectStateFromSnapshot(snapshot);
+  restoreDraftVersionHistories(state, versionHistories);
   editorSelections = {};
   reconcileViewAfterHistoryRestore();
   render();
@@ -1031,7 +1072,9 @@ function makeHistoryTargetVisible(target) {
 
 function restoreHistorySnapshotWithTarget(snapshot, target) {
   isRestoringHistory = true;
+  const versionHistories = draftVersionHistoriesById();
   state = projectStateFromSnapshot(snapshot);
+  restoreDraftVersionHistories(state, versionHistories);
   editorSelections = {};
   reconcileViewAfterHistoryRestore();
   makeHistoryTargetVisible(target);
@@ -1050,8 +1093,8 @@ function undoProjectChange() {
   }
 
   syncFromInputs();
-  const fromState = projectStateFromSnapshot(serializeProjectState());
-  const currentSnapshot = serializeProjectState();
+  const fromState = projectStateFromSnapshot(serializeProjectState(state, { includeVersionHistory: false }));
+  const currentSnapshot = serializeProjectState(state, { includeVersionHistory: false });
   const previousSnapshot = undoStack.pop();
   const toState = projectStateFromSnapshot(previousSnapshot);
   if (currentSnapshot && currentSnapshot !== previousSnapshot) redoStack.push(currentSnapshot);
@@ -1066,8 +1109,8 @@ function redoProjectChange() {
   }
 
   syncFromInputs();
-  const fromState = projectStateFromSnapshot(serializeProjectState());
-  const currentSnapshot = serializeProjectState();
+  const fromState = projectStateFromSnapshot(serializeProjectState(state, { includeVersionHistory: false }));
+  const currentSnapshot = serializeProjectState(state, { includeVersionHistory: false });
   const nextSnapshot = redoStack.pop();
   const toState = projectStateFromSnapshot(nextSnapshot);
   if (currentSnapshot && currentSnapshot !== nextSnapshot) {
@@ -1096,6 +1139,288 @@ function ensurePageFields(page) {
   }
   page.format = normalizeFormat({ ...currentDefaultFormat(state), ...(page.format || {}) });
   return page;
+}
+
+function pageVersionSnapshot(page, fallbackTitle, timestamp = nowIso()) {
+  ensurePageFields(page);
+  return {
+    id: makeId("version"),
+    createdAt: timestamp,
+    title: page.title || fallbackTitle,
+    content: page.content || "",
+    contentHtml: page.contentHtml || textToHtml(page.content || ""),
+    format: normalizeFormat(page.format)
+  };
+}
+
+function versionHasMeaningfulContent(version) {
+  return Boolean(String(version?.content || plainTextFromHtml(version?.contentHtml || "")).trim());
+}
+
+function normalizePageVersionEntry(entry, page, fallbackTitle, index) {
+  const createdAt = entry?.createdAt || page.updatedAt || page.createdAt || nowIso();
+  const contentHtml = typeof entry?.contentHtml === "string"
+    ? sanitizeRichHtml(entry.contentHtml)
+    : textToHtml(typeof entry?.content === "string" ? entry.content : page.content || "");
+  const content = typeof entry?.content === "string"
+    ? entry.content
+    : plainTextFromHtml(contentHtml);
+
+  return {
+    id: entry?.id || makeId("version"),
+    createdAt,
+    title: entry?.title || page.title || fallbackTitle,
+    content,
+    contentHtml,
+    format: normalizeFormat({ ...page.format, ...(entry?.format || {}) })
+  };
+}
+
+function ensurePageVersionHistory(page, fallbackTitle) {
+  if (!page) return [];
+  ensurePageFields(page);
+
+  const source = Array.isArray(page.versionHistory) ? page.versionHistory : [];
+  page.versionHistory = source
+    .filter(entry => entry && typeof entry === "object")
+    .map((entry, index) => normalizePageVersionEntry(entry, page, fallbackTitle, index));
+
+  while (page.versionHistory.length && !versionHasMeaningfulContent(page.versionHistory[0])) {
+    page.versionHistory.shift();
+  }
+
+  if (!page.versionHistory.length) {
+    const current = pageVersionSnapshot(page, fallbackTitle, page.updatedAt || nowIso());
+    if (versionHasMeaningfulContent(current)) page.versionHistory.push(current);
+  }
+
+  return page.versionHistory;
+}
+
+function ensureDraftVersionHistory(draft) {
+  return ensurePageVersionHistory(draft, draft?.title || "Untitled draft");
+}
+
+function ensureProjectNotesVersionHistory(projectState = state) {
+  return ensurePageVersionHistory(projectState?.initialNotes, PROJECT_NOTES_TITLE);
+}
+
+function pageVersionSignature(version) {
+  return JSON.stringify({
+    title: version?.title || "",
+    content: version?.content || "",
+    contentHtml: version?.contentHtml || "",
+    format: normalizeFormat(version?.format || {})
+  });
+}
+
+function appendPageVersionIfChanged(page, fallbackTitle) {
+  if (!page) return false;
+
+  const hadRecordedVersion = Array.isArray(page.versionHistory)
+    && page.versionHistory.some(versionHasMeaningfulContent);
+  const history = ensurePageVersionHistory(page, fallbackTitle);
+  if (!hadRecordedVersion && history.length) return true;
+
+  const current = pageVersionSnapshot(page, fallbackTitle, page.updatedAt || nowIso());
+  if (!history.length && !versionHasMeaningfulContent(current)) return false;
+
+  const previous = history[history.length - 1];
+  if (pageVersionSignature(previous) === pageVersionSignature(current)) return false;
+
+  history.push(current);
+  return true;
+}
+
+function appendDraftVersionIfChanged(draft) {
+  return appendPageVersionIfChanged(draft, draft?.title || "Untitled draft");
+}
+
+function appendProjectNotesVersionIfChanged() {
+  return appendPageVersionIfChanged(state?.initialNotes, PROJECT_NOTES_TITLE);
+}
+
+function restoreDraftVersion(draftId, versionId) {
+  const draft = draftById(draftId);
+  if (!draft) return;
+
+  syncFromInputs();
+  const history = ensureDraftVersionHistory(draft);
+  const versionIndex = history.findIndex(version => version.id === versionId);
+  if (versionIndex < 0) return;
+
+  const version = history[versionIndex];
+  const label = `Draft ${draftVersionNumber(draft, versionIndex)}`;
+  const confirmed = window.confirm(
+    `Restore ${label}?\n\nThis will replace the current draft title, text, and formatting. The current draft will be kept in version history.`
+  );
+  if (!confirmed) return;
+
+  recordUndoSnapshot();
+  clearDraftVersionTimer(draft.id);
+  appendDraftVersionIfChanged(draft);
+
+  const contentHtml = sanitizeRichHtml(version.contentHtml || textToHtml(version.content || ""));
+  draft.title = version.title || draft.title || "Untitled draft";
+  draft.contentHtml = contentHtml;
+  draft.content = typeof version.content === "string" ? version.content : plainTextFromHtml(contentHtml);
+  draft.format = normalizeFormat({ ...currentDefaultFormat(state), ...(version.format || {}) });
+  draft.updatedAt = nowIso();
+  if (draft.notes) draft.notes.title = `${draft.title} Notes`;
+
+  appendDraftVersionIfChanged(draft);
+  versionHistoryDraftId = draft.id;
+  selectedDraftId = draft.id;
+  activeArea = "draft";
+  activeEditorKey = draftContentKey(draft.id);
+  displayPage(activeEditorKey, true);
+  scheduleSave({ syncInputs: false, refreshUi: false, refreshDiff: false });
+  render();
+  setStatus(`Restored ${label}; saving...`);
+}
+
+function restoreProjectNotesVersion(versionId) {
+  if (!state?.initialNotes) return;
+
+  syncFromInputs();
+  const history = ensureProjectNotesVersionHistory();
+  const versionIndex = history.findIndex(version => version.id === versionId);
+  if (versionIndex < 0) return;
+
+  const version = history[versionIndex];
+  const label = `Project notes ${versionIndex + 1}`;
+  const confirmed = window.confirm(
+    `Restore ${label}?\n\nThis will replace the current Project notes text and formatting. The current Project notes will be kept in version history.`
+  );
+  if (!confirmed) return;
+
+  recordUndoSnapshot();
+  clearDraftVersionTimer(STORY_KEY);
+  appendProjectNotesVersionIfChanged();
+
+  const contentHtml = sanitizeRichHtml(version.contentHtml || textToHtml(version.content || ""));
+  state.initialNotes.title = PROJECT_NOTES_TITLE;
+  state.initialNotes.contentHtml = contentHtml;
+  state.initialNotes.content = typeof version.content === "string" ? version.content : plainTextFromHtml(contentHtml);
+  state.initialNotes.format = normalizeFormat({ ...currentDefaultFormat(state), ...(version.format || {}) });
+  state.initialNotes.updatedAt = nowIso();
+
+  appendProjectNotesVersionIfChanged();
+  versionHistoryDraftId = STORY_KEY;
+  activeArea = "story";
+  activeEditorKey = STORY_KEY;
+  displayPage(STORY_KEY, true);
+  scheduleSave({ syncInputs: false, refreshUi: false, refreshDiff: false });
+  render();
+  setStatus(`Restored ${label}; saving...`);
+}
+
+function clearDraftVersionTimer(draftId) {
+  window.clearTimeout(draftVersionTimers.get(draftId));
+  draftVersionTimers.delete(draftId);
+}
+
+function flushDraftVersionCapture(draftId, options = {}) {
+  const draft = draftById(draftId);
+  if (!draft) return false;
+
+  clearDraftVersionTimer(draftId);
+  const changed = appendDraftVersionIfChanged(draft);
+  if (changed && options.markChanged !== false) {
+    markStateChanged();
+    rememberLinkedProjectState();
+    if (versionHistoryDraftId === draftId) renderDiffSoon("Loading version history");
+  }
+  return changed;
+}
+
+function flushProjectNotesVersionCapture(options = {}) {
+  if (!state?.initialNotes) return false;
+
+  clearDraftVersionTimer(STORY_KEY);
+  const changed = appendProjectNotesVersionIfChanged();
+  if (changed && options.markChanged !== false) {
+    markStateChanged();
+    rememberLinkedProjectState();
+    if (versionHistoryDraftId === STORY_KEY) renderDiffSoon("Loading version history");
+  }
+  return changed;
+}
+
+function flushVersionCapture(captureKey, options = {}) {
+  return captureKey === STORY_KEY
+    ? flushProjectNotesVersionCapture(options)
+    : flushDraftVersionCapture(captureKey, options);
+}
+
+function flushDraftVersionCaptures() {
+  const changedCaptureKeys = [];
+  [...draftVersionTimers.keys()].forEach(captureKey => {
+    if (flushVersionCapture(captureKey, { markChanged: false })) changedCaptureKeys.push(captureKey);
+  });
+  return changedCaptureKeys;
+}
+
+function queueDraftVersionCapture(draftId) {
+  if (!draftId || isRestoringHistory) return;
+
+  clearDraftVersionTimer(draftId);
+  draftVersionTimers.set(draftId, window.setTimeout(() => {
+    draftVersionTimers.delete(draftId);
+    if (appendDraftVersionIfChanged(draftById(draftId))) {
+      markStateChanged();
+      rememberLinkedProjectState();
+      setStatus(isSaving ? "Saving..." : "Unsaved changes");
+      queueSave();
+      if (versionHistoryDraftId === draftId) renderDiffSoon("Loading version history");
+    }
+  }, DRAFT_VERSION_CAPTURE_DELAY_MS));
+}
+
+function queueProjectNotesVersionCapture() {
+  if (isRestoringHistory) return;
+
+  clearDraftVersionTimer(STORY_KEY);
+  draftVersionTimers.set(STORY_KEY, window.setTimeout(() => {
+    draftVersionTimers.delete(STORY_KEY);
+    if (appendProjectNotesVersionIfChanged()) {
+      markStateChanged();
+      rememberLinkedProjectState();
+      setStatus(isSaving ? "Saving..." : "Unsaved changes");
+      queueSave();
+      if (versionHistoryDraftId === STORY_KEY) renderDiffSoon("Loading version history");
+    }
+  }, DRAFT_VERSION_CAPTURE_DELAY_MS));
+}
+
+function queueDraftVersionCaptureForEditor(editorEl) {
+  const parsed = parseDraftPageKey(editorEl?.dataset.editorKey);
+  if (parsed?.type === "story") queueProjectNotesVersionCapture();
+  if (parsed?.type === "content") queueDraftVersionCapture(parsed.draftId);
+}
+
+function draftVersionHistoriesById(projectState = state) {
+  const histories = new Map();
+  if (Array.isArray(projectState?.initialNotes?.versionHistory)) {
+    histories.set(STORY_KEY, projectState.initialNotes.versionHistory);
+  }
+  projectState?.drafts?.forEach(draft => {
+    if (draft?.id && Array.isArray(draft.versionHistory)) {
+      histories.set(draft.id, draft.versionHistory);
+    }
+  });
+  return histories;
+}
+
+function restoreDraftVersionHistories(projectState, histories) {
+  if (projectState?.initialNotes) {
+    if (histories?.has(STORY_KEY)) projectState.initialNotes.versionHistory = histories.get(STORY_KEY);
+    ensureProjectNotesVersionHistory(projectState);
+  }
+  projectState?.drafts?.forEach(draft => {
+    if (histories?.has(draft.id)) draft.versionHistory = histories.get(draft.id);
+    ensureDraftVersionHistory(draft);
+  });
 }
 
 function fontStyle(format) {
@@ -1258,6 +1583,9 @@ function applyPageSnapshot(key, snapshotPage) {
   } else if (changed) {
     page.updatedAt = nowIso();
   }
+
+  if (parsed.type === "story" && changed) queueProjectNotesVersionCapture();
+  if (parsed.type === "content" && changed) queueDraftVersionCapture(parsed.draftId);
 
   return true;
 }
@@ -1577,7 +1905,7 @@ function activeDisplayKey() {
 
 function setPagesOnScreen(value) {
   pagesOnScreen = normalizePagesOnScreenForSelection(value);
-  const visiblePagesOnScreen = Math.max(1, Math.min(pagesOnScreen, mainDisplayPageCount() || pagesOnScreen));
+  const visiblePagesOnScreen = pagesOnScreen;
   const outerPadding = 0;
   const pageGap = 0;
   const widthOffset = outerPadding + pageGap * (visiblePagesOnScreen - 1);
@@ -1592,7 +1920,7 @@ function setPagesOnScreen(value) {
   }
   saveCurrentViewState();
   queueViewStateSave(500);
-  if (showChanges) renderDiff();
+  if (changesPanelIsOpen()) renderDiff();
   window.requestAnimationFrame(() => {
     alignPageInCanvas(activeDisplayKey());
     updateAllNotesHeadingDensity();
@@ -2449,8 +2777,9 @@ function menuButtonHtml(label, action, disabled = false) {
   return `<button type="button" data-spellcheck-action="${escapeHtml(action)}"${disabled ? " disabled" : ""}>${escapeHtml(label)}</button>`;
 }
 
-function showSpellcheckMenu({ word, suggestions = [], misspelled = false, clientX, clientY }) {
+function showSpellcheckMenu({ word, range = null, suggestions = [], misspelled = false, clientX, clientY }) {
   closeSpellcheckMenu();
+  spellcheckRange = range;
   const menu = document.createElement("div");
   menu.className = "spellcheck-menu";
   menu.setAttribute("role", "menu");
@@ -2532,11 +2861,19 @@ async function handleEditorContextMenu(event) {
 
   const wordInfo = wordRangeAtPoint(editorEl, event.clientX, event.clientY);
   event.preventDefault();
-  spellcheckRange = wordInfo?.range?.cloneRange() || null;
+  const range = wordInfo?.range?.cloneRange() || null;
 
   let misspelled = false;
   let suggestions = [];
-  if (wordInfo?.word && window.draftDiffDesktop?.isWordMisspelled) {
+  if (wordInfo?.word && window.draftDiffDesktop?.checkSpelling) {
+    const normalizedWord = wordInfo.word.toLocaleLowerCase();
+    const result = await readSpellcheckValue(
+      () => window.draftDiffDesktop.checkSpelling(wordInfo.word),
+      { misspelled: false, suggestions: [] }
+    );
+    misspelled = !ignoredSpellcheckWords.has(normalizedWord) && Boolean(result?.misspelled);
+    suggestions = misspelled && Array.isArray(result?.suggestions) ? result.suggestions : [];
+  } else if (wordInfo?.word && window.draftDiffDesktop?.isWordMisspelled) {
     const normalizedWord = wordInfo.word.toLocaleLowerCase();
     misspelled = !ignoredSpellcheckWords.has(normalizedWord) && await readSpellcheckValue(
       () => window.draftDiffDesktop.isWordMisspelled(wordInfo.word),
@@ -2552,6 +2889,7 @@ async function handleEditorContextMenu(event) {
 
   showSpellcheckMenu({
     word: wordInfo?.word || "",
+    range,
     suggestions,
     misspelled,
     clientX: event.clientX,
@@ -2572,14 +2910,14 @@ function displayElementForKey(pageKey) {
     .find(stack => stack.dataset.draftStackId === parsed.draftId);
 }
 
-function alignPageInCanvas(pageKey) {
+function alignPageInCanvas(pageKey, behavior = "auto") {
   const pageEl = displayElementForKey(pageKey);
   if (!pageEl) return;
 
   const canvasRect = els.pageCanvas.getBoundingClientRect();
   const pageRect = pageEl.getBoundingClientRect();
   const left = els.pageCanvas.scrollLeft + pageRect.left - canvasRect.left;
-  els.pageCanvas.scrollTo({ left, behavior: "auto" });
+  els.pageCanvas.scrollTo({ left, behavior });
 }
 
 function toolbarForEditor(editorKey) {
@@ -2855,17 +3193,34 @@ function stateFromExportText(text, previousState = null) {
     const draftNumber = drafts.length + 1;
     const previousDraft = previousState?.drafts?.[draftNumber - 1] || null;
     const draft = pageFromImportedBlock(draftBlock, `Draft ${draftNumber}`, previousDraft);
+    if (Array.isArray(previousDraft?.versionHistory)) {
+      draft.versionHistory = previousDraft.versionHistory;
+    }
     const notes = pageFromImportedBlock(notesBlock, `${draft.title} Notes`, previousDraft?.notes);
     notes.id = previousDraft?.notes?.id || makeId("notes");
     notes.title = `${draft.title} Notes`;
-    drafts.push({
+    const importedDraft = {
       ...draft,
       id: previousDraft?.id || makeId("draft"),
       notes
-    });
+    };
+    ensureDraftVersionHistory(importedDraft);
+    appendDraftVersionIfChanged(importedDraft);
+    drafts.push(importedDraft);
   }
 
   if (!drafts.length) drafts.push(createDraft(null, 1));
+
+  const initialNotes = {
+    ...pageFromImportedBlock(storyBlock, PROJECT_NOTES_TITLE, previousState?.initialNotes),
+    id: "initial-notes",
+    title: PROJECT_NOTES_TITLE
+  };
+  if (Array.isArray(previousState?.initialNotes?.versionHistory)) {
+    initialNotes.versionHistory = previousState.initialNotes.versionHistory;
+  }
+  ensurePageVersionHistory(initialNotes, PROJECT_NOTES_TITLE);
+  appendPageVersionIfChanged(initialNotes, PROJECT_NOTES_TITLE);
 
   return {
     version: 1,
@@ -2874,11 +3229,7 @@ function stateFromExportText(text, previousState = null) {
     createdAt,
     updatedAt: nowIso(),
     viewState: previousState?.viewState || null,
-    initialNotes: {
-      ...pageFromImportedBlock(storyBlock, PROJECT_NOTES_TITLE, previousState?.initialNotes),
-      id: "initial-notes",
-      title: PROJECT_NOTES_TITLE
-    },
+    initialNotes,
     drafts
   };
 }
@@ -4152,17 +4503,23 @@ function draftIndexForId(draftId) {
 }
 
 function renderDraftTabs() {
-  const storyDisabled = showChanges;
-  els.storyTab.classList.toggle("active", !showChanges && activeArea === "story");
-  els.storyTab.classList.toggle("is-disabled", storyDisabled);
-  els.storyTab.setAttribute("aria-disabled", String(storyDisabled));
-  els.storyDisplayToggle.checked = showChanges ? false : displayedPageKeys.has(STORY_KEY);
-  els.storyDisplayToggle.disabled = storyDisabled;
-  els.storyDisplayToggle.setAttribute("aria-label", showChanges ? "Project notes are not compared" : "Display Project notes");
+  const historyMode = Boolean(versionHistoryDraftId);
+  const storyHistoryActive = versionHistoryDraftId === STORY_KEY;
+  const storySelectionDisabled = showChanges || historyMode;
+  els.tabStrip?.classList.toggle("version-history-tabs", historyMode);
+  els.storyTab.classList.toggle("history-tab", historyMode);
+  els.storyTab.classList.toggle("active", historyMode ? storyHistoryActive : (!showChanges && activeArea === "story"));
+  els.storyTab.classList.toggle("is-disabled", showChanges);
+  els.storyTab.setAttribute("aria-disabled", String(showChanges));
+  els.storyDisplayToggle.checked = storySelectionDisabled ? false : displayedPageKeys.has(STORY_KEY);
+  els.storyDisplayToggle.disabled = storySelectionDisabled;
+  els.storyDisplayToggle.setAttribute("aria-label", historyMode
+    ? "Project notes display selection is not used in version history"
+    : (showChanges ? "Project notes are not compared" : "Display Project notes"));
   const storyFocusButton = els.storyTab.querySelector("[data-story-focus]");
   if (storyFocusButton) {
-    storyFocusButton.disabled = storyDisabled;
-    storyFocusButton.setAttribute("aria-disabled", String(storyDisabled));
+    storyFocusButton.disabled = showChanges;
+    storyFocusButton.setAttribute("aria-disabled", String(showChanges));
   }
   const selectedDrafts = selectedDraftDisplayCount();
   const hasDrafts = Boolean(state.drafts.length);
@@ -4170,17 +4527,26 @@ function renderDraftTabs() {
   const partiallySelected = selectedDrafts > 0 && !allSelected;
 
   if (els.allDraftsTab && els.allDraftsToggle) {
-    els.allDraftsTab.classList.toggle("is-partial", partiallySelected);
-    els.allDraftsToggle.checked = allSelected;
-    els.allDraftsToggle.indeterminate = partiallySelected;
-    els.allDraftsToggle.disabled = !hasDrafts;
-    els.allDraftsToggle.setAttribute("aria-label", showChanges ? "Compare all drafts" : "Display all drafts");
-    els.allDraftsToggle.setAttribute("aria-checked", partiallySelected ? "mixed" : String(allSelected));
+    els.allDraftsTab.classList.toggle("is-partial", !historyMode && partiallySelected);
+    els.allDraftsTab.classList.toggle("is-disabled", historyMode || !hasDrafts);
+    els.allDraftsToggle.checked = historyMode ? false : allSelected;
+    els.allDraftsToggle.indeterminate = historyMode ? false : partiallySelected;
+    els.allDraftsToggle.disabled = historyMode || !hasDrafts;
+    els.allDraftsToggle.setAttribute("aria-label", historyMode
+      ? "Draft display selection is not used in version history"
+      : (showChanges ? "Compare all drafts" : "Display all drafts"));
+    els.allDraftsToggle.setAttribute("aria-checked", historyMode ? "false" : (partiallySelected ? "mixed" : String(allSelected)));
   }
 
   els.draftTabs.innerHTML = state.drafts.map((draft, index) => {
-    const active = draft.id === selectedDraftId && activeArea !== "story" ? " active" : "";
+    const activeDraftId = historyMode ? versionHistoryDraftId : selectedDraftId;
+    const active = draft.id === activeDraftId && (historyMode || activeArea !== "story") ? " active" : "";
     const checked = displayedPageKeys.has(draftContentKey(draft.id)) ? " checked" : "";
+    const disabled = historyMode ? " disabled" : "";
+    const historyClass = historyMode ? " history-tab" : "";
+    const displayLabel = historyMode
+      ? `Draft display selection is not used in version history for ${draft.title}`
+      : `${showChanges ? "Compare" : "Display"} ${draft.title}`;
     const draftNumber = String(index + 1);
     const deleteButton = canDeleteDraft(draft)
       ? `
@@ -4192,8 +4558,8 @@ function renderDraftTabs() {
       `
       : "";
     return `
-      <div class="page-tab draft-tab${active}" data-draft-tab-id="${draft.id}">
-        <input type="checkbox" data-display-draft-id="${draft.id}" aria-label="${showChanges ? "Compare" : "Display"} ${escapeHtml(draft.title)}"${checked}>
+      <div class="page-tab draft-tab${historyClass}${active}" data-draft-tab-id="${draft.id}">
+        <input type="checkbox" data-display-draft-id="${draft.id}" aria-label="${escapeHtml(displayLabel)}"${checked}${disabled}>
         <button class="tab-label" type="button" data-draft-id="${draft.id}" aria-label="${escapeHtml(draft.title)}">
           <span class="tab-label-full">${escapeHtml(draft.title)}</span>
           <span class="tab-label-short" aria-hidden="true">${escapeHtml(draftNumber)}</span>
@@ -4317,6 +4683,56 @@ function updateAllNotesHeadingDensity() {
     .forEach(updateNotesHeadingDensity);
 }
 
+const textMeasureCanvas = document.createElement("canvas");
+const textMeasureContext = textMeasureCanvas.getContext("2d");
+
+function measuredTextWidth(text, element) {
+  if (!textMeasureContext || !element) return 0;
+  const styles = window.getComputedStyle(element);
+  textMeasureContext.font = `${styles.fontStyle} ${styles.fontVariant} ${styles.fontWeight} ${styles.fontSize} ${styles.fontFamily}`;
+  const baseWidth = textMeasureContext.measureText(String(text || "")).width;
+  const letterSpacing = parseFloat(styles.letterSpacing);
+  return Number.isFinite(letterSpacing)
+    ? baseWidth + Math.max(0, String(text || "").length - 1) * letterSpacing
+    : baseWidth;
+}
+
+function horizontalPaddingWidth(element) {
+  const styles = window.getComputedStyle(element);
+  return (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+}
+
+function formatPickerLabelWidthStyle(field, values) {
+  if (field !== "fontFamily" || !textMeasureContext) return "";
+  const styles = window.getComputedStyle(document.documentElement);
+  const fontFamily = styles.getPropertyValue("--font-ui").trim() || "Segoe UI, Arial, sans-serif";
+  textMeasureContext.font = `12.5px ${fontFamily}`;
+  const labelWidth = Math.ceil(Math.max(...values.map(value => textMeasureContext.measureText(String(value)).width)));
+  return ` style="--picker-label-width: ${labelWidth}px;"`;
+}
+
+function updateCompactTitleLabels(root = document) {
+  root.querySelectorAll(".compact-title").forEach(title => {
+    title.classList.remove("use-short-title");
+    const full = title.querySelector(".compact-title-full");
+    if (!full) return;
+    const availableWidth = title.parentElement?.clientWidth || title.clientWidth || 0;
+    if (availableWidth && measuredTextWidth(full.textContent, full) > availableWidth + 1) {
+      title.classList.add("use-short-title");
+    }
+  });
+
+  root.querySelectorAll(".draft-title-row").forEach(row => {
+    row.classList.remove("use-short-title");
+    const input = row.querySelector(".draft-title-input");
+    if (!input) return;
+    const textWidth = measuredTextWidth(input.value, input) + horizontalPaddingWidth(input);
+    if (textWidth > input.clientWidth + 1) {
+      row.classList.add("use-short-title");
+    }
+  });
+}
+
 function scrollTabsToEnd() {
   const strip = els.storyTab?.closest(".tab-strip");
   if (!strip) return;
@@ -4329,6 +4745,7 @@ function scrollTabsToEnd() {
 
 function formatPickerHtml(field, label, values, className) {
   const defaultValue = DEFAULT_FORMAT[field];
+  const pickerStyle = formatPickerLabelWidthStyle(field, values);
   const options = values.map(value => `
     <button
       class="fr-picker-option"
@@ -4340,7 +4757,7 @@ function formatPickerHtml(field, label, values, className) {
   `).join("");
 
   return `
-    <div class="fr-picker ${className}" data-page-format-picker="${escapeHtml(field)}" data-value="${escapeHtml(defaultValue)}">
+    <div class="fr-picker ${className}" data-page-format-picker="${escapeHtml(field)}" data-value="${escapeHtml(defaultValue)}"${pickerStyle}>
       <button
         class="fr-picker-button"
         type="button"
@@ -4360,6 +4777,10 @@ function formatPickerHtml(field, label, values, className) {
 }
 
 function formatRibbonHtml(pageKey, label, options = {}) {
+  const parsedPageKey = parseDraftPageKey(pageKey);
+  const versionHistoryButton = parsedPageKey?.type === "content" || parsedPageKey?.type === "story"
+    ? `<button class="fr-btn" type="button" data-version-history="${escapeHtml(pageKey)}" title="Version history" aria-label="Version history">${toolbarIcons.history}</button>`
+    : "";
   return `
     <div
       id="format-ribbon-${escapeHtml(pageKey)}"
@@ -4375,6 +4796,7 @@ function formatRibbonHtml(pageKey, label, options = {}) {
       </div>
       <div class="fr-group">
         <button class="fr-btn" type="button" data-search-page="${escapeHtml(pageKey)}" title="Search this page" aria-label="Search this page">${toolbarIcons.search}</button>
+        ${versionHistoryButton}
         <button class="fr-btn" type="button" data-command="undo" title="Undo" aria-label="Undo">${toolbarIcons.undo}</button>
         <button class="fr-btn" type="button" data-command="redo" title="Redo" aria-label="Redo">${toolbarIcons.redo}</button>
       </div>
@@ -4418,18 +4840,21 @@ function editorPanelHtml(item, options = {}) {
   const headerDateText = item.type === "draft" ? `Created: ${createdDateText}` : createdDateText;
   const hasToolbar = !options.collapsed;
   const ribbonId = `format-ribbon-${item.key}`;
+  const shortDraftTitle = item.editableTitle ? draftShortNumber(item.draft) : "";
   const titleRow = item.editableTitle
     ? `
-      <div class="panel-title-row">
+      <div class="panel-title-row draft-title-row">
         <input
           id="title-${escapeHtml(item.key)}"
           class="draft-title-input"
           data-title-draft-id="${escapeHtml(item.draft.id)}"
+          data-short-title="${escapeHtml(shortDraftTitle)}"
           type="text"
           autocomplete="off"
           aria-label="${escapeHtml(item.kicker)} title"
           value="${escapeHtml(item.draft.title)}"
         >
+        <span class="draft-title-short-display" aria-hidden="true">${escapeHtml(shortDraftTitle)}</span>
       </div>
     `
     : `
@@ -4606,8 +5031,10 @@ function draftStackHtml(draft) {
 
 function renderEditor() {
   ensurePageFields(state.initialNotes);
+  ensureProjectNotesVersionHistory();
   state.drafts.forEach(draft => {
     ensurePageFields(draft);
+    ensureDraftVersionHistory(draft);
     ensurePageFields(draft.notes);
   });
 
@@ -4795,7 +5222,7 @@ function baseComparePageHtml(draft, subtitle = "BASELINE") {
       <div class="compare-page-header">
         <div class="kicker">${escapeHtml(subtitle)}</div>
         <div class="title-row">
-          <div class="title">${escapeHtml(draft.title)}</div>
+          <div class="title">${compactTitleHtml(draft.title, draftShortNumber(draft))}</div>
         </div>
         <div class="meta">Created: ${formatDate(draft.createdAt)}</div>
       </div>
@@ -4824,8 +5251,8 @@ function markedComparePageHtml(pair) {
       <div class="compare-page-header">
         <div class="kicker">CHANGES</div>
         <div class="title-row">
-          <div class="title">${escapeHtml(pair.after.title)}</div>
-          <div class="vs">vs ${escapeHtml(pair.before.title)}</div>
+          <div class="title">${compactTitleHtml(pair.after.title, draftShortNumber(pair.after))}</div>
+          <div class="vs">${compactTitleHtml(`vs ${pair.before.title}`, `vs ${draftShortNumber(pair.before)}`)}</div>
         </div>
         <div class="meta">
           <div>Created: ${formatDate(pair.after.createdAt)}</div>
@@ -4842,6 +5269,224 @@ function markedComparePageHtml(pair) {
   `;
 }
 
+function draftVersionNumber(draft, index) {
+  const draftIndex = state.drafts.findIndex(item => item.id === draft.id);
+  return `${Math.max(0, draftIndex) + 1}.${index + 1}`;
+}
+
+function draftShortNumber(draft) {
+  const draftIndex = state.drafts.findIndex(item => item.id === draft?.id);
+  return String(Math.max(0, draftIndex) + 1);
+}
+
+function draftVersionPage(draft, version, index) {
+  const number = draftVersionNumber(draft, index);
+  const label = `Draft ${number}`;
+  return {
+    id: version.id,
+    title: label,
+    shortTitle: number,
+    createdAt: version.createdAt,
+    updatedAt: version.createdAt,
+    content: version.content || "",
+    contentHtml: version.contentHtml || textToHtml(version.content || ""),
+    format: normalizeFormat(version.format || draft.format)
+  };
+}
+
+function projectNotesVersionNumber(index) {
+  return String(index + 1);
+}
+
+function projectNotesVersionPage(version, index) {
+  const number = projectNotesVersionNumber(index);
+  const page = state.initialNotes || {};
+  return {
+    id: version.id,
+    title: `Project notes ${number}`,
+    shortTitle: `PN ${number}`,
+    createdAt: version.createdAt,
+    updatedAt: version.createdAt,
+    content: version.content || "",
+    contentHtml: version.contentHtml || textToHtml(version.content || ""),
+    format: normalizeFormat(version.format || page.format)
+  };
+}
+
+function baseVersionPageHtml(draft, version, index) {
+  const page = draftVersionPage(draft, version, index);
+  const versionLabel = draftVersionNumber(draft, index);
+  const recordedText = formatVersionDate(page.createdAt);
+  const fullRecordedText = formatDate(page.createdAt);
+  return `
+    <article class="compare-page is-baseline version-page" data-compare-page-id="${escapeHtml(page.id)}">
+      <div class="compare-page-header version-page-header">
+        <div class="kicker">VERSION</div>
+        <div class="title-row version-page-title-row">
+          <div class="title">${compactTitleHtml(page.title, page.shortTitle)}</div>
+        </div>
+        <div class="meta version-page-meta">
+          <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+        </div>
+        <button
+          class="version-restore-button"
+          type="button"
+          data-restore-draft-id="${escapeHtml(draft.id)}"
+          data-restore-version-id="${escapeHtml(version.id)}"
+          title="Restore Draft ${escapeHtml(versionLabel)}"
+          aria-label="Restore Draft ${escapeHtml(versionLabel)}"
+        >Restore</button>
+      </div>
+      <div class="compare-page-body" style="${fontStyle(page.format)}">
+        ${comparePageContentHtml(page)}
+      </div>
+    </article>
+  `;
+}
+
+function baseProjectNotesVersionPageHtml(version, index) {
+  const page = projectNotesVersionPage(version, index);
+  const versionLabel = projectNotesVersionNumber(index);
+  const recordedText = formatVersionDate(page.createdAt);
+  const fullRecordedText = formatDate(page.createdAt);
+  return `
+    <article class="compare-page is-baseline version-page" data-compare-page-id="${escapeHtml(page.id)}">
+      <div class="compare-page-header version-page-header">
+        <div class="kicker">VERSION</div>
+        <div class="title-row version-page-title-row">
+          <div class="title">${compactTitleHtml(page.title, page.shortTitle)}</div>
+        </div>
+        <div class="meta version-page-meta">
+          <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+        </div>
+        <button
+          class="version-restore-button"
+          type="button"
+          data-restore-project-notes-version-id="${escapeHtml(version.id)}"
+          title="Restore Project notes ${escapeHtml(versionLabel)}"
+          aria-label="Restore Project notes ${escapeHtml(versionLabel)}"
+        >Restore</button>
+      </div>
+      <div class="compare-page-body" style="${fontStyle(page.format)}">
+        ${comparePageContentHtml(page)}
+      </div>
+    </article>
+  `;
+}
+
+function versionComparePageHtml(draft, version, index, previousVersion = null) {
+  const page = draftVersionPage(draft, version, index);
+  if (!previousVersion) return baseVersionPageHtml(draft, version, index);
+
+  const versionLabel = draftVersionNumber(draft, index);
+  const previousPage = draftVersionPage(draft, previousVersion, index - 1);
+  const pair = {
+    before: previousPage,
+    after: page,
+    label: `${page.title} compared to ${previousPage.title}`
+  };
+  const diff = diffRichPages(previousPage, page);
+  const stats = diffTokenStats(diff);
+  const recordedText = formatVersionDate(page.createdAt);
+  const fullRecordedText = formatDate(page.createdAt);
+
+  return `
+    <article class="compare-page later-page version-page" data-compare-page-id="${escapeHtml(page.id)}">
+      <div class="compare-page-header version-page-header">
+        <div class="kicker">VERSION</div>
+        <div class="title-row version-page-title-row">
+          <div class="title">${compactTitleHtml(page.title, page.shortTitle)}</div>
+          <div class="vs">${compactTitleHtml(`vs ${previousPage.title}`, `vs ${previousPage.shortTitle}`)}</div>
+        </div>
+        <div class="meta version-page-meta">
+          <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+          <div class="compare-stats">
+            <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
+            <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
+          </div>
+        </div>
+        <button
+          class="version-restore-button"
+          type="button"
+          data-restore-draft-id="${escapeHtml(draft.id)}"
+          data-restore-version-id="${escapeHtml(version.id)}"
+          title="Restore Draft ${escapeHtml(versionLabel)}"
+          aria-label="Restore Draft ${escapeHtml(versionLabel)}"
+        >Restore</button>
+      </div>
+      <div class="compare-page-body" style="${fontStyle(page.format)}">
+        ${markedLaterPageHtml(pair, diff)}
+      </div>
+    </article>
+  `;
+}
+
+function projectNotesVersionComparePageHtml(version, index, previousVersion = null) {
+  const page = projectNotesVersionPage(version, index);
+  if (!previousVersion) return baseProjectNotesVersionPageHtml(version, index);
+
+  const versionLabel = projectNotesVersionNumber(index);
+  const previousPage = projectNotesVersionPage(previousVersion, index - 1);
+  const pair = {
+    before: previousPage,
+    after: page,
+    label: `${page.title} compared to ${previousPage.title}`
+  };
+  const diff = diffRichPages(previousPage, page);
+  const stats = diffTokenStats(diff);
+  const recordedText = formatVersionDate(page.createdAt);
+  const fullRecordedText = formatDate(page.createdAt);
+
+  return `
+    <article class="compare-page later-page version-page" data-compare-page-id="${escapeHtml(page.id)}">
+      <div class="compare-page-header version-page-header">
+        <div class="kicker">VERSION</div>
+        <div class="title-row version-page-title-row">
+          <div class="title">${compactTitleHtml(page.title, page.shortTitle)}</div>
+          <div class="vs">${compactTitleHtml(`vs ${previousPage.title}`, `vs ${previousPage.shortTitle}`)}</div>
+        </div>
+        <div class="meta version-page-meta">
+          <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+          <div class="compare-stats">
+            <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
+            <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
+          </div>
+        </div>
+        <button
+          class="version-restore-button"
+          type="button"
+          data-restore-project-notes-version-id="${escapeHtml(version.id)}"
+          title="Restore Project notes ${escapeHtml(versionLabel)}"
+          aria-label="Restore Project notes ${escapeHtml(versionLabel)}"
+        >Restore</button>
+      </div>
+      <div class="compare-page-body" style="${fontStyle(page.format)}">
+        ${markedLaterPageHtml(pair, diff)}
+      </div>
+    </article>
+  `;
+}
+
+function renderDraftVersionHistoryStrip(draft) {
+  const versions = ensureDraftVersionHistory(draft);
+  const pages = versions.map((version, index) =>
+    versionComparePageHtml(draft, version, index, versions[index - 1] || null)
+  );
+  const visiblePages = compareVisiblePageCount(pages.length);
+  const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: 0px;`;
+  return `<div class="compare-strip version-history-strip" style="${style}">${pages.join("")}</div>`;
+}
+
+function renderProjectNotesVersionHistoryStrip() {
+  const versions = ensureProjectNotesVersionHistory();
+  const pages = versions.map((version, index) =>
+    projectNotesVersionComparePageHtml(version, index, versions[index - 1] || null)
+  );
+  const visiblePages = compareVisiblePageCount(pages.length);
+  const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: 0px;`;
+  return `<div class="compare-strip version-history-strip" style="${style}">${pages.join("")}</div>`;
+}
+
 function selectedCompareIndexes() {
   return state.drafts
     .map((draft, index) => displayedPageKeys.has(draftContentKey(draft.id)) ? index : null)
@@ -4853,7 +5498,7 @@ function beforeIndexForSelectedDraft(indexes, position) {
 }
 
 function compareVisiblePageCount(pageCount) {
-  return Math.min(clampPagesOnScreen(pagesOnScreen), Math.max(1, pageCount));
+  return clampPagesOnScreen(pagesOnScreen);
 }
 
 function renderComparisonStrip(indexes) {
@@ -4871,6 +5516,10 @@ function renderComparisonStrip(indexes) {
   const gapTotal = 0;
   const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: ${gapTotal}px;`;
   return `<div class="compare-strip" style="${style}">${pages.join("")}</div>`;
+}
+
+function changesPanelIsOpen() {
+  return showChanges || Boolean(versionHistoryDraftId);
 }
 
 function cssEscape(value) {
@@ -4908,6 +5557,13 @@ function scrollCompareTargetIntoView(target, sourceToken) {
   }
 }
 
+function revealComparePage(pageId, behavior = "smooth") {
+  window.requestAnimationFrame(() => {
+    const page = els.diffOutput.querySelector(`[data-compare-page-id="${cssEscape(pageId)}"]`);
+    page?.scrollIntoView({ block: "nearest", inline: "start", behavior });
+  });
+}
+
 function highlightCompareTarget(target) {
   clearCompareTargetHighlight();
   target.classList.add("compare-target-highlight");
@@ -4927,12 +5583,31 @@ function jumpToComparedToken(sourceToken) {
 
 function renderDiff() {
   diffRenderToken += 1;
+  const compareKicker = els.changesPanel?.querySelector(".compare-kicker");
+  if (versionHistoryDraftId) {
+    if (compareKicker) compareKicker.textContent = "VERSION HISTORY";
+    if (versionHistoryDraftId === STORY_KEY) {
+      els.compareSubtitle.textContent = "Version history for Project notes";
+      els.diffOutput.innerHTML = renderProjectNotesVersionHistoryStrip();
+      return;
+    }
+
+    const draft = draftById(versionHistoryDraftId);
+    els.compareSubtitle.textContent = draft ? `Version history for ${draft.title}` : "Version history";
+    els.diffOutput.innerHTML = draft
+      ? renderDraftVersionHistoryStrip(draft)
+      : `<p class="empty-state">Draft not found.</p>`;
+    return;
+  }
+
   if (!showChanges) {
+    if (compareKicker) compareKicker.textContent = "DRAFT COMPARISON";
     els.diffOutput.innerHTML = "";
     els.compareSubtitle.textContent = "";
     return;
   }
 
+  if (compareKicker) compareKicker.textContent = "DRAFT COMPARISON";
   const indexes = selectedCompareIndexes();
 
   const baseline = state.drafts[indexes[0]];
@@ -4945,41 +5620,48 @@ function renderDiff() {
     : `<p class="empty-state">No draft pages selected.</p>`;
 }
 
-function renderDiffLoading() {
+function renderDiffLoading(label = "Loading changes") {
   els.diffOutput.innerHTML = `
     <div class="diff-loading" role="status" aria-live="polite">
-      <span>Loading changes</span>
+      <span>${escapeHtml(label)}</span>
       <div class="diff-loading-track" aria-hidden="true"><span></span></div>
     </div>
   `;
 }
 
-function renderDiffSoon() {
-  if (!showChanges) {
+function renderDiffSoon(label = "Loading changes") {
+  if (!changesPanelIsOpen()) {
     renderDiff();
     return;
   }
 
   const token = diffRenderToken + 1;
   diffRenderToken = token;
-  renderDiffLoading();
+  renderDiffLoading(label);
   window.requestAnimationFrame(() => {
     window.setTimeout(() => {
-      if (token !== diffRenderToken || !showChanges) return;
+      if (token !== diffRenderToken || !changesPanelIsOpen()) return;
       renderDiff();
+      window.requestAnimationFrame(() => updateCompactTitleLabels(els.diffOutput));
     }, 0);
   });
 }
 
 function renderChangesVisibility() {
-  els.editorSurface.classList.toggle("compare-open", showChanges);
-  els.changesPanel.hidden = !showChanges;
-  els.toggleChanges.setAttribute("aria-pressed", String(showChanges));
+  const panelOpen = changesPanelIsOpen();
+  els.editorSurface.classList.toggle("compare-open", panelOpen);
+  els.changesPanel.hidden = !panelOpen;
+  els.changesPanel.classList.toggle("version-history-open", Boolean(versionHistoryDraftId));
+  els.toggleChanges.setAttribute("aria-pressed", String(panelOpen));
   const label = els.toggleChanges.querySelector(".toggle-changes-label");
+  const buttonLabel = versionHistoryDraftId
+    ? "Hide history"
+    : (showChanges ? "Hide changes" : "Show changes");
+  els.toggleChanges.setAttribute("aria-label", buttonLabel);
   if (label) {
-    label.textContent = showChanges ? "Hide changes" : "Show changes";
+    label.textContent = buttonLabel;
   } else {
-    els.toggleChanges.textContent = showChanges ? "Hide changes" : "Show changes";
+    els.toggleChanges.textContent = buttonLabel;
   }
 }
 
@@ -4992,6 +5674,7 @@ function render() {
   renderChangesVisibility();
   renderDiff();
   syncGlobalFormatControls();
+  window.requestAnimationFrame(() => updateCompactTitleLabels());
 }
 
 function syncFromInputs() {
@@ -5307,6 +5990,8 @@ async function saveNow() {
 
   syncFromInputs();
   saveCurrentViewState();
+  const capturedVersionDraftIds = flushDraftVersionCaptures();
+  if (capturedVersionDraftIds.includes(versionHistoryDraftId)) renderDiffSoon("Loading version history");
   rememberLinkedProjectState();
   const requestRevision = stateRevision;
   isSaving = true;
@@ -5395,7 +6080,7 @@ function setActiveFromPageKey(pageKey) {
   }
 }
 
-function focusPageEditor(pageKey) {
+function focusPageEditor(pageKey, options = {}) {
   window.requestAnimationFrame(() => {
     const editor = editorElementForKey(pageKey);
     if (editor) {
@@ -5403,7 +6088,7 @@ function focusPageEditor(pageKey) {
       restoreEditorSelection(editor);
       restoreEditorScrollPosition(editor);
     }
-    alignPageInCanvas(pageKey);
+    alignPageInCanvas(pageKey, options.canvasScrollBehavior || "auto");
   });
 }
 
@@ -5472,7 +6157,22 @@ function selectDraft(draftId) {
   render();
   scheduleSave();
   queueViewStateSave(0);
-  focusPageEditor(activeEditorKey);
+  focusPageEditor(activeEditorKey, { canvasScrollBehavior: "smooth" });
+}
+
+function selectDraftInChanges(draftId) {
+  if (!draftById(draftId)) return;
+
+  syncFromInputs();
+  selectedDraftId = draftId;
+  activeArea = "draft";
+  activeEditorKey = draftContentKey(draftId);
+  const wasDisplayed = displayedPageKeys.has(activeEditorKey);
+  displayPage(activeEditorKey, true);
+  render();
+  scheduleSave({ syncInputs: false, refreshUi: false, refreshDiff: false });
+  queueViewStateSave(0);
+  revealComparePage(draftId, wasDisplayed ? "smooth" : "auto");
 }
 
 function addDraft(copyFromSelected) {
@@ -5523,6 +6223,7 @@ function applyPageFormat(editorKey, field, value) {
   applyEditorFormat(editorEl, page.format);
   syncToolbarValues(editorKey);
   syncGlobalFormatControls();
+  queueDraftVersionCaptureForEditor(editorEl);
   scheduleSave();
 }
 
@@ -5573,7 +6274,59 @@ function runEditorCommand(editorKey, command) {
   editorEl.focus();
   recordUndoSnapshot();
   document.execCommand(command, false, null);
+  queueDraftVersionCaptureForEditor(editorEl);
   scheduleSave();
+}
+
+function openDraftVersionHistoryForDraft(draftId) {
+  const draft = draftById(draftId);
+  if (!draft) return;
+
+  syncFromInputs();
+  if (flushDraftVersionCapture(draft.id)) queueSave();
+  versionHistoryDraftId = draft.id;
+  showChanges = false;
+  activeArea = "draft";
+  selectedDraftId = draft.id;
+  activeEditorKey = draftContentKey(draft.id);
+  displayPage(activeEditorKey, true);
+  saveCurrentViewState();
+  renderDraftTabs();
+  renderChangesVisibility();
+  renderDiffSoon("Loading version history");
+}
+
+function openProjectNotesVersionHistory() {
+  if (!state?.initialNotes) return;
+
+  syncFromInputs();
+  if (flushProjectNotesVersionCapture()) queueSave();
+  versionHistoryDraftId = STORY_KEY;
+  showChanges = false;
+  activeArea = "story";
+  activeEditorKey = STORY_KEY;
+  displayPage(STORY_KEY, true);
+  saveCurrentViewState();
+  renderDraftTabs();
+  renderChangesVisibility();
+  renderDiffSoon("Loading version history");
+}
+
+function openDraftVersionHistoryForPage(editorKey) {
+  const parsed = parseDraftPageKey(editorKey);
+  if (parsed?.type === "story") {
+    openProjectNotesVersionHistory();
+    return;
+  }
+  if (parsed?.type === "content") openDraftVersionHistoryForDraft(parsed.draftId);
+}
+
+function closeVersionHistory() {
+  if (!versionHistoryDraftId) return;
+  versionHistoryDraftId = null;
+  renderDraftTabs();
+  renderChangesVisibility();
+  renderDiff();
 }
 
 function setRibbonRegionOpen(region, open) {
@@ -5720,6 +6473,8 @@ function deleteDraft(draftId) {
   state.drafts = state.drafts.filter(item => item.id !== draftId);
   displayedPageKeys.delete(draftContentKey(draftId));
   collapsedNotesIds.delete(draftId);
+  clearDraftVersionTimer(draftId);
+  if (versionHistoryDraftId === draftId) versionHistoryDraftId = null;
   delete editorSelections[draftContentKey(draftId)];
   delete editorSelections[draftNotesKey(draftId)];
 
@@ -5787,6 +6542,10 @@ els.fileOpenInput.addEventListener("change", async event => {
 
 els.storyTab.addEventListener("click", event => {
   if (!event.target.closest("[data-story-focus]")) return;
+  if (versionHistoryDraftId) {
+    openProjectNotesVersionHistory();
+    return;
+  }
   if (showChanges) return;
   syncFromInputs();
   activeArea = "story";
@@ -5798,7 +6557,7 @@ els.storyTab.addEventListener("click", event => {
 });
 
 els.storyDisplayToggle.addEventListener("change", event => {
-  if (showChanges) {
+  if (showChanges || versionHistoryDraftId) {
     event.target.checked = false;
     return;
   }
@@ -5812,6 +6571,7 @@ els.storyDisplayToggle.addEventListener("change", event => {
 els.allDraftsTab.addEventListener("click", event => {
   if (event.target === els.allDraftsToggle) return;
   if (!event.target.closest("[data-all-drafts-toggle]")) return;
+  if (versionHistoryDraftId) return;
   syncFromInputs();
   displayAllDrafts(!allDraftsSelected());
   render();
@@ -5819,6 +6579,11 @@ els.allDraftsTab.addEventListener("click", event => {
 });
 
 els.allDraftsToggle.addEventListener("change", event => {
+  if (versionHistoryDraftId) {
+    renderDraftTabs();
+    return;
+  }
+
   syncFromInputs();
   displayAllDrafts(event.target.checked);
   render();
@@ -5834,12 +6599,27 @@ els.draftTabs.addEventListener("click", event => {
 
   const button = event.target.closest("[data-draft-id]");
   if (!button) return;
+  if (versionHistoryDraftId) {
+    openDraftVersionHistoryForDraft(button.dataset.draftId);
+    return;
+  }
+
+  if (showChanges) {
+    selectDraftInChanges(button.dataset.draftId);
+    return;
+  }
+
   selectDraft(button.dataset.draftId);
 });
 
 els.draftTabs.addEventListener("change", event => {
   const checkbox = event.target.closest("[data-display-draft-id]");
   if (!checkbox) return;
+  if (versionHistoryDraftId) {
+    checkbox.checked = displayedPageKeys.has(draftContentKey(checkbox.dataset.displayDraftId));
+    return;
+  }
+
   syncFromInputs();
   displayPage(draftContentKey(checkbox.dataset.displayDraftId), checkbox.checked);
   render();
@@ -5922,9 +6702,12 @@ els.pageCanvas.addEventListener("input", event => {
   if (editorEl) {
     const page = pageForEditorKey(editorEl.dataset.editorKey);
     if (page) syncRichPage(page, editorEl);
+    queueDraftVersionCaptureForEditor(editorEl);
     queueDraftNoteStatsRefresh(editorEl);
     window.requestAnimationFrame(() => saveEditorViewState(editorEl));
   }
+
+  if (titleInput) window.requestAnimationFrame(() => updateCompactTitleLabels(titleInput.closest(".panel-title-row") || document));
 
   if (editorEl || titleInput) {
     scheduleSave(editorEl
@@ -5993,6 +6776,7 @@ els.pageCanvas.addEventListener("keydown", event => {
   document.execCommand("insertText", false, "\t");
   const page = pageForEditorKey(editorEl.dataset.editorKey);
   if (page) syncRichPage(page, editorEl);
+  queueDraftVersionCaptureForEditor(editorEl);
   queueDraftNoteStatsRefresh(editorEl, 0);
   scheduleSave();
 });
@@ -6009,6 +6793,7 @@ els.pageCanvas.addEventListener("paste", event => {
   document.execCommand("insertHTML", false, html ? sanitizeRichHtml(html) : textToHtml(text));
   const page = pageForEditorKey(editorEl.dataset.editorKey);
   if (page) syncRichPage(page, editorEl);
+  queueDraftVersionCaptureForEditor(editorEl);
   queueDraftNoteStatsRefresh(editorEl, 0);
   scheduleSave();
 });
@@ -6035,6 +6820,10 @@ els.pageCanvas.addEventListener("pointerdown", event => {
 
 els.pageCanvas.addEventListener("mousedown", event => {
   if (event.target.closest(".editor-format-ribbon button")) event.preventDefault();
+});
+
+els.pageCanvas.addEventListener("contextmenu", event => {
+  handleEditorContextMenu(event);
 });
 
 els.pageCanvas.addEventListener("click", event => {
@@ -6071,6 +6860,12 @@ els.pageCanvas.addEventListener("click", event => {
   const searchPageButton = event.target.closest("[data-search-page]");
   if (searchPageButton) {
     openSearch({ pageKey: searchPageButton.dataset.searchPage });
+    return;
+  }
+
+  const versionHistoryButton = event.target.closest("[data-version-history]");
+  if (versionHistoryButton) {
+    openDraftVersionHistoryForPage(versionHistoryButton.dataset.versionHistory);
     return;
   }
 
@@ -6129,8 +6924,31 @@ els.diffOutput.addEventListener("dblclick", event => {
   jumpToComparedToken(sourceToken);
 });
 
+els.diffOutput.addEventListener("click", event => {
+  if (!(event.target instanceof Element)) return;
+
+  const projectNotesRestoreButton = event.target.closest("[data-restore-project-notes-version-id]");
+  if (projectNotesRestoreButton && els.diffOutput.contains(projectNotesRestoreButton)) {
+    event.preventDefault();
+    restoreProjectNotesVersion(projectNotesRestoreButton.dataset.restoreProjectNotesVersionId);
+    return;
+  }
+
+  const restoreButton = event.target.closest("[data-restore-draft-id][data-restore-version-id]");
+  if (!restoreButton || !els.diffOutput.contains(restoreButton)) return;
+
+  event.preventDefault();
+  restoreDraftVersion(restoreButton.dataset.restoreDraftId, restoreButton.dataset.restoreVersionId);
+});
+
 els.toggleChanges.addEventListener("click", () => {
   syncFromInputs();
+  if (versionHistoryDraftId) {
+    closeVersionHistory();
+    return;
+  }
+
+  versionHistoryDraftId = null;
   showChanges = !showChanges;
   saveCurrentViewState();
   renderDraftTabs();
@@ -6177,6 +6995,11 @@ detachedPanelChannel?.addEventListener("message", event => {
     return;
   }
 
+  if (message.type === "version-history:open") {
+    openDraftVersionHistoryForPage(message.pageKey);
+    return;
+  }
+
   if (message.type === "unit:closed") {
     reattachDetachedUnit(message.key);
   }
@@ -6218,6 +7041,7 @@ document.addEventListener("keydown", event => {
     closeSpellcheckMenu();
     toggleSearchScopeMenu(false);
     if (searchState.open) closeSearch();
+    if (versionHistoryDraftId) closeVersionHistory();
     closeTopMenus();
     closeFormatPickers();
   }
@@ -6227,6 +7051,7 @@ document.addEventListener("scroll", positionOpenFormatPickers, true);
 window.addEventListener("resize", positionOpenFormatPickers);
 window.addEventListener("resize", updateTabDensity);
 window.addEventListener("resize", updateAllNotesHeadingDensity);
+window.addEventListener("resize", () => window.requestAnimationFrame(() => updateCompactTitleLabels()));
 
 window.addEventListener("beforeunload", () => {
   if (!state || isClosingApp) return;

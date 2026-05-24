@@ -1,15 +1,21 @@
 const path = require("node:path");
+const fs = require("node:fs/promises");
 const { app, BrowserWindow, Menu, ipcMain, shell } = require("electron");
+const nspell = require("nspell");
 
 let mainWindow = null;
 let serverApi = null;
 let serverHandle = null;
 let allowWindowClose = false;
+let spellCheckerPromise = null;
+let customSpellings = new Set();
+let spellcheckCache = new Map();
 
 const MIN_ZOOM_FACTOR = 0.5;
 const MAX_ZOOM_FACTOR = 2;
 const ZOOM_STEP = 0.1;
 const APP_USER_MODEL_ID = "com.philipdarby.draftdiffeditor";
+const MAX_SPELLCHECK_CACHE_ENTRIES = 5000;
 
 if (process.platform === "win32") {
   app.setAppUserModelId(APP_USER_MODEL_ID);
@@ -40,13 +46,99 @@ function getIconPath() {
 }
 
 function configureSpellChecker(session) {
-  session.setSpellCheckerEnabled(true);
+  session.setSpellCheckerEnabled(false);
   const preferredLanguages = ["en-GB", "en-US"].filter(language => (
     session.availableSpellCheckerLanguages.includes(language)
   ));
   if (preferredLanguages.length && process.platform !== "darwin") {
     session.setSpellCheckerLanguages(preferredLanguages);
   }
+}
+
+function customSpellingsPath() {
+  return path.join(app.getPath("userData"), "custom-spellings.json");
+}
+
+function normalizeSpellcheckWord(value) {
+  return String(value || "")
+    .trim()
+    .replace(/^[^\p{L}\p{N}']+|[^\p{L}\p{N}']+$/gu, "");
+}
+
+function shouldSkipSpellcheck(word) {
+  return (
+    word.length < 2 ||
+    /\d/.test(word) ||
+    !/\p{L}/u.test(word) ||
+    /^[A-Z]{2,}$/.test(word)
+  );
+}
+
+async function loadCustomSpellings() {
+  try {
+    const raw = await fs.readFile(customSpellingsPath(), "utf8");
+    const values = JSON.parse(raw);
+    if (Array.isArray(values)) {
+      customSpellings = new Set(values.map(normalizeSpellcheckWord).filter(Boolean));
+    }
+  } catch {
+    customSpellings = new Set();
+  }
+}
+
+async function saveCustomSpellings() {
+  await fs.mkdir(path.dirname(customSpellingsPath()), { recursive: true });
+  await fs.writeFile(
+    customSpellingsPath(),
+    `${JSON.stringify([...customSpellings].sort(), null, 2)}\n`
+  );
+}
+
+async function getAppSpellChecker() {
+  if (!spellCheckerPromise) {
+    spellCheckerPromise = (async () => {
+      const { default: dictionary } = await import("dictionary-en-gb");
+      const checker = nspell(dictionary);
+      await loadCustomSpellings();
+      customSpellings.forEach(word => checker.add(word));
+      return checker;
+    })();
+  }
+
+  return spellCheckerPromise;
+}
+
+function rememberSpellcheckResult(cacheKey, value) {
+  spellcheckCache.set(cacheKey, value);
+  if (spellcheckCache.size > MAX_SPELLCHECK_CACHE_ENTRIES) {
+    spellcheckCache.delete(spellcheckCache.keys().next().value);
+  }
+  return value;
+}
+
+async function checkSpellingWord(value, options = {}) {
+  const word = normalizeSpellcheckWord(value);
+  if (!word || shouldSkipSpellcheck(word)) {
+    return { word, misspelled: false, suggestions: [] };
+  }
+
+  const cacheKey = word.toLocaleLowerCase();
+  if (!options.includeSuggestions && spellcheckCache.has(cacheKey)) {
+    const cached = spellcheckCache.get(cacheKey);
+    return { word, misspelled: cached.misspelled, suggestions: [] };
+  }
+
+  const checker = await getAppSpellChecker();
+  const misspelled = !checker.correct(word);
+  const suggestions = misspelled && options.includeSuggestions
+    ? checker.suggest(word).slice(0, 7)
+    : [];
+
+  if (!options.includeSuggestions) {
+    rememberSpellcheckResult(cacheKey, { misspelled });
+  }
+
+  return { word, misspelled, suggestions };
 }
 
 function spellcheckLabel(text, word) {
@@ -111,6 +203,9 @@ function buildEditorContextMenu(browserWindow, params) {
 
 function attachEditorContextMenu(browserWindow) {
   browserWindow.webContents.on("context-menu", (event, params) => {
+    const isFormControl = params.formControlType && params.formControlType !== "none";
+    if (params.isEditable && !isFormControl) return;
+
     const hasSpellcheckAction = Boolean(params.spellcheckEnabled && params.misspelledWord);
     if (!params.isEditable && !params.selectionText && !hasSpellcheckAction) return;
     event.preventDefault();
@@ -149,7 +244,7 @@ async function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: true,
-      spellcheck: true
+      spellcheck: false
     }
   });
 
@@ -217,9 +312,41 @@ app.whenReady()
       setWindowZoom(direction);
     });
     ipcMain.handle("draft-diff:add-word-to-dictionary", (event, value) => {
-      const word = String(value || "").trim();
+      const word = normalizeSpellcheckWord(value);
       if (!word) return false;
-      return event.sender.session.addWordToSpellCheckerDictionary(word);
+      customSpellings.add(word);
+      spellcheckCache.clear();
+      event.sender.session.addWordToSpellCheckerDictionary(word);
+      return getAppSpellChecker()
+        .then(checker => {
+          checker.add(word);
+          return saveCustomSpellings();
+        })
+        .then(() => true);
+    });
+    ipcMain.handle("draft-diff:spellcheck-word", (_event, value) => {
+      return checkSpellingWord(value, { includeSuggestions: true });
+    });
+    ipcMain.handle("draft-diff:spellcheck-words", async (_event, values) => {
+      if (!Array.isArray(values) || !values.length) return [];
+      const checker = await getAppSpellChecker();
+      const misspelled = [];
+      const seen = new Map();
+
+      values.forEach(value => {
+        const word = normalizeSpellcheckWord(value);
+        const cacheKey = word.toLocaleLowerCase();
+        if (!word || shouldSkipSpellcheck(word) || seen.has(cacheKey)) return;
+        const cached = spellcheckCache.get(cacheKey);
+        const isMisspelled = cached ? cached.misspelled : !checker.correct(word);
+        if (!cached) rememberSpellcheckResult(cacheKey, { misspelled: isMisspelled });
+        seen.set(cacheKey, { word, misspelled: isMisspelled });
+      });
+
+      seen.forEach(result => {
+        if (result.misspelled) misspelled.push(result.word);
+      });
+      return misspelled;
     });
     return createWindow();
   })

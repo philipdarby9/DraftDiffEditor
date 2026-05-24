@@ -201,6 +201,53 @@ function normalizePage(page, fallback, options = {}) {
   };
 }
 
+function pageVersionSnapshot(page, fallbackTitle, timestamp = nowIso()) {
+  return {
+    id: id("version"),
+    createdAt: timestamp,
+    title: page.title || fallbackTitle,
+    content: page.content,
+    contentHtml: page.contentHtml,
+    format: normalizeFormat(page.format)
+  };
+}
+
+function versionHasMeaningfulContent(version) {
+  return Boolean((asText(version?.content) || htmlToText(version?.contentHtml || "")).trim());
+}
+
+function normalizePageVersionHistory(history, page, fallbackTitle) {
+  const normalized = (Array.isArray(history) ? history : [])
+    .filter(entry => entry && typeof entry === "object")
+    .map((entry, index) => {
+      const contentHtml = asText(entry.contentHtml) || textToHtml(asText(entry.content) || page.content);
+      const content = asText(entry.content) || htmlToText(contentHtml);
+      return {
+        id: asText(entry.id) || id("version"),
+        createdAt: asText(entry.createdAt) || page.updatedAt || page.createdAt || nowIso(),
+        title: asText(entry.title) || page.title || fallbackTitle,
+        content,
+        contentHtml,
+        format: normalizeFormat({ ...page.format, ...(entry.format || {}) })
+      };
+    });
+
+  while (normalized.length && !versionHasMeaningfulContent(normalized[0])) {
+    normalized.shift();
+  }
+
+  if (!normalized.length) {
+    const current = pageVersionSnapshot(page, fallbackTitle, page.updatedAt || nowIso());
+    if (versionHasMeaningfulContent(current)) normalized.push(current);
+  }
+
+  return normalized;
+}
+
+function normalizeDraftVersionHistory(history, draft) {
+  return normalizePageVersionHistory(history, draft, draft?.title || "Untitled draft");
+}
+
 function normalizeIndexArray(values, maxLength) {
   return [...new Set((Array.isArray(values) ? values : [])
     .map(value => Number(value))
@@ -408,7 +455,7 @@ function normalizeState(input, options = {}) {
       updatedAt: draft?.updatedAt || draftCreatedAt,
       content: ""
     }, { upgradeLegacyDefaultFont, defaultFormat });
-    return {
+    const normalized = {
       ...normalizedDraft,
       notes: normalizePage(draft?.notes, {
         id: draft?.notes?.id || id("notes"),
@@ -418,7 +465,18 @@ function normalizeState(input, options = {}) {
         content: ""
       }, { upgradeLegacyDefaultFont, defaultFormat })
     };
+    normalized.versionHistory = normalizeDraftVersionHistory(draft?.versionHistory, normalized);
+    return normalized;
   });
+
+  const initialNotes = normalizePage(raw.initialNotes, {
+    id: raw.initialNotes?.id || "initial-notes",
+    title: raw.initialNotes?.title || PROJECT_NOTES_TITLE,
+    createdAt: raw.initialNotes?.createdAt || createdAt,
+    updatedAt: raw.initialNotes?.updatedAt || raw.initialNotes?.createdAt || createdAt,
+    content: ""
+  }, { upgradeLegacyDefaultFont, defaultFormat });
+  initialNotes.versionHistory = normalizePageVersionHistory(raw.initialNotes?.versionHistory, initialNotes, PROJECT_NOTES_TITLE);
 
   const normalized = {
     version: 1,
@@ -426,13 +484,7 @@ function normalizeState(input, options = {}) {
     defaultFormat,
     createdAt,
     updatedAt: options.touch ? nowIso() : raw.updatedAt || createdAt,
-    initialNotes: normalizePage(raw.initialNotes, {
-      id: raw.initialNotes?.id || "initial-notes",
-      title: raw.initialNotes?.title || PROJECT_NOTES_TITLE,
-      createdAt: raw.initialNotes?.createdAt || createdAt,
-      updatedAt: raw.initialNotes?.updatedAt || raw.initialNotes?.createdAt || createdAt,
-      content: ""
-    }, { upgradeLegacyDefaultFont, defaultFormat }),
+    initialNotes,
     drafts: normalizedDrafts
   };
   const viewState = normalizeViewState(raw.viewState, normalizedDrafts);
