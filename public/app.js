@@ -594,6 +594,11 @@ function fileNameFromPath(filePath) {
   return String(filePath || "").split(/[\\/]/).filter(Boolean).pop() || "";
 }
 
+function closestElement(target, selector) {
+  const element = target instanceof Element ? target : target?.parentElement;
+  return element?.closest?.(selector) || null;
+}
+
 function ensureTxtExtension(fileName) {
   const trimmed = String(fileName || "").trim();
   if (!trimmed) return "draft-history.txt";
@@ -1016,8 +1021,7 @@ function redoProjectChange() {
 }
 
 function editableHistoryTarget(target) {
-  if (!(target instanceof Element)) return null;
-  return target.closest("[data-editor-key], [data-title-draft-id]");
+  return closestElement(target, "[data-editor-key], [data-title-draft-id]");
 }
 
 function ensurePageFields(page) {
@@ -4567,6 +4571,50 @@ function renderEditor() {
   window.requestAnimationFrame(() => refreshSearchResults({ allowRender: false }));
 }
 
+function refreshDraftNoteStats(draft, panel = null) {
+  if (!draft?.id) return;
+
+  const notesPanel = panel || pagePanelForKey(draftNotesKey(draft.id));
+  if (!notesPanel) return;
+
+  const draftWordCount = notesPanel.querySelector("[data-draft-word-count]");
+  if (draftWordCount) {
+    draftWordCount.textContent = formatWordCount(pageWordCount(draft));
+  }
+
+  const draftLastEdited = notesPanel.querySelector("[data-draft-last-edited]");
+  if (draftLastEdited) {
+    draftLastEdited.textContent = `Last edited: ${formatDate(draft.updatedAt || draft.createdAt)}`;
+  }
+
+  const heading = notesPanel.querySelector(".notes-toggle-heading");
+  window.requestAnimationFrame(() => updateNotesHeadingDensity(heading));
+}
+
+function refreshDraftNoteStatsForEditor(editorEl) {
+  const parsed = parseDraftPageKey(editorEl?.dataset.editorKey);
+  if (parsed?.type !== "content") return;
+
+  const draft = draftById(parsed.draftId);
+  if (!draft) return;
+
+  const notesPanel = pagePanelForKey(draftNotesKey(draft.id));
+  if (!notesPanel) return;
+
+  const draftWordCount = notesPanel.querySelector("[data-draft-word-count]");
+  if (draftWordCount) {
+    draftWordCount.textContent = formatWordCount(wordCountForText(editorPlainText(editorEl)));
+  }
+
+  const draftLastEdited = notesPanel.querySelector("[data-draft-last-edited]");
+  if (draftLastEdited) {
+    draftLastEdited.textContent = `Last edited: ${formatDate(draft.updatedAt || nowIso())}`;
+  }
+
+  const heading = notesPanel.querySelector(".notes-toggle-heading");
+  window.requestAnimationFrame(() => updateNotesHeadingDensity(heading));
+}
+
 function refreshRenderedPageLabels() {
   allPageItems().forEach(item => {
     const panel = pagePanelForKey(item.key);
@@ -4582,15 +4630,7 @@ function refreshRenderedPageLabels() {
     const toolbar = toolbarForEditor(item.key);
     if (toolbar) toolbar.setAttribute("aria-label", `${item.title} formatting`);
 
-    const draftWordCount = panel.querySelector("[data-draft-word-count]");
-    if (draftWordCount && item.type === "notes" && item.draft) {
-      draftWordCount.textContent = formatWordCount(pageWordCount(item.draft));
-    }
-
-    const draftLastEdited = panel.querySelector("[data-draft-last-edited]");
-    if (draftLastEdited && item.type === "notes" && item.draft) {
-      draftLastEdited.textContent = `Last edited: ${formatDate(item.draft.updatedAt || item.draft.createdAt)}`;
-    }
+    if (item.type === "notes" && item.draft) refreshDraftNoteStats(item.draft, panel);
   });
   window.requestAnimationFrame(updateAllNotesHeadingDensity);
 }
@@ -5808,11 +5848,12 @@ els.pageCanvas.addEventListener("beforeinput", event => {
 });
 
 els.pageCanvas.addEventListener("input", event => {
-  const editorEl = event.target.closest("[data-editor-key]");
-  const titleInput = event.target.closest("[data-title-draft-id]");
+  const editorEl = closestElement(event.target, "[data-editor-key]");
+  const titleInput = closestElement(event.target, "[data-title-draft-id]");
   if (editorEl) {
     const page = pageForEditorKey(editorEl.dataset.editorKey);
     if (page) syncRichPage(page, editorEl);
+    refreshDraftNoteStatsForEditor(editorEl);
     window.requestAnimationFrame(() => saveEditorViewState(editorEl));
   }
 
@@ -5831,15 +5872,16 @@ els.pageCanvas.addEventListener("input", event => {
 });
 
 els.pageCanvas.addEventListener("keyup", event => {
-  const editorEl = event.target.closest("[data-editor-key]");
+  const editorEl = closestElement(event.target, "[data-editor-key]");
   if (editorEl) {
+    refreshDraftNoteStatsForEditor(editorEl);
     saveEditorViewState(editorEl);
     queueViewStateSave(750);
   }
 });
 
 els.pageCanvas.addEventListener("pointerup", event => {
-  const editorEl = event.target.closest("[data-editor-key]");
+  const editorEl = closestElement(event.target, "[data-editor-key]");
   if (editorEl) {
     saveEditorViewState(editorEl);
     queueViewStateSave(750);
@@ -5881,11 +5923,14 @@ els.pageCanvas.addEventListener("keydown", event => {
   activeEditorKey = editorEl.dataset.editorKey;
   recordUndoSnapshot();
   document.execCommand("insertText", false, "\t");
+  const page = pageForEditorKey(editorEl.dataset.editorKey);
+  if (page) syncRichPage(page, editorEl);
+  refreshDraftNoteStatsForEditor(editorEl);
   scheduleSave();
 });
 
 els.pageCanvas.addEventListener("paste", event => {
-  const editorEl = event.target.closest("[data-editor-key]");
+  const editorEl = closestElement(event.target, "[data-editor-key]");
   if (!editorEl) return;
 
   event.preventDefault();
@@ -5894,6 +5939,9 @@ els.pageCanvas.addEventListener("paste", event => {
   const html = event.clipboardData.getData("text/html");
   const text = event.clipboardData.getData("text/plain");
   document.execCommand("insertHTML", false, html ? sanitizeRichHtml(html) : textToHtml(text));
+  const page = pageForEditorKey(editorEl.dataset.editorKey);
+  if (page) syncRichPage(page, editorEl);
+  refreshDraftNoteStatsForEditor(editorEl);
   scheduleSave();
 });
 

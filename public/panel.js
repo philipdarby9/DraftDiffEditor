@@ -71,6 +71,11 @@ function escapeHtml(value) {
     .replaceAll("'", "&#039;");
 }
 
+function closestElement(target, selector) {
+  const element = target instanceof Element ? target : target?.parentElement;
+  return element?.closest?.(selector) || null;
+}
+
 function textToHtml(value) {
   return escapeHtml(value).replace(/\n/g, "<br>");
 }
@@ -649,11 +654,11 @@ channel?.addEventListener("message", event => {
 });
 
 els.pages.addEventListener("input", event => {
-  const titleInput = event.target.closest("[data-page-title]");
+  const titleInput = closestElement(event.target, "[data-page-title]");
   if (titleInput && unit) {
     unit.title = titleInput.value || "Untitled draft";
   }
-  if (event.target.closest("[data-editor-key]")?.closest(".draft-detached-page")) {
+  if (closestElement(event.target, "[data-editor-key]")?.closest(".draft-detached-page")) {
     updateDetachedNotesStats(new Date().toISOString());
   }
   queueSave();
@@ -673,13 +678,14 @@ els.pages.addEventListener("mousedown", event => {
 });
 
 els.pages.addEventListener("paste", event => {
-  const editorEl = event.target.closest("[data-editor-key]");
+  const editorEl = closestElement(event.target, "[data-editor-key]");
   if (!editorEl) return;
 
   event.preventDefault();
   const html = event.clipboardData.getData("text/html");
   const text = event.clipboardData.getData("text/plain");
   document.execCommand("insertHTML", false, html || textToHtml(text));
+  if (editorEl.closest(".draft-detached-page")) updateDetachedNotesStats(new Date().toISOString());
   queueSave();
 });
 
