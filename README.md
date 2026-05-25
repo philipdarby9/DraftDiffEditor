@@ -16,6 +16,32 @@ For the desktop shell:
 npm run desktop
 ```
 
+## Data Location
+
+Draft Diff Editor stores the working project, companion text export, and linked-file cache in one data directory.
+
+- When running the server from this repository, the default data directory is `data/`.
+- In the packaged desktop app, the default data directory is the app's OS user data folder, under `data/`.
+- To use another folder in any mode, set `DRAFT_DIFF_DATA_DIR` before launch.
+- The desktop app also accepts `--data-dir`.
+
+PowerShell example:
+
+```powershell
+$env:DRAFT_DIFF_DATA_DIR = "D:\Writing\Draft Diff Editor Data"
+npm start
+```
+
+Packaged desktop shortcut example:
+
+```text
+"C:\Program Files\Draft Diff Editor\Draft Diff Editor.exe" --data-dir="D:\Writing\Draft Diff Editor Data"
+```
+
+Use `File` -> `Version history folder` to choose or create a separate folder for version histories. When the folder is selected, the app batch-migrates embedded histories from the current project, `project.json`, and cached linked-file states into sidecar files named like `draft-history.version-history.json`. After that, the main `project.json` and linked-file cache store projects without embedded history arrays. When a text file is opened, the app looks for a matching sidecar by source path metadata or by filename, then merges those histories into the matching Project notes and draft pages.
+
+To move existing histories into a history folder, open the project, choose `File` -> `Version history folder`, select or create the folder, and let the app save. Existing embedded histories are written into the matching sidecar file.
+
 To create a Windows build:
 
 ```sh
@@ -52,19 +78,19 @@ On Windows, AppImage packaging may require symlink privileges. If Windows report
 - Opens as a Notepad-style editor with a ribbon, horizontal draft tabs, and a left-to-right page canvas.
 - Lets you show or hide Project notes and draft stacks from the tab checkboxes.
 - Shows each selected draft with its notes as an adjustable panel underneath.
-- Lets you choose whether 1, 2, 3, or 4 writing pages fit on screen at once.
-- Remembers display choices, pages-on-screen, note panel state, and comparison selections separately for each opened text file.
+- Lets you choose whether 1, 2, 3, or 4 writing pages fit on screen at once, then drag the dividers between visible pages to fine-tune panel widths.
+- Remembers display choices, page widths, pages-on-screen, note panel state, and comparison selections separately for each opened text file.
 - Adds a blank draft with the `+` tab or a new draft copied from the selected draft.
 - Shows a delete control on an empty draft tab only when the draft and its notes have no text.
 - Gives each writing page a formatting ribbon that appears from the top border of that page.
 - Stores page font settings separately for each story, draft, and notes page.
 - Shows the active companion text file name in the title bar.
-- Includes a `File` menu with `New`, `Open...`, and `Save as...` for creating, importing, and saving renamed text-backed projects.
+- Includes a `File` menu with `New`, `Open...`, `Open recent` (`Ctrl+Shift+O`), `Save as...`, and `Version history folder` (`Ctrl+Alt+H`) for creating, importing, reopening recent files, saving renamed text-backed projects, and choosing where history sidecars live.
 - Lets you choose specific drafts to compare.
 - Shows selected comparisons as a fixed-size horizontal strip of draft pages, with later drafts marking words, phrases, spaces, tabs, bold, and italic changes inline.
 - Compares selected drafts either to the first selected draft or to the previous selected draft.
-- Saves the working project to `data/project.json`.
-- Updates the companion document at `data/draft-history.txt` on every save, on tab close, and when the server exits.
+- Saves the working project to `project.json` in the configured data directory.
+- Updates the companion document at `draft-history.txt` in the configured data directory on every save, on tab close, and when the server exits.
 - When the browser supports writable file handles, a text file created or opened from the `File` menu is kept in sync on every save as well.
 
 The companion text document is ordered as:

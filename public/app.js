@@ -6,8 +6,12 @@ const els = {
   viewMenu: document.querySelector("#view-menu"),
   fileNew: document.querySelector("#file-new"),
   fileOpen: document.querySelector("#file-open"),
+  fileOpenRecent: document.querySelector("#file-open-recent"),
+  fileOpenRecentButton: document.querySelector("#file-open-recent-button"),
+  fileOpenRecentMenu: document.querySelector("#file-open-recent-menu"),
   fileOpenLocation: document.querySelector("#file-open-location"),
   fileSaveAs: document.querySelector("#file-save-as"),
+  fileVersionHistoryFolder: document.querySelector("#file-version-history-folder"),
   fileClose: document.querySelector("#file-close"),
   editUndo: document.querySelector("#edit-undo"),
   editRedo: document.querySelector("#edit-redo"),
@@ -59,6 +63,7 @@ const PROJECT_STATE_CACHE_STORAGE_KEY = "draftDiff.projectStatesByPath";
 const DEFAULT_PAGES_ON_SCREEN = 2;
 const VIEW_STATE_VERSION = 2;
 const HISTORY_LIMIT = 100;
+const MIN_PAGE_PANE_PERCENT = 12;
 const MAX_SAVE_RETRIES = 3;
 const AUTOSAVE_DELAY_MS = 2000;
 const WORD_COUNT_REFRESH_DELAY_MS = 350;
@@ -78,6 +83,8 @@ let exportPath = "";
 let activeEditorKey = STORY_KEY;
 let projectFileName = "draft-history.txt";
 let linkedTextPath = "";
+let versionHistoryFolderPath = "";
+let versionHistoryPath = "";
 let stateRevision = 0;
 let saveQueued = false;
 let saveRetryCount = 0;
@@ -88,14 +95,18 @@ let viewStateSaveQueued = false;
 let typingUndoGroup = null;
 let draftNoteStatsTimers = new Map();
 let draftVersionTimers = new Map();
+let notesHeadingDensityFrame = null;
+let notesHeadingResizeObserver = null;
 
 let fileViewStates = readStoredFileViewStates();
 let displayedPageKeys = new Set();
 let hasStoredDisplaySelection = false;
 let collapsedNotesIds = new Set();
 let notesPanePercents = {};
+let pagePanePercents = {};
 let pagesOnScreen = DEFAULT_PAGES_ON_SCREEN;
 let resizingDraftId = null;
+let pageDividerDrag = null;
 let compareHighlightTimer = null;
 let editorSelections = {};
 let undoStack = [];
@@ -174,8 +185,10 @@ function allowedFormatValuesForField(field) {
 const MENU_SHORTCUT_LABELS = {
   new: { mac: "⌘N", default: "Ctrl+N" },
   open: { mac: "⌘O", default: "Ctrl+O" },
+  openRecent: { mac: "Cmd+Shift+O", default: "Ctrl+Shift+O" },
   openLocation: { mac: "⌘⌥O", default: "Ctrl+Alt+O" },
   saveAs: { mac: "⌘⇧S", default: "Ctrl+Shift+S" },
+  versionHistoryFolder: { mac: "Cmd+Opt+H", default: "Ctrl+Alt+H" },
   close: { mac: "⌘W", default: "Ctrl+W" },
   undo: { mac: "⌘Z", default: "Ctrl+Z" },
   redo: { mac: "⌘⇧Z", default: "Ctrl+Y" },
@@ -268,6 +281,16 @@ function handleGlobalShortcut(event) {
     return true;
   }
 
+  const isVersionHistoryFolderShortcut = isMacPlatform()
+    ? event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey && key === "h"
+    : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey && key === "h";
+
+  if (isVersionHistoryFolderShortcut) {
+    event.preventDefault();
+    selectVersionHistoryFolder();
+    return true;
+  }
+
   const isPanelDragShortcut = isMacPlatform()
     ? event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey && key === "p"
     : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey && key === "p";
@@ -312,6 +335,12 @@ function handleGlobalShortcut(event) {
   if (!event.shiftKey && key === "o") {
     event.preventDefault();
     openTextProject();
+    return true;
+  }
+
+  if (event.shiftKey && key === "o") {
+    event.preventDefault();
+    openRecentFilesSubmenu();
     return true;
   }
 
@@ -500,6 +529,19 @@ function draftHasVisibleMainPanel(draft) {
   return !detachedUnitKeys.has(draftUnitKey(draft.id));
 }
 
+function topLevelPageKeyForDraft(draftId) {
+  return draftContentKey(draftId);
+}
+
+function topLevelDisplayPageKeys() {
+  const keys = [];
+  if (displayedPageKeys.has(STORY_KEY) && !detachedUnitKeys.has(STORY_KEY)) keys.push(STORY_KEY);
+  state?.drafts?.forEach(draft => {
+    if (draftHasVisibleMainPanel(draft)) keys.push(topLevelPageKeyForDraft(draft.id));
+  });
+  return keys;
+}
+
 function mainDisplayPageCount() {
   if (!state) return 0;
   let count = displayedPageKeys.has(STORY_KEY) && !detachedUnitKeys.has(STORY_KEY) ? 1 : 0;
@@ -558,6 +600,10 @@ function saveCollapsedNotes() {
 }
 
 function saveNotesPanePercents() {
+  saveCurrentViewState();
+}
+
+function savePagePanePercents() {
   saveCurrentViewState();
 }
 
@@ -669,7 +715,9 @@ function rememberProjectStateForPath(filePath, projectState = state) {
   cache[textFileStateCacheKey(filePath)] = {
     filePath,
     updatedAt: nowIso(),
-    state: projectStateFromSnapshot(serializeProjectState(projectState))
+    state: projectStateFromSnapshot(serializeProjectState(projectState, {
+      includeVersionHistory: !versionHistoryFolderPath
+    }))
   };
 
   const entries = Object.entries(cache)
@@ -708,12 +756,19 @@ function updateProjectTitle() {
 
 function closeFileMenu() {
   if (els.fileMenu) els.fileMenu.open = false;
+  setRecentSubmenuOpen(false);
 }
 
 function closeTopMenus(exceptMenu = null) {
   [els.fileMenu, els.editMenu, els.viewMenu].forEach(menu => {
     if (menu && menu !== exceptMenu) menu.open = false;
   });
+  if (exceptMenu !== els.fileMenu) setRecentSubmenuOpen(false);
+}
+
+function setRecentSubmenuOpen(open) {
+  els.fileOpenRecent?.classList.toggle("is-open", Boolean(open));
+  els.fileOpenRecentButton?.setAttribute("aria-expanded", String(Boolean(open)));
 }
 
 function setStatus(text) {
@@ -1669,6 +1724,16 @@ function storedEditorSelections() {
   return selections;
 }
 
+function storedPagePanePercents() {
+  const validKeys = new Set([STORY_KEY, ...state.drafts.map(draft => topLevelPageKeyForDraft(draft.id))]);
+  const stored = {};
+  Object.entries(pagePanePercents).forEach(([key, value]) => {
+    const numericValue = Number(value);
+    if (validKeys.has(key) && Number.isFinite(numericValue)) stored[key] = numericValue;
+  });
+  return stored;
+}
+
 function restoreEditorSelections(stored) {
   editorSelections = {};
   if (!stored || typeof stored !== "object" || Array.isArray(stored)) return;
@@ -1697,6 +1762,7 @@ function saveCurrentViewState() {
     const index = draftIndexForId(draftId);
     if (index >= 0 && Number.isFinite(Number(value))) notesPanePercentsByIndex[index] = Number(value);
   });
+  const storedPanePercents = storedPagePanePercents();
 
   const viewState = {
     version: VIEW_STATE_VERSION,
@@ -1712,6 +1778,7 @@ function saveCurrentViewState() {
     collapsedNotesIndexes,
     collapsedNotesIds: [...collapsedNotesIds],
     notesPanePercents: notesPanePercentsByIndex,
+    pagePanePercents: storedPanePercents,
     pagesOnScreen,
     selectedDraftId: selectedDraft?.id || null,
     selectedDraftIndex: selectedDraftIndex >= 0 ? selectedDraftIndex : 0,
@@ -1811,6 +1878,15 @@ function restoreStoredViewState(stored) {
     if (draftId && Number.isFinite(Number(value))) notesPanePercents[draftId] = Number(value);
   });
 
+  pagePanePercents = {};
+  Object.entries(stored?.pagePanePercents || {}).forEach(([key, value]) => {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return;
+    if (key === STORY_KEY || parseDraftPageKey(key)?.type === "content") {
+      pagePanePercents[key] = Math.max(MIN_PAGE_PANE_PERCENT, numericValue);
+    }
+  });
+
   pagesOnScreen = clampPagesOnScreen(stored?.pagesOnScreen);
 
   const selectedDraft = draftFromStoredRef(stored?.selectedDraftId, stored?.selectedDraftIndex);
@@ -1857,6 +1933,11 @@ function ensureDisplaySelection() {
   notesPanePercents = Object.fromEntries(
     Object.entries(notesPanePercents).filter(([id]) => validDraftIds.has(id))
   );
+  pagePanePercents = Object.fromEntries(
+    Object.entries(pagePanePercents).filter(([key]) => (
+      key === STORY_KEY || validDraftIds.has(parseDraftPageKey(key)?.draftId)
+    ))
+  );
 
   if (!hasStoredDisplaySelection && !displayedPageKeys.size) {
     displayedPageKeys = new Set(defaultDisplayKeys());
@@ -1865,6 +1946,7 @@ function ensureDisplaySelection() {
   saveDisplaySelection();
   saveCollapsedNotes();
   saveNotesPanePercents();
+  savePagePanePercents();
   syncPagesOnScreenToDisplaySelection();
 }
 
@@ -1903,16 +1985,84 @@ function activeDisplayKey() {
   return selectedDraftId ? draftContentKey(selectedDraftId) : STORY_KEY;
 }
 
+function defaultPagePanePercent() {
+  return 100 / Math.max(1, pagesOnScreen);
+}
+
+function pagePanePercent(key) {
+  const value = Number(pagePanePercents[key]);
+  return Number.isFinite(value) ? Math.max(MIN_PAGE_PANE_PERCENT, value) : defaultPagePanePercent();
+}
+
+function setPagePanePercent(key, value) {
+  if (!key) return;
+  pagePanePercents[key] = Math.max(MIN_PAGE_PANE_PERCENT, Number(value) || defaultPagePanePercent());
+}
+
+function targetPagePaneTotal(keys = topLevelDisplayPageKeys()) {
+  return keys.length * defaultPagePanePercent();
+}
+
+function normalizePagePanePercentsForLayout(keys = topLevelDisplayPageKeys()) {
+  if (!keys.length) return;
+  keys.forEach(key => {
+    if (!Number.isFinite(Number(pagePanePercents[key]))) pagePanePercents[key] = defaultPagePanePercent();
+  });
+
+  const total = keys.reduce((sum, key) => sum + pagePanePercent(key), 0);
+  const targetTotal = targetPagePaneTotal(keys);
+  if (!total || !targetTotal) return;
+
+  const scale = targetTotal / total;
+  keys.forEach(key => {
+    pagePanePercents[key] = Math.max(MIN_PAGE_PANE_PERCENT, pagePanePercent(key) * scale);
+  });
+}
+
+function pagePaneStyle(key, extra = "") {
+  return `--page-pane-percent: ${pagePanePercent(key)}; ${extra}`.trim();
+}
+
+function applyPagePaneStyles() {
+  Object.entries(pagePanePercents).forEach(([key, value]) => {
+    const element = els.pageCanvas.querySelector(`[data-page-key="${cssEscape(key)}"]`);
+    if (element) element.style.setProperty("--page-pane-percent", String(value));
+  });
+  queueNotesHeadingDensityUpdate();
+}
+
+function setAdjacentPagePanePercents(beforeKey, afterKey, beforeValue, afterValue) {
+  setPagePanePercent(beforeKey, beforeValue);
+  setPagePanePercent(afterKey, afterValue);
+  applyPagePaneStyles();
+}
+
+function applyAdjacentPagePaneResize(beforeKey, afterKey, nextBeforeValue) {
+  if (!beforeKey || !afterKey) return;
+  const beforeValue = pagePanePercent(beforeKey);
+  const afterValue = pagePanePercent(afterKey);
+  const pairTotal = beforeValue + afterValue;
+  if (!pairTotal) return;
+
+  const minimum = Math.min(MIN_PAGE_PANE_PERCENT, pairTotal / 2);
+  const clampedBeforeValue = Math.min(pairTotal - minimum, Math.max(minimum, nextBeforeValue));
+  setAdjacentPagePanePercents(beforeKey, afterKey, clampedBeforeValue, pairTotal - clampedBeforeValue);
+}
+
+function resetPagePanePercents(keys = topLevelDisplayPageKeys()) {
+  const defaultValue = defaultPagePanePercent();
+  keys.forEach(key => {
+    pagePanePercents[key] = defaultValue;
+  });
+  applyPagePaneStyles();
+  savePagePanePercents();
+  queueViewStateSave(250);
+}
+
 function setPagesOnScreen(value) {
   pagesOnScreen = normalizePagesOnScreenForSelection(value);
-  const visiblePagesOnScreen = pagesOnScreen;
-  const outerPadding = 0;
-  const pageGap = 0;
-  const widthOffset = outerPadding + pageGap * (visiblePagesOnScreen - 1);
-  document.documentElement.style.setProperty(
-    "--page-width",
-    `calc((100vw - ${widthOffset}px) / ${visiblePagesOnScreen})`
-  );
+  normalizePagePanePercentsForLayout();
+  applyPagePaneStyles();
   if (els.pagesOnScreen) {
     els.pagesOnScreen.querySelectorAll("[data-pages-on-screen]").forEach(button => {
       button.setAttribute("aria-pressed", String(Number(button.dataset.pagesOnScreen) === pagesOnScreen));
@@ -4655,32 +4805,129 @@ function endTabScrollbarDrag() {
   window.removeEventListener("pointermove", dragTabScrollbar);
 }
 
+function queueNotesHeadingDensityUpdate() {
+  if (notesHeadingDensityFrame) return;
+  notesHeadingDensityFrame = window.requestAnimationFrame(() => {
+    notesHeadingDensityFrame = null;
+    updateAllNotesHeadingDensity();
+  });
+}
+
+function visibleElementWidth(element) {
+  if (!element) return 0;
+  const styles = window.getComputedStyle(element);
+  if (styles.display === "none") {
+    const horizontalPadding = (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+    const horizontalMargin = (parseFloat(styles.marginLeft) || 0) + (parseFloat(styles.marginRight) || 0);
+    return Math.ceil(measuredTextWidth(element.textContent || "", element) + horizontalPadding + horizontalMargin);
+  }
+  return Math.ceil(Math.max(element.scrollWidth || 0, element.getBoundingClientRect().width || 0));
+}
+
+function styleGap(element) {
+  if (!element) return 0;
+  const styles = window.getComputedStyle(element);
+  return parseFloat(styles.columnGap || styles.gap) || 0;
+}
+
+function notesHeadingNaturalWidth(heading, options = {}) {
+  const includeHint = options.includeHint === true;
+  const includeLabel = options.includeLabel !== false;
+  const includeWordStats = options.includeWordStats !== false;
+  const main = heading.querySelector(".notes-heading-main");
+  const actions = heading.querySelector(".notes-heading-actions");
+  const caret = heading.querySelector(".notes-caret");
+  const label = heading.querySelector(".panel-kicker");
+  const hint = heading.querySelector(".notes-collapse-hint");
+  const formatButton = heading.querySelector(".panel-format-toggle");
+  const detachButton = heading.querySelector(".panel-detach-button");
+  const wordCount = heading.querySelector(".notes-heading-word-count");
+  const divider = heading.querySelector(".notes-heading-stat-divider");
+  const date = heading.querySelector(".notes-heading-last-edited");
+
+  const headingStyles = window.getComputedStyle(heading);
+  const horizontalPadding = (parseFloat(headingStyles.paddingLeft) || 0) + (parseFloat(headingStyles.paddingRight) || 0);
+  const headingGap = styleGap(heading);
+  const actionsGap = styleGap(actions);
+  const mainGap = styleGap(main);
+  const statsGap = styleGap(heading.querySelector(".notes-heading-stats"));
+
+  const mainWidths = [
+    visibleElementWidth(caret),
+    includeLabel ? visibleElementWidth(label) : 0
+  ].filter(Boolean);
+  const mainWidth = mainWidths.reduce((total, width) => total + width, 0)
+    + Math.max(0, mainWidths.length - 1) * mainGap;
+
+  const statsWidths = [
+    includeWordStats ? visibleElementWidth(wordCount) : 0,
+    includeWordStats ? visibleElementWidth(divider) : 0,
+    visibleElementWidth(date)
+  ].filter(Boolean);
+  const statsWidth = statsWidths.reduce((total, width) => total + width, 0)
+    + Math.max(0, statsWidths.length - 1) * statsGap;
+
+  const actionWidths = [
+    visibleElementWidth(formatButton),
+    includeHint ? visibleElementWidth(hint) : 0,
+    visibleElementWidth(detachButton),
+    statsWidth
+  ].filter(Boolean);
+  const actionsWidth = actionWidths.reduce((total, width) => total + width, 0)
+    + Math.max(0, actionWidths.length - 1) * actionsGap;
+
+  const headerWidths = [
+    mainWidth,
+    actionsWidth
+  ].filter(Boolean);
+
+  return horizontalPadding
+    + headerWidths.reduce((total, width) => total + width, 0)
+    + Math.max(0, headerWidths.length - 1) * headingGap;
+}
+
+function notesHeadingNeedsCompaction(heading, options = {}) {
+  return notesHeadingNaturalWidth(heading, options) > heading.clientWidth + 1;
+}
+
 function updateNotesHeadingDensity(heading) {
   if (!heading) return;
 
-  heading.classList.remove("notes-heading-hide-label", "notes-heading-is-tight");
+  heading.classList.remove("notes-heading-hide-hint", "notes-heading-hide-label", "notes-heading-is-tight");
 
   const main = heading.querySelector(".notes-heading-main");
   if (!main) return;
 
-  const styles = window.getComputedStyle(heading);
-  const gap = parseFloat(styles.columnGap || styles.gap) || 0;
-  const horizontalPadding = (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
-  const children = Array.from(heading.children);
-  const requiredWidth = children.reduce((total, child) => total + child.scrollWidth, 0)
-    + Math.max(0, children.length - 1) * gap;
-  const availableWidth = heading.clientWidth - horizontalPadding;
-
-  heading.classList.toggle("notes-heading-hide-label", requiredWidth > availableWidth);
-
-  const mainIsClipped = main.scrollWidth > main.clientWidth + 1;
-  heading.classList.toggle("notes-heading-is-tight", mainIsClipped);
+  void heading.offsetWidth;
+  if (notesHeadingNeedsCompaction(heading, { includeHint: true })) {
+    heading.classList.add("notes-heading-hide-hint");
+    void heading.offsetWidth;
+  }
+  if (notesHeadingNeedsCompaction(heading, { includeHint: false })) {
+    heading.classList.add("notes-heading-hide-label");
+    void heading.offsetWidth;
+  }
+  if (notesHeadingNeedsCompaction(heading, { includeHint: false, includeLabel: false })) {
+    heading.classList.add("notes-heading-is-tight");
+    void heading.offsetWidth;
+  }
 }
 
 function updateAllNotesHeadingDensity() {
   els.pageCanvas
     ?.querySelectorAll(".notes-toggle-heading")
     .forEach(updateNotesHeadingDensity);
+}
+
+function observeNotesHeadingDensity() {
+  if (!("ResizeObserver" in window) || !els.pageCanvas) return;
+  if (!notesHeadingResizeObserver) {
+    notesHeadingResizeObserver = new ResizeObserver(queueNotesHeadingDensityUpdate);
+  }
+  notesHeadingResizeObserver.disconnect();
+  els.pageCanvas
+    .querySelectorAll(".notes-toggle-heading")
+    .forEach(heading => notesHeadingResizeObserver.observe(heading));
 }
 
 const textMeasureCanvas = document.createElement("canvas");
@@ -4914,10 +5161,12 @@ function editorPanelHtml(item, options = {}) {
         ${notesCaret}
         ${headingContent}
       </div>
-      ${notesHint}
-      ${formatButton}
-      ${detachButton}
-      ${notesHeaderStats}
+      <div class="notes-heading-actions">
+        ${formatButton}
+        ${notesHint}
+        ${detachButton}
+        ${notesHeaderStats}
+      </div>
     `
     : `
       ${headingContent}
@@ -4931,6 +5180,7 @@ function editorPanelHtml(item, options = {}) {
   const pageToolbar = hasToolbar
     ? formatRibbonHtml(item.key, item.title, options)
     : "";
+  const pageStyle = options.pageStyle ? ` style="${escapeHtml(options.pageStyle)}"` : "";
   const ribbonRegion = `
     <div class="editor-ribbon-region" data-ribbon-region="${escapeHtml(item.key)}">
       <div class="${headingClass}"${headingAttributes}>
@@ -4963,7 +5213,7 @@ function editorPanelHtml(item, options = {}) {
     `;
 
   return `
-    <section class="editor-panel${standaloneClass} ${escapeHtml(item.type)}-display-page${collapsedClass}" data-page-key="${escapeHtml(item.key)}" aria-label="${escapeHtml(item.ariaLabel)}">
+    <section class="editor-panel${standaloneClass} ${escapeHtml(item.type)}-display-page${collapsedClass}" data-page-key="${escapeHtml(item.key)}"${pageStyle} aria-label="${escapeHtml(item.ariaLabel)}">
       ${ribbonRegion}
       ${editorShell}
     </section>
@@ -4996,15 +5246,30 @@ function visibleEditorItems() {
   return items.filter(Boolean);
 }
 
+function pageWidthResizerHtml(beforeKey, afterKey) {
+  return `
+    <div
+      class="page-width-resizer"
+      data-resize-page-before="${escapeHtml(beforeKey)}"
+      data-resize-page-after="${escapeHtml(afterKey)}"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize page panels"
+      tabindex="0"
+    ></div>
+  `;
+}
+
 function draftStackHtml(draft) {
   if (detachedUnitKeys.has(draftUnitKey(draft.id))) return "";
 
   const draftItem = pageItemForKey(draftContentKey(draft.id));
   const notesItem = pageItemForKey(draftNotesKey(draft.id));
   const collapsed = collapsedNotesIds.has(draft.id);
+  const paneKey = topLevelPageKeyForDraft(draft.id);
 
   return `
-    <section class="draft-stack-page display-page${collapsed ? " notes-are-collapsed" : ""}" data-draft-stack-id="${escapeHtml(draft.id)}" style="--draft-pane-height: ${getNotesPanePercent(draft.id)}%;" aria-label="${escapeHtml(draft.title)}">
+    <section class="draft-stack-page display-page${collapsed ? " notes-are-collapsed" : ""}" data-draft-stack-id="${escapeHtml(draft.id)}" data-page-key="${escapeHtml(paneKey)}" style="${escapeHtml(pagePaneStyle(paneKey, `--draft-pane-height: ${getNotesPanePercent(draft.id)}%;`))}" aria-label="${escapeHtml(draft.title)}">
       ${editorPanelHtml(draftItem, {
         standalone: false,
         detachUnitKey: draftUnitKey(draft.id),
@@ -5040,10 +5305,31 @@ function renderEditor() {
 
   const selectedDrafts = state.drafts.filter(draft => displayedPageKeys.has(draftContentKey(draft.id)));
   const hasStory = displayedPageKeys.has(STORY_KEY) && !detachedUnitKeys.has(STORY_KEY);
-  const pageHtml = [
-    hasStory ? editorPanelHtml(pageItemForKey(STORY_KEY), { detachUnitKey: STORY_KEY, detachTitle: PROJECT_NOTES_TITLE }) : "",
-    ...selectedDrafts.map(draftStackHtml)
+  const topLevelKeys = topLevelDisplayPageKeys();
+  normalizePagePanePercentsForLayout(topLevelKeys);
+  const pageEntries = [
+    hasStory
+      ? {
+          key: STORY_KEY,
+          html: editorPanelHtml(pageItemForKey(STORY_KEY), {
+            detachUnitKey: STORY_KEY,
+            detachTitle: PROJECT_NOTES_TITLE,
+            pageStyle: pagePaneStyle(STORY_KEY)
+          })
+        }
+      : null,
+    ...selectedDrafts
+      .filter(draft => !detachedUnitKeys.has(draftUnitKey(draft.id)))
+      .map(draft => ({
+        key: topLevelPageKeyForDraft(draft.id),
+        html: draftStackHtml(draft)
+      }))
   ].filter(Boolean);
+  const pageHtml = pageEntries.flatMap((entry, index) => {
+    if (index >= pageEntries.length - 1) return [entry.html];
+    const nextEntry = pageEntries[index + 1];
+    return [entry.html, pageWidthResizerHtml(entry.key, nextEntry.key)];
+  });
 
   els.pageCanvas.classList.toggle("empty-page-canvas", !pageHtml.length);
   els.pageCanvas.innerHTML = pageHtml.length
@@ -5051,7 +5337,8 @@ function renderEditor() {
     : `<p class="empty-state page-empty-state">No pages selected.</p>`;
 
   hydrateVisibleEditors(visibleEditorItems());
-  window.requestAnimationFrame(updateAllNotesHeadingDensity);
+  observeNotesHeadingDensity();
+  queueNotesHeadingDensityUpdate();
   window.requestAnimationFrame(() => refreshSearchResults({ allowRender: false }));
 }
 
@@ -5736,6 +6023,7 @@ function resetViewStateForProject() {
   displayedPageKeys = new Set(defaultDisplayKeys());
   collapsedNotesIds = new Set();
   notesPanePercents = {};
+  pagePanePercents = {};
   pagesOnScreen = DEFAULT_PAGES_ON_SCREEN;
   els.compareMode.value = "first";
   saveCurrentViewState();
@@ -5793,8 +6081,46 @@ function downloadExportText(fileName) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+function updateStoragePathsFromPayload(payload = {}) {
+  exportPath = payload.exportPath || exportPath;
+  linkedTextPath = payload.linkedTextPath || linkedTextPath || "";
+  versionHistoryFolderPath = payload.versionHistoryFolderPath || versionHistoryFolderPath || "";
+  versionHistoryPath = payload.versionHistoryPath || versionHistoryPath || "";
+  if (payload.linkedTextFileName) projectFileName = payload.linkedTextFileName;
+}
+
+async function applyExternalVersionHistory(projectState, options = {}) {
+  try {
+    const response = await fetch("/api/version-history/apply", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        state: projectState,
+        filePath: options.filePath || linkedTextPath || "",
+        fileName: options.fileName || projectFileName || "draft-history.txt"
+      })
+    });
+    if (!response.ok) throw new Error(await response.text());
+
+    const payload = await response.json();
+    updateStoragePathsFromPayload(payload);
+    return {
+      state: migrateLegacyDefaultFonts(payload.state),
+      loaded: Boolean(payload.loaded)
+    };
+  } catch (error) {
+    console.error(error);
+    return { state: projectState, loaded: false };
+  }
+}
+
 async function applyTextProject(text, fileName, options = {}) {
   state = stateFromExportText(text, options.preserveFormatsFrom || null);
+  const historyResult = await applyExternalVersionHistory(state, {
+    filePath: options.filePath || "",
+    fileName
+  });
+  state = historyResult.state;
   markStateChanged();
   saveQueued = false;
   editorSelections = {};
@@ -5804,7 +6130,8 @@ async function applyTextProject(text, fileName, options = {}) {
   render();
   const savedToLinkedFile = await saveNow();
   resetHistory();
-  setStatus(savedToLinkedFile ? `Opened ${projectFileName}; autosave linked` : "Opened; saved companion");
+  const historyText = historyResult.loaded ? "; version history loaded" : "";
+  setStatus(savedToLinkedFile ? `Opened ${projectFileName}${historyText}; autosave linked` : `Opened${historyText}; saved companion`);
   focusPageEditor(activeEditorKey);
 }
 
@@ -5856,7 +6183,7 @@ async function saveAsTextProject(stateOverride = null, suggestedFileName = null)
     state = payload.state;
     markStateChanged();
     saveQueued = false;
-    exportPath = payload.exportPath || exportPath;
+    updateStoragePathsFromPayload(payload);
     projectFileName = payload.fileName || projectFileName;
     linkedTextPath = payload.filePath || linkedTextPath || "";
     rememberLinkedProjectState();
@@ -5891,31 +6218,95 @@ async function newTextProject() {
   }
 }
 
+function recentFileLabel(filePath) {
+  return fileNameFromPath(filePath) || "Untitled";
+}
+
+function recentFileDirectory(filePath) {
+  const parts = String(filePath || "").split(/[\\/]/);
+  parts.pop();
+  return parts.join("\\");
+}
+
+function renderRecentFilesMenu(files = []) {
+  if (!els.fileOpenRecentMenu) return;
+
+  if (!files.length) {
+    els.fileOpenRecentMenu.innerHTML = '<button type="button" disabled><span class="menu-check" aria-hidden="true"></span><span>No recent files</span><span class="menu-shortcut" aria-hidden="true"></span></button>';
+    return;
+  }
+
+  els.fileOpenRecentMenu.innerHTML = files.map(file => `
+    <button class="recent-file-button" type="button" data-recent-file-path="${escapeHtml(file.filePath || "")}" title="${escapeHtml(file.filePath || "")}">
+      <span class="menu-check" aria-hidden="true"></span>
+      <span class="recent-file-text">
+        <span class="recent-file-name">${escapeHtml(file.fileName || recentFileLabel(file.filePath))}</span>
+        <span class="recent-file-path">${escapeHtml(recentFileDirectory(file.filePath))}</span>
+      </span>
+      <span class="menu-shortcut" aria-hidden="true"></span>
+    </button>
+  `).join("");
+}
+
+async function refreshRecentFilesMenu() {
+  if (!els.fileOpenRecentMenu) return;
+
+  try {
+    const response = await fetch("/api/recent-text-files", { cache: "no-store" });
+    if (!response.ok) throw new Error("Recent files unavailable");
+    const payload = await response.json();
+    renderRecentFilesMenu(Array.isArray(payload.files) ? payload.files : []);
+  } catch {
+    els.fileOpenRecentMenu.innerHTML = '<button type="button" disabled><span class="menu-check" aria-hidden="true"></span><span>Recent files unavailable</span><span class="menu-shortcut" aria-hidden="true"></span></button>';
+  }
+}
+
+async function openRecentFilesSubmenu() {
+  if (!els.fileMenu || !els.fileOpenRecentMenu) return;
+
+  closeTopMenus(els.fileMenu);
+  els.fileMenu.open = true;
+  setRecentSubmenuOpen(true);
+  await refreshRecentFilesMenu();
+  const firstRecent = els.fileOpenRecentMenu.querySelector("[data-recent-file-path]");
+  if (firstRecent) firstRecent.focus();
+  else els.fileOpenRecentButton?.focus();
+}
+
+async function prepareCurrentProjectForOpen() {
+  if (!state) return null;
+
+  syncFromInputs();
+  saveCurrentViewState();
+  rememberLinkedProjectState();
+  await cacheLinkedProjectStateOnServer();
+  window.clearTimeout(saveTimer);
+  await saveNow();
+  return projectStateFromSnapshot(serializeProjectState());
+}
+
+async function applyOpenedTextFilePayload(payload, previousLinkedTextPath = "", previousState = null) {
+  linkedTextPath = payload.filePath || "";
+  const storedState = cachedProjectStateForPath(linkedTextPath) || payload.storedState;
+  updateStoragePathsFromPayload(payload);
+  await applyTextProject(payload.text || "", payload.fileName || "draft-history.txt", {
+    preserveFormatsFrom: storedState || (filePathsMatch(previousLinkedTextPath, linkedTextPath) ? previousState : null),
+    filePath: linkedTextPath
+  });
+}
+
 async function openTextProject() {
   closeFileMenu();
 
   try {
-    if (state) {
-      syncFromInputs();
-      saveCurrentViewState();
-      rememberLinkedProjectState();
-      await cacheLinkedProjectStateOnServer();
-      window.clearTimeout(saveTimer);
-      await saveNow();
-    }
-
     const previousLinkedTextPath = linkedTextPath;
-    const previousState = state ? projectStateFromSnapshot(serializeProjectState()) : null;
+    const previousState = await prepareCurrentProjectForOpen();
     const response = await fetch("/api/open-text-file", { method: "POST" });
     if (response.ok) {
       const payload = await response.json();
       if (payload.cancelled) return;
 
-      linkedTextPath = payload.filePath || "";
-      const storedState = cachedProjectStateForPath(linkedTextPath) || payload.storedState;
-      await applyTextProject(payload.text || "", payload.fileName || "draft-history.txt", {
-        preserveFormatsFrom: storedState || (filePathsMatch(previousLinkedTextPath, linkedTextPath) ? previousState : null)
-      });
+      await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState);
       return;
     }
 
@@ -5924,6 +6315,28 @@ async function openTextProject() {
     if (isAbortError(error)) return;
     console.error(error);
     setStatus("Open failed");
+  }
+}
+
+async function openRecentTextProject(filePath) {
+  closeFileMenu();
+
+  try {
+    const previousLinkedTextPath = linkedTextPath;
+    const previousState = await prepareCurrentProjectForOpen();
+    const response = await fetch("/api/open-recent-text-file", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ filePath })
+    });
+    if (!response.ok) throw new Error(await response.text());
+
+    const payload = await response.json();
+    await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState);
+  } catch (error) {
+    if (isAbortError(error)) return;
+    console.error(error);
+    setStatus("Open recent failed");
   }
 }
 
@@ -5948,6 +6361,55 @@ async function openFileLocation() {
   }
 }
 
+async function selectVersionHistoryFolder() {
+  closeFileMenu();
+
+  try {
+    if (!state) return;
+    syncFromInputs();
+    saveCurrentViewState();
+    flushDraftVersionCaptures();
+    rememberLinkedProjectState();
+    window.clearTimeout(saveTimer);
+    setStatus("Choose a version history folder...");
+
+    const response = await fetch("/api/version-history-folder/select", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        state,
+        filePath: linkedTextPath,
+        fileName: projectFileName
+      })
+    });
+    if (!response.ok) throw new Error(await response.text());
+
+    const payload = await response.json();
+    if (payload.cancelled) {
+      setStatus("Version history folder unchanged");
+      return;
+    }
+
+    state = migrateLegacyDefaultFonts(payload.state);
+    updateStoragePathsFromPayload(payload);
+    rememberLinkedProjectState();
+    saveQueued = false;
+    isSaving = false;
+    saveRetryCount = 0;
+    render();
+    if (versionHistoryDraftId) renderDiffSoon("Loading version history");
+    const loadedText = payload.loaded ? "; loaded matching histories" : "";
+    const migratedText = Number(payload.migratedCount) > 0
+      ? `; migrated ${payload.migratedCount} history file${Number(payload.migratedCount) === 1 ? "" : "s"}`
+      : "";
+    setStatus(`Version history folder set${migratedText}${loadedText}`);
+  } catch (error) {
+    if (isAbortError(error)) return;
+    console.error(error);
+    setStatus("Version history folder failed");
+  }
+}
+
 async function closeApp() {
   closeFileMenu();
   window.clearTimeout(saveTimer);
@@ -5964,7 +6426,11 @@ async function closeApp() {
     const response = await fetch("/api/shutdown", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: state ? JSON.stringify(state) : ""
+      body: state ? JSON.stringify({
+        state,
+        filePath: linkedTextPath,
+        fileName: projectFileName
+      }) : ""
     });
     if (!response.ok) throw new Error(await response.text());
 
@@ -6001,7 +6467,11 @@ async function saveNow() {
     const response = await fetch("/api/state", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify(state)
+      body: JSON.stringify({
+        state,
+        filePath: linkedTextPath,
+        fileName: projectFileName
+      })
     });
 
     if (!response.ok) {
@@ -6013,9 +6483,7 @@ async function saveNow() {
     const responseMatchesCurrentState = requestRevision === stateRevision;
     if (responseMatchesCurrentState) state = payload.state;
 
-    exportPath = payload.exportPath || exportPath;
-    linkedTextPath = payload.linkedTextPath || linkedTextPath || "";
-    if (payload.linkedTextFileName) projectFileName = payload.linkedTextFileName;
+    updateStoragePathsFromPayload(payload);
     isSaving = false;
     saveRetryCount = 0;
 
@@ -6050,6 +6518,8 @@ async function loadState() {
   editorSelections = {};
   exportPath = payload.exportPath || "";
   linkedTextPath = payload.linkedTextPath || "";
+  versionHistoryFolderPath = payload.versionHistoryFolderPath || "";
+  versionHistoryPath = payload.versionHistoryPath || "";
   projectFileName = payload.linkedTextFileName || fileNameFromPath(exportPath) || projectFileName;
   updateProjectTitle();
   restoreViewStateForProject();
@@ -6504,8 +6974,29 @@ function resizeNotesPane(draftId, clientY) {
 
 els.fileNew.addEventListener("click", newTextProject);
 els.fileOpen.addEventListener("click", openTextProject);
+els.fileMenu?.addEventListener("toggle", () => {
+  if (els.fileMenu.open) refreshRecentFilesMenu();
+  else setRecentSubmenuOpen(false);
+});
+els.fileOpenRecent?.addEventListener("pointerenter", () => {
+  setRecentSubmenuOpen(true);
+  refreshRecentFilesMenu();
+});
+els.fileOpenRecentButton?.addEventListener("click", event => {
+  event.preventDefault();
+  event.stopPropagation();
+  const nextOpen = !els.fileOpenRecent?.classList.contains("is-open");
+  setRecentSubmenuOpen(nextOpen);
+  if (nextOpen) refreshRecentFilesMenu();
+});
+els.fileOpenRecentMenu?.addEventListener("click", event => {
+  const button = event.target.closest("[data-recent-file-path]");
+  if (!button) return;
+  openRecentTextProject(button.dataset.recentFilePath);
+});
 els.fileOpenLocation.addEventListener("click", openFileLocation);
 els.fileSaveAs.addEventListener("click", () => saveAsTextProject());
+els.fileVersionHistoryFolder?.addEventListener("click", selectVersionHistoryFolder);
 els.fileClose.addEventListener("click", closeApp);
 els.editUndo.addEventListener("click", () => {
   undoProjectChange();
@@ -6799,6 +7290,58 @@ els.pageCanvas.addEventListener("paste", event => {
 });
 
 els.pageCanvas.addEventListener("pointerdown", event => {
+  const pageResizer = event.target.closest("[data-resize-page-before][data-resize-page-after]");
+  if (pageResizer) {
+    event.preventDefault();
+    const beforeKey = pageResizer.dataset.resizePageBefore;
+    const afterKey = pageResizer.dataset.resizePageAfter;
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth || els.pageCanvas.getBoundingClientRect().width;
+    if (!beforeKey || !afterKey || !viewportWidth) return;
+
+    pageDividerDrag = {
+      beforeKey,
+      afterKey,
+      startX: event.clientX,
+      startBefore: pagePanePercent(beforeKey),
+      startAfter: pagePanePercent(afterKey),
+      viewportWidth
+    };
+    pageResizer.classList.add("is-active");
+    els.pageCanvas.classList.add("is-page-resizing");
+
+    const onMove = moveEvent => {
+      if (!pageDividerDrag) return;
+      const deltaPercent = ((moveEvent.clientX - pageDividerDrag.startX) / pageDividerDrag.viewportWidth) * 100;
+      const pairTotal = pageDividerDrag.startBefore + pageDividerDrag.startAfter;
+      const minimum = Math.min(MIN_PAGE_PANE_PERCENT, pairTotal / 2);
+      const nextBeforeValue = Math.min(
+        pairTotal - minimum,
+        Math.max(minimum, pageDividerDrag.startBefore + deltaPercent)
+      );
+      setAdjacentPagePanePercents(
+        pageDividerDrag.beforeKey,
+        pageDividerDrag.afterKey,
+        nextBeforeValue,
+        pairTotal - nextBeforeValue
+      );
+    };
+    const onUp = () => {
+      pageResizer.classList.remove("is-active");
+      els.pageCanvas.classList.remove("is-page-resizing");
+      pageDividerDrag = null;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      savePagePanePercents();
+      queueViewStateSave(250);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return;
+  }
+
   const resizer = event.target.closest("[data-resize-notes]");
   if (!resizer) return;
 
@@ -6812,10 +7355,13 @@ els.pageCanvas.addEventListener("pointerdown", event => {
     resizingDraftId = null;
     window.removeEventListener("pointermove", onMove);
     window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    queueViewStateSave(250);
   };
 
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
 });
 
 els.pageCanvas.addEventListener("mousedown", event => {
@@ -6824,6 +7370,22 @@ els.pageCanvas.addEventListener("mousedown", event => {
 
 els.pageCanvas.addEventListener("contextmenu", event => {
   handleEditorContextMenu(event);
+});
+
+els.pageCanvas.addEventListener("dblclick", event => {
+  const pageResizer = event.target.closest("[data-resize-page-before][data-resize-page-after]");
+  if (pageResizer) {
+    event.preventDefault();
+    resetPagePanePercents();
+    return;
+  }
+
+  const notesResizer = event.target.closest("[data-resize-notes]");
+  if (notesResizer) {
+    event.preventDefault();
+    setNotesPanePercent(notesResizer.dataset.resizeNotes, 58);
+    queueViewStateSave(250);
+  }
 });
 
 els.pageCanvas.addEventListener("click", event => {
@@ -6895,17 +7457,37 @@ els.pageCanvas.addEventListener("change", event => {
 });
 
 els.pageCanvas.addEventListener("keydown", event => {
+  const pageResizer = event.target.closest("[data-resize-page-before][data-resize-page-after]");
+  if (pageResizer) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+
+    event.preventDefault();
+    const beforeKey = pageResizer.dataset.resizePageBefore;
+    const afterKey = pageResizer.dataset.resizePageAfter;
+    const step = event.shiftKey ? 8 : 3;
+    applyAdjacentPagePaneResize(
+      beforeKey,
+      afterKey,
+      pagePanePercent(beforeKey) + (event.key === "ArrowRight" ? step : -step)
+    );
+    savePagePanePercents();
+    queueViewStateSave(250);
+    return;
+  }
+
   const resizer = event.target.closest("[data-resize-notes]");
   if (!resizer) return;
 
   if (event.key === "ArrowUp") {
     event.preventDefault();
     setNotesPanePercent(resizer.dataset.resizeNotes, getNotesPanePercent(resizer.dataset.resizeNotes) - 4);
+    queueViewStateSave(250);
   }
 
   if (event.key === "ArrowDown") {
     event.preventDefault();
     setNotesPanePercent(resizer.dataset.resizeNotes, getNotesPanePercent(resizer.dataset.resizeNotes) + 4);
+    queueViewStateSave(250);
   }
 });
 
@@ -7057,7 +7639,11 @@ window.addEventListener("beforeunload", () => {
   if (!state || isClosingApp) return;
   syncFromInputs();
   sendViewStateBeacon();
-  const blob = new Blob([JSON.stringify(state)], { type: "application/json" });
+  const blob = new Blob([JSON.stringify({
+    state,
+    filePath: linkedTextPath,
+    fileName: projectFileName
+  })], { type: "application/json" });
   navigator.sendBeacon("/api/close", blob);
 });
 

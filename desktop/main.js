@@ -16,6 +16,8 @@ const MAX_ZOOM_FACTOR = 2;
 const ZOOM_STEP = 0.1;
 const APP_USER_MODEL_ID = "com.philipdarby.draftdiffeditor";
 const MAX_SPELLCHECK_CACHE_ENTRIES = 5000;
+const DATA_DIR_ENV_VAR = "DRAFT_DIFF_DATA_DIR";
+const DATA_DIR_ARG = "--data-dir";
 
 if (process.platform === "win32") {
   app.setAppUserModelId(APP_USER_MODEL_ID);
@@ -43,6 +45,36 @@ function getIconPath() {
   return app.isPackaged
     ? path.join(process.resourcesPath, iconName)
     : path.join(app.getAppPath(), process.platform === "win32" ? "build" : "", iconName);
+}
+
+function unquotePath(value) {
+  const trimmed = String(value || "").trim();
+  if (trimmed.length >= 2 && (
+    (trimmed.startsWith("\"") && trimmed.endsWith("\"")) ||
+    (trimmed.startsWith("'") && trimmed.endsWith("'"))
+  )) {
+    return trimmed.slice(1, -1).trim();
+  }
+  return trimmed;
+}
+
+function dataDirFromArgs(argv = process.argv) {
+  for (let index = 0; index < argv.length; index += 1) {
+    const value = String(argv[index] || "");
+    if (value === DATA_DIR_ARG) return unquotePath(argv[index + 1]);
+    if (value.startsWith(`${DATA_DIR_ARG}=`)) return unquotePath(value.slice(DATA_DIR_ARG.length + 1));
+  }
+  return "";
+}
+
+function resolveConfiguredDataDir() {
+  const fromArg = dataDirFromArgs();
+  if (fromArg) return path.resolve(fromArg);
+
+  const fromEnv = unquotePath(process.env[DATA_DIR_ENV_VAR]);
+  if (fromEnv) return path.resolve(fromEnv);
+
+  return app.isPackaged ? path.join(app.getPath("userData"), "data") : "";
 }
 
 function configureSpellChecker(session) {
@@ -215,9 +247,8 @@ function attachEditorContextMenu(browserWindow) {
 
 function loadServerApi() {
   if (!serverApi) {
-    if (app.isPackaged) {
-      process.env.DRAFT_DIFF_DATA_DIR = path.join(app.getPath("userData"), "data");
-    }
+    const dataDir = resolveConfiguredDataDir();
+    if (dataDir) process.env[DATA_DIR_ENV_VAR] = dataDir;
 
     serverApi = require("../server");
   }

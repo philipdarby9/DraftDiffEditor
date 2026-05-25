@@ -11,11 +11,14 @@ const STATE_FILE = path.join(DATA_DIR, "project.json");
 const EXPORT_FILE = path.join(DATA_DIR, "draft-history.txt");
 const TEXT_FILE_LINK_FILE = path.join(DATA_DIR, "text-file-link.json");
 const TEXT_FILE_STATES_FILE = path.join(DATA_DIR, "text-file-states.json");
+const VERSION_HISTORY_FOLDER_FILE = path.join(DATA_DIR, "version-history-folder.json");
+const VERSION_HISTORY_FILE_SUFFIX = ".version-history.json";
 const PORT = Number(process.env.PORT || 4173);
 const PROJECT_NOTES_TITLE = "Project notes";
 const FORMAT_DEFAULT_VERSION = 2;
 const VIEW_STATE_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
+const MIN_PAGE_PANE_PERCENT = 12;
 const SERVER_BUILD = "server-compare-created-label-2026-05-20";
 const AUTO_EXIT_ON_IDLE = process.env.DRAFT_DIFF_AUTO_EXIT === "1";
 const CLIENT_IDLE_EXIT_MS = 5 * 60_000;
@@ -280,6 +283,23 @@ function normalizeNotesPanePercents(values, maxLength) {
   return normalized;
 }
 
+function normalizePagePanePercents(values, drafts) {
+  const normalized = {};
+  if (!values || typeof values !== "object" || Array.isArray(values)) return normalized;
+
+  const validKeys = new Set([
+    "story",
+    ...drafts.map(draft => `draft:${draft.id}:content`)
+  ]);
+  Object.entries(values).forEach(([key, value]) => {
+    const numericValue = Number(value);
+    if (validKeys.has(key) && Number.isFinite(numericValue)) {
+      normalized[key] = Math.min(1000, Math.max(MIN_PAGE_PANE_PERCENT, numericValue));
+    }
+  });
+  return normalized;
+}
+
 function draftIndexById(drafts, draftId) {
   return drafts.findIndex(draft => draft.id === draftId);
 }
@@ -381,6 +401,7 @@ function normalizeViewState(viewState, drafts) {
     collapsedNotesIndexes,
     collapsedNotesIds,
     notesPanePercents: normalizeNotesPanePercents(viewState.notesPanePercents, drafts.length),
+    pagePanePercents: normalizePagePanePercents(viewState.pagePanePercents, drafts),
     pagesOnScreen,
     selectedDraftId: selectedRef.draft?.id || null,
     selectedDraftIndex: selectedRef.index,
@@ -529,6 +550,357 @@ function ensureDataDir() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+function readVersionHistoryFolderPath() {
+  ensureDataDir();
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(VERSION_HISTORY_FOLDER_FILE, "utf8").replace(/^\uFEFF/, ""));
+    const folderPath = asText(parsed?.folderPath).trim();
+    return folderPath ? path.resolve(folderPath) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeVersionHistoryFolderPath(folderPath) {
+  ensureDataDir();
+
+  if (!folderPath) {
+    try {
+      fs.rmSync(VERSION_HISTORY_FOLDER_FILE, { force: true });
+    } catch {}
+    return null;
+  }
+
+  const resolvedPath = path.resolve(folderPath);
+  fs.mkdirSync(resolvedPath, { recursive: true });
+  fs.writeFileSync(
+    VERSION_HISTORY_FOLDER_FILE,
+    `${JSON.stringify({ folderPath: resolvedPath, updatedAt: nowIso() }, null, 2)}\n`,
+    "utf8"
+  );
+  return resolvedPath;
+}
+
+function historySourceInfo(options = {}) {
+  const linkedTextPath = readTextFileLink();
+  const explicitFileName = asText(options.fileName).trim();
+  const filePath = asText(options.filePath) || linkedTextPath || (explicitFileName ? "" : EXPORT_FILE);
+  const resolvedFilePath = filePath ? path.resolve(filePath) : null;
+  const fileName = explicitFileName || (resolvedFilePath ? path.basename(resolvedFilePath) : "draft-history.txt");
+  return {
+    filePath: resolvedFilePath,
+    fileName: fileName || "draft-history.txt"
+  };
+}
+
+function normalizedHistoryName(value) {
+  return asText(value).trim().toLowerCase();
+}
+
+function sameHistoryPath(left, right) {
+  if (!left || !right) return false;
+  const leftPath = path.resolve(left);
+  const rightPath = path.resolve(right);
+  return process.platform === "win32"
+    ? leftPath.toLowerCase() === rightPath.toLowerCase()
+    : leftPath === rightPath;
+}
+
+function safeHistoryBaseName(sourceName) {
+  const parsed = path.parse(asText(sourceName) || "draft-history.txt");
+  const rawName = parsed.name || parsed.base || "draft-history";
+  const cleaned = rawName
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+    .replace(/[.\s]+$/g, "")
+    .slice(0, 120);
+  return cleaned || "draft-history";
+}
+
+function expectedVersionHistoryFilePath(options = {}) {
+  const folderPath = readVersionHistoryFolderPath();
+  if (!folderPath) return null;
+  const source = historySourceInfo(options);
+  return path.join(folderPath, `${safeHistoryBaseName(source.fileName)}${VERSION_HISTORY_FILE_SUFFIX}`);
+}
+
+function parseVersionHistoryFile(filePath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function versionHistoryPayloadMatchesSource(payload, source) {
+  if (!payload || !source) return false;
+  if (source.filePath && sameHistoryPath(payload.sourceFilePath, source.filePath)) return true;
+  return normalizedHistoryName(payload.sourceFileName) === normalizedHistoryName(source.fileName);
+}
+
+function findVersionHistoryFilePath(options = {}) {
+  const folderPath = readVersionHistoryFolderPath();
+  if (!folderPath) return null;
+
+  const source = historySourceInfo(options);
+  const expectedPath = expectedVersionHistoryFilePath(source);
+  if (expectedPath && fs.existsSync(expectedPath)) return expectedPath;
+
+  try {
+    const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile() || !entry.name.endsWith(VERSION_HISTORY_FILE_SUFFIX)) continue;
+      const filePath = path.join(folderPath, entry.name);
+      const payload = parseVersionHistoryFile(filePath);
+      if (versionHistoryPayloadMatchesSource(payload, source)) return filePath;
+    }
+  } catch {}
+
+  return expectedPath;
+}
+
+function versionHistorySignature(version) {
+  return JSON.stringify({
+    title: asText(version?.title),
+    content: asText(version?.content),
+    contentHtml: asText(version?.contentHtml),
+    format: normalizeFormat(version?.format || {})
+  });
+}
+
+function mergePageVersionHistories(existingHistory, incomingHistory, page, fallbackTitle) {
+  const existing = normalizePageVersionHistory(existingHistory, page, fallbackTitle);
+  if (!Array.isArray(incomingHistory) || !incomingHistory.length) return existing;
+
+  const merged = [];
+  const seenIds = new Set();
+  const seenSignatures = new Set();
+
+  const addEntries = entries => {
+    entries.forEach(entry => {
+      const idValue = asText(entry?.id);
+      const signature = versionHistorySignature(entry);
+      if (idValue && seenIds.has(idValue)) return;
+      if (seenSignatures.has(signature)) return;
+      if (idValue) seenIds.add(idValue);
+      seenSignatures.add(signature);
+      merged.push(entry);
+    });
+  };
+
+  addEntries(existing);
+  addEntries(normalizePageVersionHistory(incomingHistory, page, fallbackTitle));
+
+  return merged.sort((left, right) => {
+    const leftTime = Date.parse(left.createdAt || "");
+    const rightTime = Date.parse(right.createdAt || "");
+    if (Number.isNaN(leftTime) || Number.isNaN(rightTime)) return 0;
+    return leftTime - rightTime;
+  });
+}
+
+function normalizeHistoryTitle(value) {
+  return asText(value).trim().toLowerCase();
+}
+
+function applyVersionHistoryPayloadToState(state, payload) {
+  if (!state || !payload || typeof payload !== "object") return false;
+
+  const storyHistory = Array.isArray(payload.story?.history)
+    ? payload.story.history
+    : Array.isArray(payload.initialNotes)
+      ? payload.initialNotes
+      : null;
+  if (state.initialNotes && storyHistory) {
+    state.initialNotes.versionHistory = mergePageVersionHistories(
+      state.initialNotes.versionHistory,
+      storyHistory,
+      state.initialNotes,
+      PROJECT_NOTES_TITLE
+    );
+  }
+
+  const incomingDrafts = Array.isArray(payload.drafts) ? payload.drafts : [];
+  const byId = new Map();
+  const byIndex = new Map();
+  const titles = new Map();
+
+  incomingDrafts.forEach((entry, index) => {
+    const history = Array.isArray(entry?.history) ? entry.history : entry?.versionHistory;
+    if (!Array.isArray(history)) return;
+
+    const idValue = asText(entry.id || entry.draftId);
+    if (idValue) byId.set(idValue, entry);
+    const indexValue = Number.isInteger(entry.index) ? entry.index : index;
+    byIndex.set(indexValue, entry);
+
+    const titleKey = normalizeHistoryTitle(entry.title);
+    if (titleKey) {
+      if (titles.has(titleKey)) titles.set(titleKey, null);
+      else titles.set(titleKey, entry);
+    }
+  });
+
+  state.drafts?.forEach((draft, index) => {
+    const titleKey = normalizeHistoryTitle(draft.title);
+    const matchingDraft = byId.get(draft.id)
+      || (titleKey ? titles.get(titleKey) : null)
+      || byIndex.get(index);
+    const history = Array.isArray(matchingDraft?.history)
+      ? matchingDraft.history
+      : matchingDraft?.versionHistory;
+    if (!Array.isArray(history)) return;
+
+    draft.versionHistory = mergePageVersionHistories(
+      draft.versionHistory,
+      history,
+      draft,
+      draft.title || "Untitled draft"
+    );
+  });
+
+  return true;
+}
+
+function applyExternalVersionHistory(state, options = {}) {
+  const normalized = normalizeState(state);
+  const filePath = findVersionHistoryFilePath(options);
+  if (!filePath || !fs.existsSync(filePath)) return { state: normalized, loaded: false, filePath: null };
+
+  const payload = parseVersionHistoryFile(filePath);
+  const loaded = applyVersionHistoryPayloadToState(normalized, payload);
+  return { state: normalized, loaded, filePath };
+}
+
+function versionHistoryPayloadFromState(state, options = {}) {
+  const source = historySourceInfo(options);
+  return {
+    version: 1,
+    sourceFileName: source.fileName,
+    sourceFilePath: source.filePath,
+    updatedAt: nowIso(),
+    projectUpdatedAt: state.updatedAt || null,
+    story: {
+      id: state.initialNotes?.id || "initial-notes",
+      title: PROJECT_NOTES_TITLE,
+      history: state.initialNotes?.versionHistory || []
+    },
+    drafts: (state.drafts || []).map((draft, index) => ({
+      id: draft.id,
+      index,
+      title: draft.title || `Draft ${index + 1}`,
+      createdAt: draft.createdAt || null,
+      history: draft.versionHistory || []
+    }))
+  };
+}
+
+function stateWithoutVersionHistory(state) {
+  const copy = JSON.parse(JSON.stringify(state));
+  if (copy.initialNotes) delete copy.initialNotes.versionHistory;
+  copy.drafts?.forEach(draft => {
+    delete draft.versionHistory;
+  });
+  return copy;
+}
+
+function persistVersionHistory(state, options = {}) {
+  const folderPath = readVersionHistoryFolderPath();
+  if (!folderPath) return null;
+
+  fs.mkdirSync(folderPath, { recursive: true });
+  const filePath = expectedVersionHistoryFilePath(options);
+  const stateToWrite = options.mergeExisting
+    ? applyExternalVersionHistory(state, options).state
+    : state;
+  fs.writeFileSync(
+    filePath,
+    `${JSON.stringify(versionHistoryPayloadFromState(stateToWrite, options), null, 2)}\n`,
+    "utf8"
+  );
+  return filePath;
+}
+
+function stateForStorage(state) {
+  return readVersionHistoryFolderPath() ? stateWithoutVersionHistory(state) : state;
+}
+
+function parseJsonFile(filePath) {
+  return JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
+}
+
+function migrateStateVersionHistoryToFolder(state, options = {}, migrated = new Map(), errors = []) {
+  if (!state || typeof state !== "object") return { migrated, errors };
+
+  try {
+    const historyPath = persistVersionHistory(normalizeState(state), {
+      filePath: options.filePath,
+      fileName: options.fileName,
+      mergeExisting: true
+    });
+    if (historyPath) {
+      migrated.set(historyPath, {
+        historyPath,
+        filePath: options.filePath || null,
+        fileName: options.fileName || (options.filePath ? path.basename(options.filePath) : null)
+      });
+    }
+  } catch (error) {
+    errors.push({
+      filePath: options.filePath || null,
+      fileName: options.fileName || null,
+      error: error.message
+    });
+  }
+
+  return { migrated, errors };
+}
+
+function migrateEmbeddedVersionHistoriesToFolder(currentState, options = {}) {
+  const migrated = new Map();
+  const errors = [];
+  const linkedTextPath = readTextFileLink();
+
+  try {
+    if (fs.existsSync(STATE_FILE)) {
+      migrateStateVersionHistoryToFolder(
+        parseJsonFile(STATE_FILE),
+        { filePath: linkedTextPath || EXPORT_FILE },
+        migrated,
+        errors
+      );
+    }
+  } catch (error) {
+    errors.push({ filePath: STATE_FILE, fileName: path.basename(STATE_FILE), error: error.message });
+  }
+
+  const textFileStates = readTextFileStates();
+  Object.values(textFileStates).forEach(entry => {
+    if (!entry?.state) return;
+    migrateStateVersionHistoryToFolder(
+      entry.state,
+      { filePath: entry.filePath },
+      migrated,
+      errors
+    );
+  });
+
+  const currentFilePath = options.filePath || linkedTextPath || (options.fileName ? "" : EXPORT_FILE);
+  migrateStateVersionHistoryToFolder(
+    currentState,
+    { filePath: currentFilePath, fileName: options.fileName },
+    migrated,
+    errors
+  );
+
+  return {
+    migrated: Array.from(migrated.values()),
+    migratedCount: migrated.size,
+    errors
+  };
+}
+
 function readTextFileLink() {
   ensureDataDir();
 
@@ -583,18 +955,61 @@ function readTextFileState(filePath) {
   const entry = readTextFileStates()[textFileStateKey(filePath)];
   if (!entry?.state) return null;
 
-  return normalizeState(entry.state);
+  return applyExternalVersionHistory(entry.state, { filePath }).state;
+}
+
+function recentTextFiles(limit = 12) {
+  const files = new Map();
+  const fileExists = filePath => {
+    try {
+      return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+    } catch {
+      return false;
+    }
+  };
+  const addFile = (filePath, updatedAt = "") => {
+    if (!filePath) return;
+    const resolvedPath = path.resolve(filePath);
+    const key = textFileStateKey(resolvedPath);
+    const existing = files.get(key);
+    if (existing && String(existing.updatedAt || "") >= String(updatedAt || "")) return;
+
+    files.set(key, {
+      filePath: resolvedPath,
+      fileName: path.basename(resolvedPath),
+      updatedAt: updatedAt || "",
+      exists: fileExists(resolvedPath)
+    });
+  };
+
+  Object.values(readTextFileStates()).forEach(entry => {
+    addFile(entry?.filePath, entry?.updatedAt);
+  });
+  addFile(readTextFileLink(), nowIso());
+
+  return Array.from(files.values())
+    .filter(file => file.exists)
+    .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")))
+    .slice(0, limit);
+}
+
+function isRecentTextFile(filePath) {
+  const targetKey = textFileStateKey(filePath);
+  return recentTextFiles(100).some(file => textFileStateKey(file.filePath) === targetKey);
 }
 
 function writeTextFileState(filePath, state) {
   if (!filePath || !state) return;
 
   const resolvedPath = path.resolve(filePath);
+  const normalized = normalizeState(state);
+  persistVersionHistory(normalized, { filePath: resolvedPath });
+
   const states = readTextFileStates();
   states[textFileStateKey(resolvedPath)] = {
     filePath: resolvedPath,
     updatedAt: nowIso(),
-    state: normalizeState(state)
+    state: stateForStorage(normalized)
   };
   writeTextFileStates(states);
 }
@@ -602,7 +1017,7 @@ function writeTextFileState(filePath, state) {
 function writeProjectStateOnly(state, options = {}) {
   ensureDataDir();
   const normalized = normalizeState(state, { touch: Boolean(options.touch) });
-  fs.writeFileSync(STATE_FILE, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+  fs.writeFileSync(STATE_FILE, `${JSON.stringify(stateForStorage(normalized), null, 2)}\n`, "utf8");
 
   const linkedTextPath = readTextFileLink();
   if (linkedTextPath) {
@@ -614,14 +1029,18 @@ function writeProjectStateOnly(state, options = {}) {
   return normalized;
 }
 
-function writeAll(state) {
+function writeAll(state, options = {}) {
   ensureDataDir();
   const normalized = normalizeState(state, { touch: true });
   const exportText = formatExport(normalized);
-  fs.writeFileSync(STATE_FILE, `${JSON.stringify(normalized, null, 2)}\n`, "utf8");
+  const linkedTextPath = readTextFileLink();
+  persistVersionHistory(normalized, {
+    filePath: options.filePath || linkedTextPath || (options.fileName ? "" : EXPORT_FILE),
+    fileName: options.fileName
+  });
+  fs.writeFileSync(STATE_FILE, `${JSON.stringify(stateForStorage(normalized), null, 2)}\n`, "utf8");
   fs.writeFileSync(EXPORT_FILE, exportText, "utf8");
 
-  const linkedTextPath = readTextFileLink();
   if (linkedTextPath) {
     try {
       fs.writeFileSync(linkedTextPath, exportText, "utf8");
@@ -642,7 +1061,7 @@ function readState() {
 
   try {
     const parsed = JSON.parse(fs.readFileSync(STATE_FILE, "utf8"));
-    const normalized = normalizeState(parsed);
+    const normalized = applyExternalVersionHistory(parsed, { filePath: readTextFileLink() || EXPORT_FILE }).state;
     fs.writeFileSync(EXPORT_FILE, formatExport(normalized), "utf8");
     return normalized;
   } catch (error) {
@@ -731,13 +1150,31 @@ function parseStatePayload(body) {
   if (payload?.state && typeof payload.state === "object") {
     return {
       state: payload.state,
+      filePath: asText(payload.filePath),
       fileName: payload.fileName
     };
   }
 
   return {
     state: payload,
+    filePath: "",
     fileName: null
+  };
+}
+
+function statePathPayload(options = {}) {
+  const linkedTextPath = readTextFileLink();
+  const historySourcePath = options.filePath || linkedTextPath || (options.fileName ? "" : EXPORT_FILE);
+  return {
+    exportPath: EXPORT_FILE,
+    statePath: STATE_FILE,
+    linkedTextPath,
+    linkedTextFileName: linkedTextPath ? path.basename(linkedTextPath) : null,
+    versionHistoryFolderPath: readVersionHistoryFolderPath(),
+    versionHistoryPath: findVersionHistoryFilePath({
+      filePath: historySourcePath,
+      fileName: options.fileName || (historySourcePath ? path.basename(historySourcePath) : "draft-history.txt")
+    })
   };
 }
 
@@ -938,6 +1375,40 @@ async function chooseTextFileToSave(suggestedName) {
   return runPowerShell(command);
 }
 
+function windowsFolderDialogCommand(initialDirectory) {
+  return [
+    "Add-Type -AssemblyName System.Windows.Forms",
+    "Add-Type -AssemblyName System.Drawing",
+    "[System.Windows.Forms.Application]::EnableVisualStyles()",
+    "$owner = New-Object System.Windows.Forms.Form",
+    "$owner.TopMost = $true",
+    "$owner.ShowInTaskbar = $false",
+    "$owner.StartPosition = 'CenterScreen'",
+    "$owner.Size = New-Object System.Drawing.Size(1, 1)",
+    "$owner.Opacity = 0",
+    "$owner.Show()",
+    "$owner.Activate()",
+    "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
+    "$dialog.Description = 'Select the version history folder'",
+    "$dialog.ShowNewFolderButton = $true",
+    `$dialog.SelectedPath = ${powershellString(initialDirectory)}`,
+    "$result = $dialog.ShowDialog($owner)",
+    "$owner.Close()",
+    "$owner.Dispose()",
+    "if ($result -eq [System.Windows.Forms.DialogResult]::OK) { [Console]::Write($dialog.SelectedPath) }"
+  ].join("; ");
+}
+
+async function chooseVersionHistoryFolder() {
+  const initialDirectory = readVersionHistoryFolderPath() || existingDirectory(readTextFileLink() || EXPORT_FILE);
+
+  if (process.platform === "win32") {
+    return runPowerShell(windowsFolderDialogCommand(initialDirectory));
+  }
+
+  throw new Error("Version history folder selection is only available in the desktop Windows dialog right now.");
+}
+
 function openFileLocation(filePath) {
   const targetPath = path.resolve(filePath);
   const targetExists = fs.existsSync(targetPath);
@@ -990,13 +1461,9 @@ async function handleApi(req, res, pathname) {
   if (req.method === "GET" && pathname === "/api/state") {
     markClientActive();
     const state = readState();
-    const linkedTextPath = readTextFileLink();
     sendJson(res, 200, {
       state,
-      exportPath: EXPORT_FILE,
-      statePath: STATE_FILE,
-      linkedTextPath,
-      linkedTextFileName: linkedTextPath ? path.basename(linkedTextPath) : null
+      ...statePathPayload()
     });
     return;
   }
@@ -1005,15 +1472,14 @@ async function handleApi(req, res, pathname) {
     markClientActive();
     const body = await readBody(req);
     const payload = parseStatePayload(body);
-    const state = writeAll(payload.state);
-    const linkedTextPath = readTextFileLink();
+    const state = writeAll(payload.state, {
+      filePath: payload.filePath,
+      fileName: payload.fileName
+    });
     sendJson(res, 200, {
       ok: true,
       state,
-      exportPath: EXPORT_FILE,
-      statePath: STATE_FILE,
-      linkedTextPath,
-      linkedTextFileName: linkedTextPath ? path.basename(linkedTextPath) : null
+      ...statePathPayload()
     });
     return;
   }
@@ -1082,7 +1548,10 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req);
     if (body) {
       const payload = parseStatePayload(body);
-      writeAll(payload.state);
+      writeAll(payload.state, {
+        filePath: payload.filePath,
+        fileName: payload.fileName
+      });
     } else {
       writeAll(readState());
     }
@@ -1094,7 +1563,10 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req);
     if (body) {
       const payload = parseStatePayload(body);
-      writeAll(payload.state);
+      writeAll(payload.state, {
+        filePath: payload.filePath,
+        fileName: payload.fileName
+      });
     } else {
       writeAll(readState());
     }
@@ -1118,6 +1590,65 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/version-history/apply") {
+    markClientActive();
+    const body = await readBody(req);
+    const payload = parseStatePayload(body);
+    const result = applyExternalVersionHistory(payload.state, {
+      filePath: payload.filePath,
+      fileName: payload.fileName
+    });
+    sendJson(res, 200, {
+      ok: true,
+      state: result.state,
+      loaded: result.loaded,
+      versionHistoryPath: result.filePath || findVersionHistoryFilePath({
+        filePath: payload.filePath,
+        fileName: payload.fileName
+      }),
+      ...statePathPayload({ filePath: payload.filePath, fileName: payload.fileName })
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/version-history-folder/select") {
+    markClientActive();
+    const body = await readBody(req);
+    const payload = body
+      ? parseStatePayload(body)
+      : { state: readState(), filePath: "", fileName: null };
+    const folderPath = await chooseVersionHistoryFolder();
+    if (!folderPath) {
+      sendJson(res, 200, { ok: false, cancelled: true });
+      return;
+    }
+
+    const versionHistoryFolderPath = writeVersionHistoryFolderPath(folderPath);
+    const filePath = payload.filePath || readTextFileLink() || (payload.fileName ? "" : EXPORT_FILE);
+    const migration = migrateEmbeddedVersionHistoriesToFolder(payload.state, {
+      filePath,
+      fileName: payload.fileName
+    });
+    const result = applyExternalVersionHistory(payload.state, {
+      filePath,
+      fileName: payload.fileName
+    });
+    const state = writeAll(result.state, {
+      filePath,
+      fileName: payload.fileName
+    });
+    sendJson(res, 200, {
+      ok: true,
+      state,
+      loaded: result.loaded,
+      versionHistoryFolderPath,
+      migratedCount: migration.migratedCount,
+      migrationErrors: migration.errors,
+      ...statePathPayload({ filePath, fileName: payload.fileName })
+    });
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/open-text-file") {
     markClientActive();
     const filePath = await chooseTextFileToOpen();
@@ -1132,7 +1663,51 @@ async function handleApi(req, res, pathname) {
       filePath,
       fileName: path.basename(filePath),
       text: fs.readFileSync(filePath, "utf8"),
-      storedState: readTextFileState(filePath)
+      storedState: readTextFileState(filePath),
+      ...statePathPayload({ filePath, fileName: path.basename(filePath) })
+    });
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/recent-text-files") {
+    markClientActive();
+    sendJson(res, 200, {
+      ok: true,
+      files: recentTextFiles()
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/open-recent-text-file") {
+    markClientActive();
+    const body = await readBody(req);
+    const payload = body ? JSON.parse(body) : {};
+    const filePath = asText(payload.filePath);
+
+    if (!filePath || !isRecentTextFile(filePath)) {
+      sendJson(res, 404, { error: "Recent file not found" });
+      return;
+    }
+
+    const resolvedPath = path.resolve(filePath);
+    try {
+      if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isFile()) {
+        sendJson(res, 404, { error: "Recent file no longer exists" });
+        return;
+      }
+    } catch {
+      sendJson(res, 404, { error: "Recent file no longer exists" });
+      return;
+    }
+
+    writeTextFileLink(resolvedPath);
+    sendJson(res, 200, {
+      ok: true,
+      filePath: resolvedPath,
+      fileName: path.basename(resolvedPath),
+      text: fs.readFileSync(resolvedPath, "utf8"),
+      storedState: readTextFileState(resolvedPath),
+      ...statePathPayload({ filePath: resolvedPath, fileName: path.basename(resolvedPath) })
     });
     return;
   }
@@ -1149,14 +1724,16 @@ async function handleApi(req, res, pathname) {
     }
 
     writeTextFileLink(filePath);
-    const state = writeAll(normalized);
+    const state = writeAll(normalized, {
+      filePath,
+      fileName: path.basename(filePath)
+    });
     sendJson(res, 200, {
       ok: true,
       state,
       filePath,
       fileName: path.basename(filePath),
-      exportPath: EXPORT_FILE,
-      statePath: STATE_FILE
+      ...statePathPayload({ filePath, fileName: path.basename(filePath) })
     });
     return;
   }

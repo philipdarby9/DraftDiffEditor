@@ -16,6 +16,7 @@
   --accent: oklch(48% 0.13 252);
   --accent-deep: oklch(40% 0.14 252);
   --accent-soft: oklch(94% 0.042 252);
+  --resize-accent: oklch(66% 0.16 252);
   --accent-fg: oklch(99% 0.005 252);
   --focus-ring: oklch(60% 0.16 252 / 0.45);
   --diff-add: oklch(42% 0.15 148);
@@ -36,7 +37,6 @@
   --r: 6px;
   --h-titlebar: 38px;
   --h-ribbon: 42px;
-  --page-width: calc(100vw / 2);
   --ink: var(--fg);
   --muted: var(--fg-muted);
   --line: var(--border);
@@ -535,6 +535,80 @@ textarea,
 .file-menu-panel button:disabled:hover {
   background: transparent;
   color: var(--fg-subtle);
+}
+
+.file-submenu {
+  position: relative;
+}
+
+.file-submenu .menu-arrow {
+  color: var(--fg-subtle);
+  font-size: 16px;
+  line-height: 1;
+}
+
+.menu-shortcut-with-arrow {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.file-submenu-panel {
+  position: absolute;
+  top: -4px;
+  left: calc(100% + 5px);
+  z-index: 210;
+  min-width: 280px;
+  max-width: 360px;
+  max-height: min(420px, calc(100vh - 120px));
+  overflow-y: auto;
+  padding: 4px;
+  display: none;
+  gap: 1px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  box-shadow: var(--shadow-menu);
+}
+
+.file-submenu:hover > .file-submenu-panel,
+.file-submenu:focus-within > .file-submenu-panel,
+.file-submenu.is-open > .file-submenu-panel {
+  display: grid;
+}
+
+.file-submenu:hover > button,
+.file-submenu:focus-within > button,
+.file-submenu.is-open > button {
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+  border-color: transparent;
+}
+
+.file-menu-panel .recent-file-button {
+  min-height: 40px;
+  height: auto;
+  align-items: start;
+  padding-top: 5px;
+  padding-bottom: 5px;
+}
+
+.recent-file-text {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.recent-file-name,
+.recent-file-path {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.recent-file-path {
+  color: var(--fg-subtle);
+  font-size: 11px;
 }
 
 .zoom-menu-control {
@@ -1216,23 +1290,97 @@ select:hover {
 }
 
 .display-page {
-  width: var(--page-width);
-  flex: 0 0 var(--page-width);
+  --page-pane-basis: calc(var(--page-pane-percent, 50) * 1vw);
+  width: var(--page-pane-basis);
+  flex: 0 0 var(--page-pane-basis);
   height: 100%;
   scroll-snap-align: start;
-  border-right: 1px solid var(--border);
+  border-right: 0;
 }
 
 .story-display-page {
-  width: var(--page-width);
-  flex-basis: var(--page-width);
+  width: var(--page-pane-basis);
+  flex-basis: var(--page-pane-basis);
+}
+
+.page-width-resizer {
+  width: 14px;
+  flex: 0 0 14px;
+  align-self: stretch;
+  margin: 0 -7px;
+  position: relative;
+  z-index: 5;
+  cursor: col-resize;
+  scroll-snap-align: none;
+}
+
+.page-width-resizer::before {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--border);
+  transform: translateX(-50%);
+  transition: background 100ms ease, width 100ms ease;
+}
+
+.page-width-resizer::after,
+.notes-resizer::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+  transform: translate(-50%, -50%);
+  transition: border-color 100ms ease, box-shadow 100ms ease, background 100ms ease;
+}
+
+.page-width-resizer:hover::before,
+.page-width-resizer:focus-visible::before,
+.page-canvas.is-page-resizing .page-width-resizer.is-active::before {
+  width: 2px;
+  background: var(--resize-accent);
+}
+
+.page-width-resizer:hover::after,
+.page-width-resizer:focus-visible::after,
+.page-canvas.is-page-resizing .page-width-resizer.is-active::after,
+.notes-resizer:hover::after,
+.notes-resizer:focus-visible::after,
+.draft-stack-page.is-resizing .notes-resizer::after {
+  border-color: var(--resize-accent);
+  background: var(--accent-soft);
+  box-shadow: 0 4px 16px oklch(22% 0.03 75 / 0.16);
+}
+
+.page-width-resizer::after {
+  width: 8px;
+  height: 22px;
+}
+
+.notes-resizer::after {
+  top: 0;
+  width: 22px;
+  height: 7px;
+}
+
+.page-canvas.is-page-resizing,
+.page-canvas.is-page-resizing * {
+  cursor: col-resize;
+  user-select: none;
 }
 
 .draft-stack-page {
   --draft-pane-height: 58%;
   display: grid;
-  grid-template-rows: minmax(170px, var(--draft-pane-height)) 6px minmax(32px, 1fr);
+  grid-template-rows: minmax(170px, var(--draft-pane-height)) 0 minmax(32px, 1fr);
   gap: 0;
+  position: relative;
   background: var(--surface);
   box-shadow: none;
 }
@@ -1263,39 +1411,36 @@ select:hover {
 }
 
 .notes-resizer {
-  height: 6px;
-  background: var(--surface-alt);
-  border-top: 1px solid var(--border);
-  border-bottom: 1px solid var(--border);
+  height: 10px;
+  background: transparent;
+  border: 0;
   cursor: row-resize;
   position: relative;
-  z-index: 2;
+  z-index: 4;
+  overflow: visible;
 }
 
-.notes-resizer::after {
+.notes-resizer::before {
   content: "";
   position: absolute;
-  left: 50%;
-  top: 50%;
-  width: 28px;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: var(--border);
+  transition: background 100ms ease, height 100ms ease;
+}
+
+.notes-resizer:hover::before,
+.notes-resizer:focus-visible::before,
+.draft-stack-page.is-resizing .notes-resizer::before {
   height: 2px;
-  border-radius: 1px;
-  background: var(--border-strong);
-  opacity: 0.55;
-  transform: translate(-50%, -50%);
-  transition: width 100ms ease, opacity 100ms ease, background 100ms ease;
+  background: var(--resize-accent);
 }
 
 .notes-resizer:hover,
 .draft-stack-page.is-resizing .notes-resizer {
-  background: var(--hover);
-}
-
-.notes-resizer:hover::after,
-.draft-stack-page.is-resizing .notes-resizer::after {
-  width: 36px;
-  opacity: 1;
-  background: var(--accent);
+  background: transparent;
 }
 
 .draft-stack-page.is-resizing,
@@ -1322,7 +1467,7 @@ select:hover {
   grid-template-columns: minmax(0, 1fr) auto auto auto;
   grid-template-rows: 1fr;
   align-items: center;
-  gap: 0 12px;
+  gap: 0 6px;
 }
 
 .panel-title-row {
@@ -1347,11 +1492,14 @@ select:hover {
 
 .notes-display-page .panel-heading {
   min-height: 32px;
+  display: flex;
   align-items: center;
   justify-content: flex-start;
-  padding: 0 16px 0 14px;
-  gap: 8px;
+  flex-wrap: nowrap;
+  padding: 0 18px 0 8px;
+  gap: 6px;
   background: var(--surface-alt);
+  overflow: hidden;
 }
 
 .panel-heading > div {
@@ -1368,12 +1516,26 @@ select:hover {
 .notes-heading-main {
   display: inline-flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   min-width: 0;
 }
 
 .notes-toggle-heading > .notes-heading-main {
+  order: 1;
+  flex: 0 0 auto;
+}
+
+.notes-heading-actions {
+  order: 2;
+  min-width: 0;
+  max-width: 100%;
+  margin-left: auto;
   flex: 0 1 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  overflow: hidden;
 }
 
 .notes-toggle-heading:hover,
@@ -1393,8 +1555,8 @@ select:hover {
 }
 
 .notes-caret {
-  width: 14px;
-  height: 14px;
+  width: 12px;
+  height: 12px;
   display: inline-grid;
   place-items: center;
   color: var(--fg-subtle);
@@ -1403,8 +1565,8 @@ select:hover {
 }
 
 .notes-caret svg {
-  width: 12px;
-  height: 12px;
+  width: 10px;
+  height: 10px;
   stroke: currentColor;
   stroke-width: 1.8;
   stroke-linecap: round;
@@ -1413,17 +1575,20 @@ select:hover {
 }
 
 .notes-collapse-hint {
-  order: 2;
+  order: 1;
+  flex: 0 0 auto;
+  display: none;
   color: var(--fg-subtle);
   font-size: 10.5px;
-  margin-left: 6px;
+  margin-left: 0;
   opacity: 0;
   transition: opacity 120ms ease;
   white-space: nowrap;
 }
 
-.notes-toggle-heading:hover .notes-collapse-hint,
-.notes-toggle-heading:focus-visible .notes-collapse-hint {
+.notes-toggle-heading:not(.notes-heading-hide-hint):not(.notes-heading-hide-label):hover .notes-collapse-hint,
+.notes-toggle-heading:not(.notes-heading-hide-hint):not(.notes-heading-hide-label):focus-visible .notes-collapse-hint {
+  display: inline;
   opacity: 1;
 }
 
@@ -1444,6 +1609,8 @@ select:hover {
 }
 
 .notes-display-page .panel-kicker {
+  font-size: 9.5px;
+  letter-spacing: 0.07em;
   margin-bottom: 0;
 }
 
@@ -1512,40 +1679,60 @@ select:hover {
 }
 
 .notes-toggle-heading .panel-format-toggle {
-  order: 3;
-  margin-left: auto;
+  order: 2;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
+  margin-left: 0;
+  flex: 0 0 22px;
 }
 
 .notes-toggle-heading .panel-detach-button {
   order: 3;
+  width: 22px;
+  height: 22px;
+  min-height: 22px;
   margin-left: 0;
+  flex: 0 0 22px;
 }
 
+.notes-toggle-heading .panel-format-toggle svg,
+.notes-toggle-heading .panel-detach-button svg {
+  width: 13px;
+  height: 13px;
+}
+
+.notes-toggle-heading.notes-heading-hide-hint .notes-collapse-hint,
 .notes-toggle-heading.notes-heading-hide-label .notes-collapse-hint {
   display: none;
 }
 
-.notes-toggle-heading.notes-heading-is-tight .panel-kicker,
-.notes-toggle-heading.notes-heading-is-tight .notes-caret,
+.notes-toggle-heading.notes-heading-hide-label .panel-kicker {
+  display: none;
+}
+
 .notes-toggle-heading.notes-heading-is-tight .notes-collapse-hint,
-.notes-toggle-heading.notes-heading-is-tight .panel-format-toggle,
-.notes-toggle-heading.notes-heading-is-tight .panel-detach-button {
+.notes-toggle-heading.notes-heading-is-tight .notes-heading-word-count,
+.notes-toggle-heading.notes-heading-is-tight .notes-heading-stat-divider {
   display: none;
 }
 
 .notes-toggle-heading.notes-heading-is-tight .notes-heading-main {
-  gap: 0;
+  gap: 8px;
 }
 
 .notes-heading-stats {
   order: 4;
   min-width: 0;
+  width: max-content;
+  max-width: 100%;
   flex: 0 1 auto;
-  display: inline-flex;
+  display: grid;
+  grid-template-columns: auto auto minmax(0, max-content);
   align-items: center;
-  gap: 8px;
+  column-gap: 5px;
   color: var(--fg-subtle);
-  font-size: 11px;
+  font-size: 10.5px;
   font-variant-numeric: tabular-nums;
   line-height: 1.2;
   white-space: nowrap;
@@ -1553,8 +1740,7 @@ select:hover {
 }
 
 .notes-toggle-heading > .notes-heading-stats {
-  flex: 0 1 auto;
-  margin-left: auto;
+  margin-left: 0;
 }
 
 .notes-toggle-heading .panel-format-toggle ~ .notes-heading-stats,
@@ -1580,9 +1766,12 @@ select:hover {
 
 .notes-heading-last-edited {
   min-width: 0;
-  flex: 1 1 auto;
+  max-width: 100%;
+  justify-self: end;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
+  text-align: right;
 }
 
 h2 {
@@ -2872,8 +3061,8 @@ textarea {
 
   .display-page,
   .story-display-page {
-    width: var(--page-width);
-    flex-basis: var(--page-width);
+    width: var(--page-pane-basis);
+    flex-basis: var(--page-pane-basis);
   }
 
   .titlebar-file {
