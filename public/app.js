@@ -97,6 +97,8 @@ let draftNoteStatsTimers = new Map();
 let draftVersionTimers = new Map();
 let notesHeadingDensityFrame = null;
 let notesHeadingResizeObserver = null;
+let draftHeadingDensityFrame = null;
+let draftHeadingResizeObserver = null;
 
 let fileViewStates = readStoredFileViewStates();
 let displayedPageKeys = new Set();
@@ -2029,6 +2031,7 @@ function applyPagePaneStyles() {
     if (element) element.style.setProperty("--page-pane-percent", String(value));
   });
   queueNotesHeadingDensityUpdate();
+  queueDraftHeadingDensityUpdate();
 }
 
 function setAdjacentPagePanePercents(beforeKey, afterKey, beforeValue, afterValue) {
@@ -4830,6 +4833,130 @@ function styleGap(element) {
   return parseFloat(styles.columnGap || styles.gap) || 0;
 }
 
+const DRAFT_HEADING_DENSITY_CLASSES = [
+  "draft-heading-no-detach",
+  "draft-heading-title-short",
+  "draft-heading-hide-meta",
+  "draft-heading-hide-detach",
+  "draft-heading-hide-format"
+];
+const DRAFT_HEADING_META_MIN_WIDTH = 72;
+
+function matchingElements(root, selector) {
+  const elements = [];
+  if (root instanceof Element && root.matches(selector)) elements.push(root);
+  root?.querySelectorAll?.(selector).forEach(element => elements.push(element));
+  return elements;
+}
+
+function draftHeadingTitleWidth(row, useShortTitle = false) {
+  const input = row?.querySelector(".draft-title-input");
+  if (!input) return 0;
+  const shortTitle = row.querySelector(".draft-title-short-display")?.textContent || input.dataset.shortTitle || input.value;
+  const text = useShortTitle ? shortTitle : input.value;
+  return Math.ceil(measuredTextWidth(text, input) + horizontalPaddingWidth(input));
+}
+
+function headingHorizontalPadding(heading) {
+  const styles = window.getComputedStyle(heading);
+  return (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+}
+
+function draftHeadingNaturalWidth(heading, options = {}) {
+  const row = heading.querySelector(".draft-title-row");
+  const metaWidth = options.metaWidth ?? visibleElementWidth(heading.querySelector(".meta"));
+  const widths = [
+    draftHeadingTitleWidth(row, options.shortTitle === true),
+    options.includeFormat === false ? 0 : visibleElementWidth(heading.querySelector(".panel-format-toggle")),
+    options.includeDetach === false ? 0 : visibleElementWidth(heading.querySelector(".panel-detach-button")),
+    options.includeMeta === false ? 0 : metaWidth
+  ].filter(Boolean);
+
+  return headingHorizontalPadding(heading)
+    + widths.reduce((total, width) => total + width, 0)
+    + Math.max(0, widths.length - 1) * styleGap(heading);
+}
+
+function draftHeadingTitleIsClipped(row) {
+  if (!row) return false;
+  const input = row.querySelector(".draft-title-input");
+  return Boolean(input && draftHeadingTitleWidth(row, false) > input.clientWidth + 1);
+}
+
+function updateDraftHeadingDensity(heading) {
+  if (!heading) return;
+
+  const row = heading.querySelector(".draft-title-row");
+  if (!row) return;
+
+  heading.classList.remove(...DRAFT_HEADING_DENSITY_CLASSES);
+  heading.classList.toggle("draft-heading-no-detach", !heading.querySelector(".panel-detach-button"));
+  row.classList.remove("use-short-title");
+
+  const shortTitleWidth = Math.max(18, draftHeadingTitleWidth(row, true));
+  heading.style.setProperty("--draft-heading-title-min", `${shortTitleWidth}px`);
+
+  const availableWidth = heading.clientWidth || 0;
+  if (!availableWidth) return;
+
+  if (
+    draftHeadingNaturalWidth(heading, { shortTitle: false }) > availableWidth + 1 ||
+    draftHeadingTitleIsClipped(row)
+  ) {
+    row.classList.add("use-short-title");
+    heading.classList.add("draft-heading-title-short");
+  }
+
+  const useShortTitle = row.classList.contains("use-short-title");
+  if (
+    draftHeadingNaturalWidth(heading, {
+      shortTitle: useShortTitle,
+      metaWidth: DRAFT_HEADING_META_MIN_WIDTH
+    }) > availableWidth + 1
+  ) {
+    heading.classList.add("draft-heading-hide-meta");
+  }
+  if (
+    (!heading.querySelector(".panel-detach-button") && heading.classList.contains("draft-heading-hide-meta")) ||
+    draftHeadingNaturalWidth(heading, { shortTitle: useShortTitle, includeMeta: false }) > availableWidth + 1
+  ) {
+    heading.classList.add("draft-heading-hide-detach");
+  }
+  if (draftHeadingNaturalWidth(heading, { shortTitle: useShortTitle, includeMeta: false, includeDetach: false }) > availableWidth + 1) {
+    heading.classList.add("draft-heading-hide-format");
+  }
+}
+
+function updateAllDraftHeadingDensity(root = document) {
+  const headings = new Set();
+  matchingElements(root, ".draft-title-row").forEach(row => {
+    const heading = row.closest(".panel-heading:not(.notes-toggle-heading)");
+    if (heading) headings.add(heading);
+  });
+  headings.forEach(updateDraftHeadingDensity);
+}
+
+function queueDraftHeadingDensityUpdate() {
+  if (draftHeadingDensityFrame) return;
+  draftHeadingDensityFrame = window.requestAnimationFrame(() => {
+    draftHeadingDensityFrame = null;
+    updateAllDraftHeadingDensity();
+  });
+}
+
+function observeDraftHeadingDensity() {
+  if (!("ResizeObserver" in window) || !els.pageCanvas) return;
+  if (!draftHeadingResizeObserver) {
+    draftHeadingResizeObserver = new ResizeObserver(queueDraftHeadingDensityUpdate);
+  }
+  draftHeadingResizeObserver.disconnect();
+  updateAllDraftHeadingDensity(els.pageCanvas);
+  matchingElements(els.pageCanvas, ".draft-title-row").forEach(row => {
+    const heading = row.closest(".panel-heading:not(.notes-toggle-heading)");
+    if (heading) draftHeadingResizeObserver.observe(heading);
+  });
+}
+
 function notesHeadingNaturalWidth(heading, options = {}) {
   const includeHint = options.includeHint === true;
   const includeLabel = options.includeLabel !== false;
@@ -4959,7 +5086,7 @@ function formatPickerLabelWidthStyle(field, values) {
 }
 
 function updateCompactTitleLabels(root = document) {
-  root.querySelectorAll(".compact-title").forEach(title => {
+  matchingElements(root, ".compact-title").forEach(title => {
     title.classList.remove("use-short-title");
     const full = title.querySelector(".compact-title-full");
     if (!full) return;
@@ -4969,15 +5096,7 @@ function updateCompactTitleLabels(root = document) {
     }
   });
 
-  root.querySelectorAll(".draft-title-row").forEach(row => {
-    row.classList.remove("use-short-title");
-    const input = row.querySelector(".draft-title-input");
-    if (!input) return;
-    const textWidth = measuredTextWidth(input.value, input) + horizontalPaddingWidth(input);
-    if (textWidth > input.clientWidth + 1) {
-      row.classList.add("use-short-title");
-    }
-  });
+  updateAllDraftHeadingDensity(root);
 }
 
 function scrollTabsToEnd() {
@@ -5338,7 +5457,9 @@ function renderEditor() {
 
   hydrateVisibleEditors(visibleEditorItems());
   observeNotesHeadingDensity();
+  observeDraftHeadingDensity();
   queueNotesHeadingDensityUpdate();
+  queueDraftHeadingDensityUpdate();
   window.requestAnimationFrame(() => refreshSearchResults({ allowRender: false }));
 }
 

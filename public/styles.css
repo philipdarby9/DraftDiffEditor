@@ -1462,12 +1462,35 @@ select:hover {
 }
 
 .panel-heading:not(.notes-toggle-heading) {
+  --draft-heading-title-track: minmax(0, 1fr);
   height: 40px;
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto auto;
+  grid-template-columns: var(--draft-heading-title-track) auto auto minmax(0, max-content);
   grid-template-rows: 1fr;
   align-items: center;
   gap: 0 6px;
+}
+
+.panel-heading:not(.notes-toggle-heading).draft-heading-title-short {
+  --draft-heading-title-track: minmax(var(--draft-heading-title-min, 24px), 1fr);
+}
+
+.panel-heading:not(.notes-toggle-heading).draft-heading-no-detach {
+  grid-template-columns: var(--draft-heading-title-track) auto minmax(0, max-content);
+}
+
+.panel-heading:not(.notes-toggle-heading).draft-heading-hide-meta {
+  grid-template-columns: var(--draft-heading-title-track) auto auto;
+}
+
+.panel-heading:not(.notes-toggle-heading).draft-heading-hide-meta.draft-heading-no-detach,
+.panel-heading:not(.notes-toggle-heading).draft-heading-hide-meta.draft-heading-hide-detach {
+  grid-template-columns: var(--draft-heading-title-track) auto;
+}
+
+.panel-heading:not(.notes-toggle-heading).draft-heading-hide-meta.draft-heading-no-detach.draft-heading-hide-format,
+.panel-heading:not(.notes-toggle-heading).draft-heading-hide-meta.draft-heading-hide-detach.draft-heading-hide-format {
+  grid-template-columns: var(--draft-heading-title-track);
 }
 
 .panel-title-row {
@@ -1486,8 +1509,13 @@ select:hover {
   grid-row: 1;
   align-self: center;
   margin-left: 0;
+  min-width: 0;
   max-width: none;
   text-align: right;
+}
+
+.panel-heading:not(.notes-toggle-heading).draft-heading-no-detach .meta {
+  grid-column: 3;
 }
 
 .notes-display-page .panel-heading {
@@ -1852,6 +1880,9 @@ h2 {
   font-weight: 600;
   line-height: 1.3;
   letter-spacing: -0.012em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: clip;
 }
 
 .draft-title-row.use-short-title .draft-title-input:not(:focus) {
@@ -1861,6 +1892,12 @@ h2 {
 
 .draft-title-row.use-short-title .draft-title-input:not(:focus) + .draft-title-short-display {
   display: flex;
+}
+
+.draft-heading-hide-meta .meta,
+.draft-heading-hide-detach .panel-detach-button,
+.draft-heading-hide-format .panel-format-toggle {
+  display: none;
 }
 
 .rich-editor-shell {
