@@ -522,14 +522,30 @@ function formatDate(iso) {
   }).format(date);
 }
 
-function pageBlock(title, createdAt, content) {
+function wordCountForText(text) {
+  const matches = asText(text).match(/[\p{L}\p{N}]+(?:[\u0027\u2019/-][\p{L}\p{N}]+)*|\*+/gu);
+  return matches ? matches.length : 0;
+}
+
+function pageBlock(title, createdAt, content, metadata = {}) {
   const body = asText(content).trimEnd();
-  return [
+  const lines = [
     `Created: ${formatDate(createdAt)}`,
-    title,
-    "",
-    body || "[No text yet]"
-  ].join("\n");
+    title
+  ];
+  if (metadata.updatedAt) lines.push(`Last edited: ${formatDate(metadata.updatedAt)}`);
+  if (Number.isFinite(metadata.wordCount)) {
+    lines.push(`Word count: ${Number(metadata.wordCount).toLocaleString("en-GB")}`);
+  }
+  lines.push("", body || "[No text yet]");
+  return lines.join("\n");
+}
+
+function draftBlockMetadata(draft) {
+  return {
+    updatedAt: draft.updatedAt || draft.createdAt,
+    wordCount: wordCountForText(draft.content)
+  };
 }
 
 function formatExport(state) {
@@ -539,7 +555,7 @@ function formatExport(state) {
 
   state.drafts.forEach((draft, index) => {
     const title = draft.title || `Draft ${index + 1}`;
-    pages.push(pageBlock(title, draft.createdAt, draft.content));
+    pages.push(pageBlock(title, draft.createdAt, draft.content, draftBlockMetadata(draft)));
     pages.push(pageBlock(`${title} Notes`, draft.notes.createdAt, draft.notes.content));
   });
 

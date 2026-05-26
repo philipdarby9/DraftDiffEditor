@@ -119,6 +119,7 @@ let detachedUnitKeys = new Set();
 let detachedPanelWindows = new Map();
 let tabScrollbarDrag = null;
 let fallbackZoomFactor = 1;
+let recentSubmenuTracking = false;
 let diffRenderToken = 0;
 let versionHistoryDraftId = null;
 let searchRefreshTimer = null;
@@ -553,13 +554,49 @@ function mainDisplayPageCount() {
   return count;
 }
 
+function versionHistoryPageCount() {
+  if (!state || !versionHistoryDraftId) return 0;
+  if (versionHistoryDraftId === STORY_KEY) return ensureProjectNotesVersionHistory().length;
+
+  const draft = draftById(versionHistoryDraftId);
+  return draft ? ensureDraftVersionHistory(draft).length : 0;
+}
+
+function currentPagesOnScreenLimit() {
+  if (!state) return clampPagesOnScreen(DEFAULT_PAGES_ON_SCREEN);
+
+  if (versionHistoryDraftId) {
+    return Math.max(1, Math.min(4, versionHistoryPageCount() || 1));
+  }
+
+  if (showChanges) {
+    return Math.max(1, Math.min(4, selectedCompareIndexes().length || 1));
+  }
+
+  return Math.max(1, Math.min(4, selectedDisplayPageCount() || 1));
+}
+
 function normalizePagesOnScreenForSelection(value) {
-  return clampPagesOnScreen(value);
+  return Math.min(clampPagesOnScreen(value), currentPagesOnScreenLimit());
+}
+
+function updatePagesOnScreenControls() {
+  if (!els.pagesOnScreen) return;
+
+  const maxPages = currentPagesOnScreenLimit();
+  els.pagesOnScreen.querySelectorAll("[data-pages-on-screen]").forEach(button => {
+    const value = Number(button.dataset.pagesOnScreen);
+    const disabled = value > maxPages;
+    button.disabled = disabled;
+    button.setAttribute("aria-disabled", String(disabled));
+    button.setAttribute("aria-pressed", String(!disabled && value === pagesOnScreen));
+  });
 }
 
 function syncPagesOnScreenToDisplaySelection() {
   const normalizedPagesOnScreen = normalizePagesOnScreenForSelection(pagesOnScreen);
   if (normalizedPagesOnScreen !== pagesOnScreen) setPagesOnScreen(normalizedPagesOnScreen);
+  else updatePagesOnScreenControls();
 }
 
 function saveFileViewStates() {
@@ -769,8 +806,93 @@ function closeTopMenus(exceptMenu = null) {
 }
 
 function setRecentSubmenuOpen(open) {
-  els.fileOpenRecent?.classList.toggle("is-open", Boolean(open));
-  els.fileOpenRecentButton?.setAttribute("aria-expanded", String(Boolean(open)));
+  const isOpen = Boolean(open);
+  els.fileOpenRecent?.classList.toggle("is-open", isOpen);
+  els.fileOpenRecentButton?.setAttribute("aria-expanded", String(isOpen));
+  if (isOpen) {
+    startRecentSubmenuTracking();
+  } else {
+    stopRecentSubmenuTracking();
+  }
+}
+
+function pointInRect(clientX, clientY, rect, padding = 0) {
+  if (!rect) return false;
+  return clientX >= rect.left - padding &&
+    clientX <= rect.right + padding &&
+    clientY >= rect.top - padding &&
+    clientY <= rect.bottom + padding;
+}
+
+function pointInTriangle(point, a, b, c) {
+  const sign = (p1, p2, p3) =>
+    (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y);
+  const hasNegative = sign(point, a, b) < 0 || sign(point, b, c) < 0 || sign(point, c, a) < 0;
+  const hasPositive = sign(point, a, b) > 0 || sign(point, b, c) > 0 || sign(point, c, a) > 0;
+  return !(hasNegative && hasPositive);
+}
+
+function isPointInRecentSubmenuPanel(clientX, clientY) {
+  if (!els.fileOpenRecentMenu) return false;
+  return pointInRect(clientX, clientY, els.fileOpenRecentMenu.getBoundingClientRect(), 3);
+}
+
+function isPointInRecentSubmenuSafeArea(clientX, clientY) {
+  if (!els.fileOpenRecent || !els.fileOpenRecentButton || !els.fileOpenRecentMenu) return false;
+
+  const triggerRect = els.fileOpenRecentButton.getBoundingClientRect();
+  const menuRect = els.fileOpenRecent.closest(".file-menu-panel")?.getBoundingClientRect();
+  const submenuRect = els.fileOpenRecentMenu.getBoundingClientRect();
+  if (pointInRect(clientX, clientY, triggerRect, 3) || pointInRect(clientX, clientY, submenuRect, 3)) return true;
+
+  const bridgeRect = {
+    left: Math.min(triggerRect.right, submenuRect.left),
+    right: Math.max(triggerRect.right, submenuRect.left),
+    top: Math.min(triggerRect.top, submenuRect.top),
+    bottom: Math.max(menuRect?.bottom || triggerRect.bottom, submenuRect.bottom)
+  };
+  if (pointInRect(clientX, clientY, bridgeRect, 3)) return true;
+
+  if (!menuRect) return false;
+  return pointInTriangle(
+    { x: clientX, y: clientY },
+    { x: menuRect.left, y: triggerRect.top },
+    { x: triggerRect.right, y: triggerRect.bottom },
+    { x: triggerRect.right, y: menuRect.bottom }
+  );
+}
+
+function handleRecentSubmenuPointerMove(event) {
+  if (!els.fileOpenRecent?.classList.contains("is-open")) return;
+  if (!isPointInRecentSubmenuSafeArea(event.clientX, event.clientY)) setRecentSubmenuOpen(false);
+}
+
+function handleRecentSubmenuWheel(event) {
+  if (!els.fileOpenRecent?.classList.contains("is-open")) return;
+
+  if (!isPointInRecentSubmenuSafeArea(event.clientX, event.clientY)) {
+    setRecentSubmenuOpen(false);
+    return;
+  }
+
+  if (isPointInRecentSubmenuPanel(event.clientX, event.clientY) || !els.fileOpenRecentMenu) return;
+  if (els.fileOpenRecentMenu.scrollHeight <= els.fileOpenRecentMenu.clientHeight) return;
+  event.preventDefault();
+  els.fileOpenRecentMenu.scrollTop += event.deltaY || event.deltaX;
+}
+
+function startRecentSubmenuTracking() {
+  if (recentSubmenuTracking) return;
+  recentSubmenuTracking = true;
+  document.addEventListener("pointermove", handleRecentSubmenuPointerMove);
+  document.addEventListener("wheel", handleRecentSubmenuWheel, { passive: false });
+}
+
+function stopRecentSubmenuTracking() {
+  if (!recentSubmenuTracking) return;
+  recentSubmenuTracking = false;
+  document.removeEventListener("pointermove", handleRecentSubmenuPointerMove);
+  document.removeEventListener("wheel", handleRecentSubmenuWheel);
 }
 
 function setStatus(text) {
@@ -2066,11 +2188,7 @@ function setPagesOnScreen(value) {
   pagesOnScreen = normalizePagesOnScreenForSelection(value);
   normalizePagePanePercentsForLayout();
   applyPagePaneStyles();
-  if (els.pagesOnScreen) {
-    els.pagesOnScreen.querySelectorAll("[data-pages-on-screen]").forEach(button => {
-      button.setAttribute("aria-pressed", String(Number(button.dataset.pagesOnScreen) === pagesOnScreen));
-    });
-  }
+  updatePagesOnScreenControls();
   saveCurrentViewState();
   queueViewStateSave(500);
   if (changesPanelIsOpen()) renderDiff();
@@ -3208,14 +3326,26 @@ function editorPlainText(editorEl) {
   return plainTextFromNode(editorEl).trimEnd();
 }
 
-function exportPageBlock(title, createdAt, content) {
+function exportPageBlock(title, createdAt, content, metadata = {}) {
   const body = String(content || "").trimEnd();
-  return [
+  const lines = [
     `Created: ${formatDateForExport(createdAt)}`,
-    title,
-    "",
-    body || "[No text yet]"
-  ].join("\n");
+    title
+  ];
+  if (metadata.updatedAt) lines.push(`Last edited: ${formatDateForExport(metadata.updatedAt)}`);
+  if (Number.isFinite(metadata.wordCount)) {
+    lines.push(`Word count: ${Number(metadata.wordCount).toLocaleString("en-GB")}`);
+  }
+  lines.push("", body || "[No text yet]");
+  return lines.join("\n");
+}
+
+function draftExportMetadata(draft) {
+  ensurePageFields(draft);
+  return {
+    updatedAt: draft.updatedAt || draft.createdAt,
+    wordCount: pageWordCount(draft)
+  };
 }
 
 function formatExportText(projectState) {
@@ -3225,7 +3355,7 @@ function formatExportText(projectState) {
 
   projectState.drafts.forEach((draft, index) => {
     const title = draft.title || `Draft ${index + 1}`;
-    pages.push(exportPageBlock(title, draft.createdAt, draft.content));
+    pages.push(exportPageBlock(title, draft.createdAt, draft.content, draftExportMetadata(draft)));
     pages.push(exportPageBlock(`${title} Notes`, draft.notes.createdAt, draft.notes.content));
   });
 
@@ -3274,13 +3404,32 @@ function parseExportBlock(block) {
     throw new Error("This file does not match the Draft Diff text format.");
   }
 
-  const bodyLines = lines.slice(2);
-  if (bodyLines[0] === "") bodyLines.shift();
+  let updatedAt = "";
+  let bodyStart = 2;
+  for (; bodyStart < lines.length; bodyStart += 1) {
+    const line = lines[bodyStart] || "";
+    if (line === "") {
+      bodyStart += 1;
+      break;
+    }
+
+    const lastEditedMatch = /^Last edited:\s*(.*)$/i.exec(line);
+    if (lastEditedMatch) {
+      updatedAt = parseCreatedAt(lastEditedMatch[1]);
+      continue;
+    }
+
+    if (/^Word count:\s*/i.test(line)) continue;
+    break;
+  }
+
+  const bodyLines = lines.slice(bodyStart);
   const content = bodyLines.join("\n").replace(/\n+$/g, "");
 
   return {
     title: lines[1].trim() || "Untitled",
     createdAt: parseCreatedAt(createdMatch[1]),
+    updatedAt,
     content: content === "[No text yet]" ? "" : content
   };
 }
@@ -3293,6 +3442,7 @@ function pageFromImportedBlock(block, fallbackTitle, previousPage = null) {
   const title = block?.title || fallbackTitle;
   const content = block?.content || "";
   const importedCreatedAt = block?.createdAt || nowIso();
+  const importedUpdatedAt = block?.updatedAt || importedCreatedAt;
   const createdAt = previousPage?.createdAt || importedCreatedAt;
   const previousContent = previousPage
     ? previousPage.content || plainTextFromHtml(previousPage.contentHtml || "")
@@ -3302,7 +3452,7 @@ function pageFromImportedBlock(block, fallbackTitle, previousPage = null) {
     id: previousPage?.id || makeId("page"),
     title,
     createdAt,
-    updatedAt: contentChanged ? nowIso() : previousPage?.updatedAt || createdAt,
+    updatedAt: contentChanged ? nowIso() : previousPage?.updatedAt || importedUpdatedAt || createdAt,
     content,
     contentHtml: textToHtml(content),
     format: preservedFormat(previousPage)
@@ -5906,7 +6056,7 @@ function beforeIndexForSelectedDraft(indexes, position) {
 }
 
 function compareVisiblePageCount(pageCount) {
-  return clampPagesOnScreen(pagesOnScreen);
+  return Math.max(1, Math.min(normalizePagesOnScreenForSelection(pagesOnScreen), Number(pageCount) || 1));
 }
 
 function renderComparisonStrip(indexes) {
@@ -6071,6 +6221,7 @@ function renderChangesVisibility() {
   } else {
     els.toggleChanges.textContent = buttonLabel;
   }
+  syncPagesOnScreenToDisplaySelection();
 }
 
 function render() {
@@ -7165,7 +7316,7 @@ els.storyTab.addEventListener("click", event => {
   renderDraftTabs();
   saveCurrentViewState();
   queueViewStateSave(0);
-  focusPageEditor(STORY_KEY);
+  focusPageEditor(STORY_KEY, { canvasScrollBehavior: "smooth" });
 });
 
 els.storyDisplayToggle.addEventListener("change", event => {

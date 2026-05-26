@@ -13,10 +13,13 @@
   --border-strong: oklch(75% 0.014 70);
   --hover: oklch(93.5% 0.014 80);
   --selected: oklch(91% 0.022 80);
+  --draft-tab-selected: oklch(91.8% 0.017 80);
+  --draft-tab-selected-border: oklch(84% 0.014 76);
   --accent: oklch(48% 0.13 252);
   --accent-deep: oklch(40% 0.14 252);
   --accent-soft: oklch(94% 0.042 252);
-  --resize-accent: oklch(66% 0.16 252);
+  --resize-accent: var(--draft-tab-selected);
+  --resize-accent-border: var(--draft-tab-selected-border);
   --accent-fg: oklch(99% 0.005 252);
   --focus-ring: oklch(60% 0.16 252 / 0.45);
   --diff-add: oklch(42% 0.15 148);
@@ -572,13 +575,11 @@ textarea,
 }
 
 .file-submenu:hover > .file-submenu-panel,
-.file-submenu:focus-within > .file-submenu-panel,
 .file-submenu.is-open > .file-submenu-panel {
   display: grid;
 }
 
 .file-submenu:hover > button,
-.file-submenu:focus-within > button,
 .file-submenu.is-open > button {
   background: var(--accent-soft);
   color: var(--accent-deep);
@@ -899,8 +900,8 @@ textarea,
 }
 
 .page-tab.active {
-  background: oklch(91.8% 0.017 80);
-  border-color: oklch(84% 0.014 76);
+  background: var(--draft-tab-selected);
+  border-color: var(--draft-tab-selected-border);
   color: var(--fg);
   z-index: 2;
   box-shadow:
@@ -1353,8 +1354,8 @@ select:hover {
 .notes-resizer:hover::after,
 .notes-resizer:focus-visible::after,
 .draft-stack-page.is-resizing .notes-resizer::after {
-  border-color: var(--resize-accent);
-  background: var(--accent-soft);
+  border-color: var(--resize-accent-border);
+  background: var(--resize-accent);
   box-shadow: 0 4px 16px oklch(22% 0.03 75 / 0.16);
 }
 
