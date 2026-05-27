@@ -12,6 +12,7 @@ const els = {
   fileOpenLocation: document.querySelector("#file-open-location"),
   fileSaveAs: document.querySelector("#file-save-as"),
   fileVersionHistoryFolder: document.querySelector("#file-version-history-folder"),
+  fileActivateBackup: document.querySelector("#file-activate-backup"),
   fileClose: document.querySelector("#file-close"),
   editUndo: document.querySelector("#edit-undo"),
   editRedo: document.querySelector("#edit-redo"),
@@ -85,6 +86,7 @@ let projectFileName = "draft-history.txt";
 let linkedTextPath = "";
 let versionHistoryFolderPath = "";
 let versionHistoryPath = "";
+let backupFolderPath = "";
 let stateRevision = 0;
 let saveQueued = false;
 let saveRetryCount = 0;
@@ -791,6 +793,16 @@ function updateProjectTitle() {
   projectFileName = title;
   if (els.projectTitle) els.projectTitle.textContent = title;
   document.title = `${title} - Draft Diff Editor`;
+}
+
+function syncBackupMenu() {
+  if (!els.fileActivateBackup) return;
+
+  const active = Boolean(backupFolderPath);
+  els.fileActivateBackup.setAttribute("aria-pressed", String(active));
+  els.fileActivateBackup.title = active
+    ? `Backups active: ${backupFolderPath}\\original txt; version histories: ${backupFolderPath}\\version history md; JSON: ${backupFolderPath}\\json`
+    : "Choose a backup and version history folder";
 }
 
 function closeFileMenu() {
@@ -3329,8 +3341,8 @@ function editorPlainText(editorEl) {
 function exportPageBlock(title, createdAt, content, metadata = {}) {
   const body = String(content || "").trimEnd();
   const lines = [
-    `Created: ${formatDateForExport(createdAt)}`,
-    title
+    title,
+    `Created: ${formatDateForExport(createdAt)}`
   ];
   if (metadata.updatedAt) lines.push(`Last edited: ${formatDateForExport(metadata.updatedAt)}`);
   if (Number.isFinite(metadata.wordCount)) {
@@ -3348,9 +3360,21 @@ function draftExportMetadata(draft) {
   };
 }
 
+function projectNotesExportMetadata(projectState) {
+  ensurePageFields(projectState.initialNotes);
+  return {
+    updatedAt: projectState.initialNotes.updatedAt || projectState.initialNotes.createdAt
+  };
+}
+
 function formatExportText(projectState) {
   const pages = [
-    exportPageBlock(PROJECT_NOTES_TITLE, projectState.initialNotes.createdAt, projectState.initialNotes.content)
+    exportPageBlock(
+      PROJECT_NOTES_TITLE,
+      projectState.initialNotes.createdAt,
+      projectState.initialNotes.content,
+      projectNotesExportMetadata(projectState)
+    )
   ];
 
   projectState.drafts.forEach((draft, index) => {
@@ -3399,8 +3423,10 @@ function parseCreatedAt(value) {
 
 function parseExportBlock(block) {
   const lines = String(block || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  const createdMatch = /^Created:\s*(.*)$/i.exec(lines[0] || "");
-  if (!createdMatch || !lines[1]) {
+  const firstLineCreatedMatch = /^Created:\s*(.*)$/i.exec(lines[0] || "");
+  const title = firstLineCreatedMatch ? lines[1] : lines[0];
+  const createdMatch = firstLineCreatedMatch || /^Created:\s*(.*)$/i.exec(lines[1] || "");
+  if (!createdMatch || !title) {
     throw new Error("This file does not match the Draft Diff text format.");
   }
 
@@ -3427,7 +3453,7 @@ function parseExportBlock(block) {
   const content = bodyLines.join("\n").replace(/\n+$/g, "");
 
   return {
-    title: lines[1].trim() || "Untitled",
+    title: title.trim() || "Untitled",
     createdAt: parseCreatedAt(createdMatch[1]),
     updatedAt,
     content: content === "[No text yet]" ? "" : content
@@ -4783,12 +4809,32 @@ function countMeaningfulChanges(parts) {
   return count;
 }
 
-function diffTokenStats(parts) {
-  return parts.reduce((stats, part) => {
-    if (part.type === "added" && part.text.trim()) stats.adds += 1;
-    if (part.type === "removed" && part.text.trim()) stats.dels += 1;
-    return stats;
-  }, { adds: 0, dels: 0 });
+function countDiffSegments(parts, type) {
+  let count = 0;
+  let text = "";
+
+  const flush = () => {
+    if (text.trim()) count += 1;
+    text = "";
+  };
+
+  parts.forEach(part => {
+    if (part.type === type) {
+      text += part.text || "";
+      return;
+    }
+    if (text) flush();
+  });
+  if (text) flush();
+
+  return count;
+}
+
+function diffSegmentStats(parts) {
+  return {
+    adds: countDiffSegments(parts, "added"),
+    dels: countDiffSegments(parts, "removed")
+  };
 }
 
 function pairForIndexes(beforeIndex, afterIndex) {
@@ -5802,7 +5848,7 @@ function markedLaterPageHtml(pair, diff = diffRichPages(pair.before, pair.after)
 
 function markedComparePageHtml(pair) {
   const diff = diffRichPages(pair.before, pair.after);
-  const stats = diffTokenStats(diff);
+  const stats = diffSegmentStats(diff);
 
   return `
     <article class="compare-page later-page" data-compare-page-id="${escapeHtml(pair.after.id)}">
@@ -5944,7 +5990,7 @@ function versionComparePageHtml(draft, version, index, previousVersion = null) {
     label: `${page.title} compared to ${previousPage.title}`
   };
   const diff = diffRichPages(previousPage, page);
-  const stats = diffTokenStats(diff);
+  const stats = diffSegmentStats(diff);
   const recordedText = formatVersionDate(page.createdAt);
   const fullRecordedText = formatDate(page.createdAt);
 
@@ -5991,7 +6037,7 @@ function projectNotesVersionComparePageHtml(version, index, previousVersion = nu
     label: `${page.title} compared to ${previousPage.title}`
   };
   const diff = diffRichPages(previousPage, page);
-  const stats = diffTokenStats(diff);
+  const stats = diffSegmentStats(diff);
   const recordedText = formatVersionDate(page.createdAt);
   const fullRecordedText = formatDate(page.createdAt);
 
@@ -6358,7 +6404,11 @@ function updateStoragePathsFromPayload(payload = {}) {
   linkedTextPath = payload.linkedTextPath || linkedTextPath || "";
   versionHistoryFolderPath = payload.versionHistoryFolderPath || versionHistoryFolderPath || "";
   versionHistoryPath = payload.versionHistoryPath || versionHistoryPath || "";
+  if (Object.prototype.hasOwnProperty.call(payload, "backupFolderPath")) {
+    backupFolderPath = payload.backupFolderPath || payload.versionHistoryFolderPath || "";
+  }
   if (payload.linkedTextFileName) projectFileName = payload.linkedTextFileName;
+  syncBackupMenu();
 }
 
 async function applyExternalVersionHistory(projectState, options = {}) {
@@ -6643,7 +6693,7 @@ async function selectVersionHistoryFolder() {
     flushDraftVersionCaptures();
     rememberLinkedProjectState();
     window.clearTimeout(saveTimer);
-    setStatus("Choose a version history folder...");
+    setStatus("Choose a backup and version history folder...");
 
     const response = await fetch("/api/version-history-folder/select", {
       method: "POST",
@@ -6658,7 +6708,7 @@ async function selectVersionHistoryFolder() {
 
     const payload = await response.json();
     if (payload.cancelled) {
-      setStatus("Version history folder unchanged");
+      setStatus("Backup and version history folder unchanged");
       return;
     }
 
@@ -6674,12 +6724,59 @@ async function selectVersionHistoryFolder() {
     const migratedText = Number(payload.migratedCount) > 0
       ? `; migrated ${payload.migratedCount} history file${Number(payload.migratedCount) === 1 ? "" : "s"}`
       : "";
-    setStatus(`Version history folder set${migratedText}${loadedText}`);
+    setStatus(`Backup and version history folder set${migratedText}${loadedText}`);
   } catch (error) {
     if (isAbortError(error)) return;
     console.error(error);
-    setStatus("Version history folder failed");
+    setStatus("Backup and version history folder failed");
   }
+}
+
+async function toggleBackup() {
+  closeFileMenu();
+
+  try {
+    if (backupFolderPath) {
+      const response = await fetch("/api/backup/deactivate", { method: "POST" });
+      if (!response.ok) throw new Error(await response.text());
+
+      const payload = await response.json();
+      updateStoragePathsFromPayload(payload);
+      setStatus("Backup deactivated");
+      return;
+    }
+
+    setStatus("Choose a backup and version history folder...");
+    const response = await fetch("/api/backup/activate", { method: "POST" });
+    if (!response.ok) throw new Error(await response.text());
+
+    const payload = await response.json();
+    if (payload.cancelled) {
+      setStatus("Backup and version history folder unchanged");
+      return;
+    }
+
+    updateStoragePathsFromPayload(payload);
+    setStatus("Backup activated");
+  } catch (error) {
+    if (isAbortError(error)) return;
+    console.error(error);
+    setStatus("Backup setup failed");
+  }
+}
+
+function prepareClosePayload() {
+  if (!state) return "";
+
+  syncFromInputs();
+  saveCurrentViewState();
+  flushDraftVersionCaptures();
+  rememberLinkedProjectState();
+  return JSON.stringify({
+    state,
+    filePath: linkedTextPath,
+    fileName: projectFileName
+  });
 }
 
 async function closeApp() {
@@ -6687,9 +6784,8 @@ async function closeApp() {
   window.clearTimeout(saveTimer);
 
   try {
+    const body = prepareClosePayload();
     if (state) {
-      syncFromInputs();
-      saveCurrentViewState();
       await saveViewStateNow();
     }
     isClosingApp = true;
@@ -6698,11 +6794,7 @@ async function closeApp() {
     const response = await fetch("/api/shutdown", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: state ? JSON.stringify({
-        state,
-        filePath: linkedTextPath,
-        fileName: projectFileName
-      }) : ""
+      body
     });
     if (!response.ok) throw new Error(await response.text());
 
@@ -6792,8 +6884,10 @@ async function loadState() {
   linkedTextPath = payload.linkedTextPath || "";
   versionHistoryFolderPath = payload.versionHistoryFolderPath || "";
   versionHistoryPath = payload.versionHistoryPath || "";
+  backupFolderPath = payload.backupFolderPath || payload.versionHistoryFolderPath || "";
   projectFileName = payload.linkedTextFileName || fileNameFromPath(exportPath) || projectFileName;
   updateProjectTitle();
+  syncBackupMenu();
   restoreViewStateForProject();
   setStatus(linkedTextPath ? `Saved ${formatDate(state.updatedAt)}` : "Saved companion; no text file linked");
   render();
@@ -7269,6 +7363,7 @@ els.fileOpenRecentMenu?.addEventListener("click", event => {
 els.fileOpenLocation.addEventListener("click", openFileLocation);
 els.fileSaveAs.addEventListener("click", () => saveAsTextProject());
 els.fileVersionHistoryFolder?.addEventListener("click", selectVersionHistoryFolder);
+els.fileActivateBackup?.addEventListener("click", toggleBackup);
 els.fileClose.addEventListener("click", closeApp);
 els.editUndo.addEventListener("click", () => {
   undoProjectChange();
@@ -7909,27 +8004,29 @@ window.addEventListener("resize", () => window.requestAnimationFrame(() => updat
 
 window.addEventListener("beforeunload", () => {
   if (!state || isClosingApp) return;
-  syncFromInputs();
   sendViewStateBeacon();
-  const blob = new Blob([JSON.stringify({
-    state,
-    filePath: linkedTextPath,
-    fileName: projectFileName
-  })], { type: "application/json" });
+  const blob = new Blob([prepareClosePayload()], { type: "application/json" });
   navigator.sendBeacon("/api/close", blob);
 });
 
 window.draftDiffPersistBeforeClose = async () => {
   if (!state) return true;
   window.clearTimeout(viewStateSaveTimer);
-  syncFromInputs();
+  const body = prepareClosePayload();
   await saveViewStateNow();
+  const response = await fetch("/api/close", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body
+  });
+  if (!response.ok) throw new Error(await response.text());
   return true;
 };
 
 populateGlobalFormatControls();
 updateMenuShortcutLabels();
 syncPanelDragMenu();
+syncBackupMenu();
 pingServer();
 window.setInterval(pingServer, 5_000);
 

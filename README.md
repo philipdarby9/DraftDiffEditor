@@ -38,9 +38,11 @@ Packaged desktop shortcut example:
 "C:\Program Files\Draft Diff Editor\Draft Diff Editor.exe" --data-dir="D:\Writing\Draft Diff Editor Data"
 ```
 
-Use `File` -> `Version history folder` to choose or create a separate folder for version histories. When the folder is selected, the app batch-migrates embedded histories from the current project, `project.json`, and cached linked-file states into sidecar files named like `draft-history.version-history.json`. After that, the main `project.json` and linked-file cache store projects without embedded history arrays. When a text file is opened, the app looks for a matching sidecar by source path metadata or by filename, then merges those histories into the matching Project notes and draft pages.
+Use `File` -> `Version history folder` to choose or create a shared backup/history folder. Version-history JSON sidecars are written under that folder's `json` subfolder, named like `draft-history.version-history.json`. When a text file is opened, the app looks for a matching sidecar by source path metadata or by filename, then merges those histories into the matching Project notes and draft pages.
 
-To move existing histories into a history folder, open the project, choose `File` -> `Version history folder`, select or create the folder, and let the app save. Existing embedded histories are written into the matching sidecar file.
+Use `File` -> `Activate backup` to choose or create the same shared folder. When backup is active, closing the app writes the latest companion text file under `original txt` and a Markdown version-history report under `version history md`.
+
+To move existing histories into the shared folder, open the project, choose `File` -> `Version history folder`, select or create the folder, and let the app save. Existing embedded histories are written into the matching sidecar file in `json`.
 
 To create a Windows build:
 
@@ -85,7 +87,7 @@ On Windows, AppImage packaging may require symlink privileges. If Windows report
 - Gives each writing page a formatting ribbon that appears from the top border of that page.
 - Stores page font settings separately for each story, draft, and notes page.
 - Shows the active companion text file name in the title bar.
-- Includes a `File` menu with `New`, `Open...`, `Open recent` (`Ctrl+Shift+O`), `Save as...`, and `Version history folder` (`Ctrl+Alt+H`) for creating, importing, reopening recent files, saving renamed text-backed projects, and choosing where history sidecars live.
+- Includes a `File` menu with `New`, `Open...`, `Open recent` (`Ctrl+Shift+O`), `Save as...`, `Version history folder` (`Ctrl+Alt+H`), and `Activate backup` for creating, importing, reopening recent files, saving renamed text-backed projects, choosing the shared history/backup folder, and enabling close-time backups.
 - Lets you choose specific drafts to compare.
 - Shows selected comparisons as a fixed-size horizontal strip of draft pages, with later drafts marking words, phrases, spaces, tabs, bold, and italic changes inline.
 - Compares selected drafts either to the first selected draft or to the previous selected draft.

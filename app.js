@@ -1930,19 +1930,32 @@ function editorPlainText(editorEl) {
   return plainTextFromNode(editorEl).trimEnd();
 }
 
-function exportPageBlock(title, createdAt, content) {
+function exportPageBlock(title, createdAt, content, metadata = {}) {
   const body = String(content || "").trimEnd();
-  return [
-    `Created: ${formatDateForExport(createdAt)}`,
+  const lines = [
     title,
-    "",
-    body || "[No text yet]"
-  ].join("\n");
+    `Created: ${formatDateForExport(createdAt)}`,
+  ];
+  if (metadata.updatedAt) lines.push(`Last edited: ${formatDateForExport(metadata.updatedAt)}`);
+  lines.push("", body || "[No text yet]");
+  return lines.join("\n");
+}
+
+function projectNotesExportMetadata(projectState) {
+  ensurePageFields(projectState.initialNotes);
+  return {
+    updatedAt: projectState.initialNotes.updatedAt || projectState.initialNotes.createdAt
+  };
 }
 
 function formatExportText(projectState) {
   const pages = [
-    exportPageBlock(PROJECT_NOTES_TITLE, projectState.initialNotes.createdAt, projectState.initialNotes.content)
+    exportPageBlock(
+      PROJECT_NOTES_TITLE,
+      projectState.initialNotes.createdAt,
+      projectState.initialNotes.content,
+      projectNotesExportMetadata(projectState)
+    )
   ];
 
   projectState.drafts.forEach((draft, index) => {
@@ -1991,17 +2004,30 @@ function parseCreatedAt(value) {
 
 function parseExportBlock(block) {
   const lines = String(block || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
-  const createdMatch = /^Created:\s*(.*)$/i.exec(lines[0] || "");
-  if (!createdMatch || !lines[1]) {
+  const firstLineCreatedMatch = /^Created:\s*(.*)$/i.exec(lines[0] || "");
+  const title = firstLineCreatedMatch ? lines[1] : lines[0];
+  const createdMatch = firstLineCreatedMatch || /^Created:\s*(.*)$/i.exec(lines[1] || "");
+  if (!createdMatch || !title) {
     throw new Error("This file does not match the Draft Diff text format.");
   }
 
-  const bodyLines = lines.slice(2);
-  if (bodyLines[0] === "") bodyLines.shift();
+  let bodyStart = 2;
+  for (; bodyStart < lines.length; bodyStart += 1) {
+    const line = lines[bodyStart] || "";
+    if (line === "") {
+      bodyStart += 1;
+      break;
+    }
+
+    if (/^Last edited:\s*/i.test(line) || /^Word count:\s*/i.test(line)) continue;
+    break;
+  }
+
+  const bodyLines = lines.slice(bodyStart);
   const content = bodyLines.join("\n").replace(/\n+$/g, "");
 
   return {
-    title: lines[1].trim() || "Untitled",
+    title: title.trim() || "Untitled",
     createdAt: parseCreatedAt(createdMatch[1]),
     content: content === "[No text yet]" ? "" : content
   };

@@ -12,7 +12,9 @@ const EXPORT_FILE = path.join(DATA_DIR, "draft-history.txt");
 const TEXT_FILE_LINK_FILE = path.join(DATA_DIR, "text-file-link.json");
 const TEXT_FILE_STATES_FILE = path.join(DATA_DIR, "text-file-states.json");
 const VERSION_HISTORY_FOLDER_FILE = path.join(DATA_DIR, "version-history-folder.json");
+const BACKUP_FOLDER_FILE = path.join(DATA_DIR, "backup-folder.json");
 const VERSION_HISTORY_FILE_SUFFIX = ".version-history.json";
+const BACKUP_HISTORY_REPORT_SUFFIX = ".version-history.md";
 const PORT = Number(process.env.PORT || 4173);
 const PROJECT_NOTES_TITLE = "Project notes";
 const FORMAT_DEFAULT_VERSION = 2;
@@ -530,8 +532,8 @@ function wordCountForText(text) {
 function pageBlock(title, createdAt, content, metadata = {}) {
   const body = asText(content).trimEnd();
   const lines = [
-    `Created: ${formatDate(createdAt)}`,
-    title
+    title,
+    `Created: ${formatDate(createdAt)}`
   ];
   if (metadata.updatedAt) lines.push(`Last edited: ${formatDate(metadata.updatedAt)}`);
   if (Number.isFinite(metadata.wordCount)) {
@@ -548,9 +550,20 @@ function draftBlockMetadata(draft) {
   };
 }
 
+function projectNotesBlockMetadata(state) {
+  return {
+    updatedAt: state.initialNotes.updatedAt || state.initialNotes.createdAt
+  };
+}
+
 function formatExport(state) {
   const pages = [
-    pageBlock(PROJECT_NOTES_TITLE, state.initialNotes.createdAt, state.initialNotes.content)
+    pageBlock(
+      PROJECT_NOTES_TITLE,
+      state.initialNotes.createdAt,
+      state.initialNotes.content,
+      projectNotesBlockMetadata(state)
+    )
   ];
 
   state.drafts.forEach((draft, index) => {
@@ -572,6 +585,14 @@ function readVersionHistoryFolderPath() {
   try {
     const parsed = JSON.parse(fs.readFileSync(VERSION_HISTORY_FOLDER_FILE, "utf8").replace(/^\uFEFF/, ""));
     const folderPath = asText(parsed?.folderPath).trim();
+    if (folderPath) return path.resolve(folderPath);
+  } catch {
+    // Continue to the legacy backup-folder setting below.
+  }
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(BACKUP_FOLDER_FILE, "utf8").replace(/^\uFEFF/, ""));
+    const folderPath = asText(parsed?.folderPath).trim();
     return folderPath ? path.resolve(folderPath) : null;
   } catch {
     return null;
@@ -585,6 +606,9 @@ function writeVersionHistoryFolderPath(folderPath) {
     try {
       fs.rmSync(VERSION_HISTORY_FOLDER_FILE, { force: true });
     } catch {}
+    try {
+      fs.rmSync(BACKUP_FOLDER_FILE, { force: true });
+    } catch {}
     return null;
   }
 
@@ -596,6 +620,14 @@ function writeVersionHistoryFolderPath(folderPath) {
     "utf8"
   );
   return resolvedPath;
+}
+
+function readBackupFolderPath() {
+  return readVersionHistoryFolderPath();
+}
+
+function writeBackupFolderPath(folderPath) {
+  return writeVersionHistoryFolderPath(folderPath);
 }
 
 function historySourceInfo(options = {}) {
@@ -633,8 +665,38 @@ function safeHistoryBaseName(sourceName) {
   return cleaned || "draft-history";
 }
 
-function expectedVersionHistoryFilePath(options = {}) {
+function safeBackupFileName(sourceName, fallbackName = "draft-history.txt") {
+  const rawName = path.basename(asText(sourceName) || fallbackName);
+  const fallback = path.basename(fallbackName);
+  const cleaned = rawName
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+    .replace(/^[.\s]+|[.\s]+$/g, "")
+    .slice(0, 160);
+  return cleaned || fallback;
+}
+
+function versionHistoryJsonFolderPath() {
   const folderPath = readVersionHistoryFolderPath();
+  return folderPath ? path.join(folderPath, "json") : null;
+}
+
+function legacyVersionHistoryJsonFolderPath() {
+  const folderPath = readVersionHistoryFolderPath();
+  return folderPath ? path.join(folderPath, "jsons") : null;
+}
+
+function originalTextBackupFolderPath() {
+  const folderPath = readBackupFolderPath();
+  return folderPath ? path.join(folderPath, "original txt") : null;
+}
+
+function markdownHistoryBackupFolderPath() {
+  const folderPath = readBackupFolderPath();
+  return folderPath ? path.join(folderPath, "version history md") : null;
+}
+
+function expectedVersionHistoryFilePath(options = {}) {
+  const folderPath = versionHistoryJsonFolderPath();
   if (!folderPath) return null;
   const source = historySourceInfo(options);
   return path.join(folderPath, `${safeHistoryBaseName(source.fileName)}${VERSION_HISTORY_FILE_SUFFIX}`);
@@ -656,22 +718,32 @@ function versionHistoryPayloadMatchesSource(payload, source) {
 }
 
 function findVersionHistoryFilePath(options = {}) {
-  const folderPath = readVersionHistoryFolderPath();
-  if (!folderPath) return null;
+  const rootFolderPath = readVersionHistoryFolderPath();
+  const jsonFolderPath = versionHistoryJsonFolderPath();
+  if (!rootFolderPath || !jsonFolderPath) return null;
 
   const source = historySourceInfo(options);
   const expectedPath = expectedVersionHistoryFilePath(source);
   if (expectedPath && fs.existsSync(expectedPath)) return expectedPath;
 
-  try {
-    const entries = fs.readdirSync(folderPath, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isFile() || !entry.name.endsWith(VERSION_HISTORY_FILE_SUFFIX)) continue;
-      const filePath = path.join(folderPath, entry.name);
-      const payload = parseVersionHistoryFile(filePath);
-      if (versionHistoryPayloadMatchesSource(payload, source)) return filePath;
+  const searchFolders = [...new Set([
+    jsonFolderPath,
+    legacyVersionHistoryJsonFolderPath(),
+    rootFolderPath
+  ].filter(Boolean))];
+  for (const folderPath of searchFolders) {
+    try {
+      const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith(VERSION_HISTORY_FILE_SUFFIX)) continue;
+        const filePath = path.join(folderPath, entry.name);
+        const payload = parseVersionHistoryFile(filePath);
+        if (versionHistoryPayloadMatchesSource(payload, source)) return filePath;
+      }
+    } catch {
+      // Missing folders are expected until the first save after folder selection.
     }
-  } catch {}
+  }
 
   return expectedPath;
 }
@@ -822,7 +894,7 @@ function stateWithoutVersionHistory(state) {
 }
 
 function persistVersionHistory(state, options = {}) {
-  const folderPath = readVersionHistoryFolderPath();
+  const folderPath = versionHistoryJsonFolderPath();
   if (!folderPath) return null;
 
   fs.mkdirSync(folderPath, { recursive: true });
@@ -836,6 +908,1307 @@ function persistVersionHistory(state, options = {}) {
     "utf8"
   );
   return filePath;
+}
+
+function textForHistoryVersion(version) {
+  return asText(version?.content) || htmlToText(version?.contentHtml || "");
+}
+
+function reportVersionSignature(version) {
+  return JSON.stringify({
+    title: asText(version?.title),
+    content: textForHistoryVersion(version),
+    format: normalizeFormat(version?.format || {})
+  });
+}
+
+function historyWithCurrentVersion(page, fallbackTitle) {
+  const history = normalizePageVersionHistory(page?.versionHistory, page, fallbackTitle);
+  const current = pageVersionSnapshot(page, fallbackTitle, page.updatedAt || nowIso());
+  if (
+    versionHasMeaningfulContent(current) &&
+    (!history.length || reportVersionSignature(history[history.length - 1]) !== reportVersionSignature(current))
+  ) {
+    history.push(current);
+  }
+  return history;
+}
+
+function reportInlineText(value) {
+  return asText(value).replace(/\s+/g, " ").trim();
+}
+
+function reportTextBlock(value) {
+  return asText(value).replace(/\s+$/u, "");
+}
+
+function truncateContext(value, side, limit = 180) {
+  const text = asText(value).replace(/\s+/g, " ").trim();
+  if (text.length <= limit) return text;
+  return side === "before"
+    ? `...${text.slice(text.length - limit).trimStart()}`
+    : `${text.slice(0, limit).trimEnd()}...`;
+}
+
+function markdownInline(value) {
+  return reportInlineText(value)
+    .replace(/\\/g, "\\\\")
+    .replace(/`/g, "\\`")
+    .replace(/\*/g, "\\*")
+    .replace(/_/g, "\\_")
+    .replace(/\[/g, "\\[")
+    .replace(/\]/g, "\\]");
+}
+
+function markdownHeadingText(value, fallback = "Untitled") {
+  return reportInlineText(value || fallback).replace(/^#+\s*/u, "").trim() || fallback;
+}
+
+function markdownCodeFence(value) {
+  const text = reportTextBlock(value);
+  const longestFence = Math.max(2, ...(text.match(/`+/g) || []).map(match => match.length));
+  const fence = "`".repeat(longestFence + 1);
+  return `${fence}\n${text || "[No text yet]"}\n${fence}`;
+}
+
+function previousClauseBoundary(source, index) {
+  const text = asText(source);
+  for (let offset = Math.min(index, text.length) - 1; offset >= 0; offset -= 1) {
+    if (/[.!?;:\n]/u.test(text[offset])) return offset + 1;
+  }
+  return 0;
+}
+
+function nextClauseBoundary(source, index) {
+  const text = asText(source);
+  for (let offset = Math.max(0, index); offset < text.length; offset += 1) {
+    if (/[.!?;:\n]/u.test(text[offset])) return offset + 1;
+  }
+  return text.length;
+}
+
+function contextBeforeChange(source, start) {
+  const text = asText(source);
+  const boundary = previousClauseBoundary(text, start);
+  let context = text.slice(boundary, start);
+  if (!reportInlineText(context) && boundary > 0) {
+    const previousBoundary = previousClauseBoundary(text, boundary - 1);
+    context = text.slice(previousBoundary, boundary);
+  }
+  return truncateContext(context, "before");
+}
+
+function contextAfterChange(source, end) {
+  const text = asText(source);
+  const boundary = nextClauseBoundary(text, end);
+  let context = text.slice(end, boundary);
+  if (!reportInlineText(context) && boundary < text.length) {
+    const nextBoundary = nextClauseBoundary(text, boundary + 1);
+    context = text.slice(boundary, nextBoundary);
+  }
+  return truncateContext(context, "after");
+}
+
+function isDiffSequenceWordText(text) {
+  return /^[\p{L}\p{N}]+$/u.test(text || "");
+}
+
+function isDiffSequenceWhitespaceText(text) {
+  return /^\s+$/u.test(text || "");
+}
+
+function previousSameWordIndex(parts, index) {
+  for (let current = index - 1; current >= 0; current -= 1) {
+    if (parts[current].type === "same" && isDiffSequenceWordText(parts[current].text)) return current;
+  }
+  return -1;
+}
+
+function nextSameWordIndex(parts, index) {
+  for (let current = index + 1; current < parts.length; current += 1) {
+    if (parts[current].type === "same" && isDiffSequenceWordText(parts[current].text)) return current;
+    if (parts[current].type !== "same") return -1;
+  }
+  return -1;
+}
+
+function changedWordCounts(parts, start, end) {
+  const counts = { added: 0, removed: 0 };
+  for (let index = start; index < end; index += 1) {
+    const part = parts[index];
+    if ((part.type === "added" || part.type === "removed") && isDiffSequenceWordText(part.text)) {
+      counts[part.type] += 1;
+    }
+  }
+  return counts;
+}
+
+function shouldCoalesceReplacementSegment(segment) {
+  const counts = changedWordCounts(segment, 0, segment.length);
+  return counts.added >= 2 && counts.removed >= 2 && counts.added + counts.removed <= 12;
+}
+
+function isChangedDiffPart(part) {
+  return part?.type === "added" || part?.type === "removed";
+}
+
+function sameWordCount(parts) {
+  return parts.filter(part => part.type === "same" && isDiffSequenceWordText(part.text)).length;
+}
+
+function wordTokenCount(parts) {
+  return parts.filter(part => isDiffSequenceWordText(part.text)).length;
+}
+
+function coerceDiffPartType(part, type) {
+  return {
+    ...part,
+    type,
+    beforeIndex: type === "removed" ? part.beforeIndex : undefined,
+    afterIndex: type === "added" ? part.afterIndex : undefined
+  };
+}
+
+function coalesceReplacementSegment(segment) {
+  const removed = [];
+  const added = [];
+  const neutral = [];
+  let sawRemoved = false;
+  let sawAdded = false;
+
+  segment.forEach(part => {
+    if (part.type === "removed") {
+      removed.push(part);
+      if (isDiffSequenceWordText(part.text)) sawRemoved = true;
+      return;
+    }
+    if (part.type === "added") {
+      added.push(part);
+      if (isDiffSequenceWordText(part.text)) sawAdded = true;
+      return;
+    }
+    if (part.type === "same" && isDiffSequenceWhitespaceText(part.text)) {
+      if (sawRemoved) removed.push(coerceDiffPartType(part, "removed"));
+      if (sawAdded) added.push(coerceDiffPartType(part, "added"));
+      return;
+    }
+    neutral.push(part);
+  });
+
+  return [...removed, ...added, ...neutral];
+}
+
+function coalesceInterleavedReplacementWindow(segment) {
+  const removed = [];
+  const added = [];
+
+  segment.forEach(part => {
+    if (part.type === "removed") {
+      removed.push(part);
+      return;
+    }
+    if (part.type === "added") {
+      added.push(part);
+      return;
+    }
+    if (part.type !== "same") return;
+    removed.push(coerceDiffPartType(part, "removed"));
+    added.push(coerceDiffPartType(part, "added"));
+  });
+
+  return [...removed, ...added];
+}
+
+function shouldCoalesceInterleavedReplacementWindow(segment) {
+  const counts = changedWordCounts(segment, 0, segment.length);
+  const anchors = sameWordCount(segment);
+  if (counts.added < 3 || counts.removed < 3) return false;
+
+  const words = wordTokenCount(segment);
+  if (words > 18) return false;
+
+  const changedWords = counts.added + counts.removed;
+  if (!anchors) return changedWords / words >= 0.75;
+  if (anchors > 5) return false;
+  return changedWords / words >= 0.55;
+}
+
+function changedWordTypes(segment) {
+  return segment
+    .filter(part => isChangedDiffPart(part) && isDiffSequenceWordText(part.text))
+    .map(part => part.type);
+}
+
+function changedWordInfos(segment) {
+  return segment
+    .map((part, index) => ({ part, index }))
+    .filter(({ part }) => isChangedDiffPart(part) && isDiffSequenceWordText(part.text))
+    .map(({ part, index }) => ({ type: part.type, index }));
+}
+
+function changedTypesAreCoalescableAlternation(types) {
+  if (types.length < 6) return false;
+
+  const added = types.filter(type => type === "added").length;
+  const removed = types.length - added;
+  if (added < 3 || removed < 3) return false;
+  return types.every((type, index) => index === 0 || type !== types[index - 1]);
+}
+
+function alternatingChangedWordRunBounds(segment) {
+  const infos = changedWordInfos(segment);
+  if (infos.length < 6) return null;
+
+  let best = null;
+  let runStart = 0;
+  const considerRun = end => {
+    const run = infos.slice(runStart, end);
+    const types = run.map(info => info.type);
+    if (!changedTypesAreCoalescableAlternation(types)) return;
+    if (!best || run.length > best.wordCount) {
+      best = {
+        start: run[0].index,
+        end: run[run.length - 1].index + 1,
+        wordCount: run.length
+      };
+    }
+  };
+
+  for (let index = 1; index <= infos.length; index += 1) {
+    if (index === infos.length || infos[index].type === infos[index - 1].type) {
+      considerRun(index);
+      runStart = index;
+    }
+  }
+
+  return best;
+}
+
+function coalesceAlternatingChangedWordRun(segment) {
+  const bounds = alternatingChangedWordRunBounds(segment);
+  if (!bounds) return segment;
+  return [
+    ...segment.slice(0, bounds.start),
+    ...coalesceInterleavedReplacementWindow(segment.slice(bounds.start, bounds.end)),
+    ...coalesceAlternatingChangedWordRun(segment.slice(bounds.end))
+  ];
+}
+
+function coalesceAlternatingChangedWordSubsegments(segment) {
+  const coalesced = [];
+  let start = 0;
+
+  for (let index = 0; index <= segment.length; index += 1) {
+    const isBoundary = index === segment.length || segment[index].text === "\n";
+    if (!isBoundary) continue;
+    coalesced.push(...coalesceAlternatingChangedWordRun(segment.slice(start, index)));
+    if (index < segment.length) coalesced.push(segment[index]);
+    start = index + 1;
+  }
+
+  return coalesced;
+}
+
+function coalesceAlternatingChangedWordSegments(parts) {
+  const coalesced = [];
+  let index = 0;
+
+  while (index < parts.length) {
+    if (parts[index].type === "same" && isDiffSequenceWordText(parts[index].text)) {
+      coalesced.push(parts[index]);
+      index += 1;
+      continue;
+    }
+
+    const segmentStart = index;
+    while (
+      index < parts.length &&
+      !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
+    ) {
+      index += 1;
+    }
+    coalesced.push(...coalesceAlternatingChangedWordSubsegments(parts.slice(segmentStart, index)));
+  }
+
+  return coalesced;
+}
+
+function coalesceInterleavedReplacementSubsegment(segment) {
+  const firstChanged = segment.findIndex(isChangedDiffPart);
+  if (firstChanged < 0) return segment;
+
+  let lastChanged = -1;
+  for (let index = segment.length - 1; index >= firstChanged; index -= 1) {
+    if (isChangedDiffPart(segment[index])) {
+      lastChanged = index;
+      break;
+    }
+  }
+
+  const replacementWindow = segment.slice(firstChanged, lastChanged + 1);
+  if (!shouldCoalesceInterleavedReplacementWindow(replacementWindow)) return segment;
+
+  return [
+    ...segment.slice(0, firstChanged),
+    ...coalesceInterleavedReplacementWindow(replacementWindow),
+    ...segment.slice(lastChanged + 1)
+  ];
+}
+
+function coalesceInterleavedReplacementSegments(parts) {
+  const coalesced = [];
+  let start = 0;
+
+  for (let index = 0; index <= parts.length; index += 1) {
+    const isBoundary = index === parts.length || parts[index].text === "\n";
+    if (!isBoundary) continue;
+    coalesced.push(...coalesceInterleavedReplacementSubsegment(parts.slice(start, index)));
+    if (index < parts.length) coalesced.push(parts[index]);
+    start = index + 1;
+  }
+
+  return coalesced;
+}
+
+function coalesceReplacementSubsegments(segment) {
+  const coalesced = [];
+  let start = 0;
+
+  for (let index = 0; index <= segment.length; index += 1) {
+    const isBoundary = index === segment.length || segment[index].text === "\n";
+    if (!isBoundary) continue;
+
+    const subsegment = segment.slice(start, index);
+    if (shouldCoalesceReplacementSegment(subsegment)) {
+      coalesced.push(...coalesceReplacementSegment(subsegment));
+    } else {
+      coalesced.push(...subsegment);
+    }
+
+    if (index < segment.length) coalesced.push(segment[index]);
+    start = index + 1;
+  }
+
+  return coalesced;
+}
+
+function coalesceReplacementSegments(parts) {
+  const coalesced = [];
+  let index = 0;
+
+  while (index < parts.length) {
+    const part = parts[index];
+    if (part.type !== "same" || !isDiffSequenceWordText(part.text)) {
+      const segmentStart = index;
+      while (
+        index < parts.length &&
+        !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
+      ) {
+        index += 1;
+      }
+      coalesced.push(...coalesceReplacementSubsegments(parts.slice(segmentStart, index)));
+      continue;
+    }
+
+    coalesced.push(part);
+    index += 1;
+
+    const segmentStart = index;
+    while (
+      index < parts.length &&
+      !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
+    ) {
+      index += 1;
+    }
+    coalesced.push(...coalesceReplacementSubsegments(parts.slice(segmentStart, index)));
+  }
+
+  return coalesced;
+}
+
+function diffPartKey(part) {
+  const marks = part?.marks || {};
+  return [
+    part?.text || "",
+    marks.bold ? "b" : "",
+    marks.italic ? "i" : "",
+    marks.underline ? "u" : "",
+    marks.strike ? "s" : ""
+  ].join("|");
+}
+
+function diffChangedTokenRun(before, after) {
+  const rows = Array.from({ length: before.length + 1 }, () => Array(after.length + 1).fill(0));
+
+  for (let i = before.length - 1; i >= 0; i -= 1) {
+    for (let j = after.length - 1; j >= 0; j -= 1) {
+      rows[i][j] = diffPartKey(before[i]) === diffPartKey(after[j])
+        ? rows[i + 1][j + 1] + 1
+        : Math.max(rows[i + 1][j], rows[i][j + 1]);
+    }
+  }
+
+  const result = [];
+  let i = 0;
+  let j = 0;
+
+  while (i < before.length && j < after.length) {
+    if (diffPartKey(before[i]) === diffPartKey(after[j])) {
+      result.push({
+        ...after[j],
+        type: "same",
+        beforeIndex: before[i].beforeIndex,
+        beforeStart: before[i].beforeStart,
+        beforeEnd: before[i].beforeEnd,
+        afterIndex: after[j].afterIndex
+      });
+      i += 1;
+      j += 1;
+    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
+      result.push(before[i]);
+      i += 1;
+    } else {
+      result.push(after[j]);
+      j += 1;
+    }
+  }
+
+  while (i < before.length) {
+    result.push(before[i]);
+    i += 1;
+  }
+  while (j < after.length) {
+    result.push(after[j]);
+    j += 1;
+  }
+
+  return result;
+}
+
+function sameDiffPartFromChangedPair(removedPart, addedPart) {
+  return {
+    ...addedPart,
+    type: "same",
+    marks: addedPart.marks || removedPart.marks || {},
+    beforeIndex: removedPart.beforeIndex,
+    beforeStart: removedPart.beforeStart,
+    beforeEnd: removedPart.beforeEnd,
+    afterIndex: addedPart.afterIndex
+  };
+}
+
+function isMeaningfulCommonChangedRun(parts) {
+  if (!parts.length) return false;
+  return parts.filter(part => isDiffSequenceWordText(part.text)).length >= 1;
+}
+
+function commonChangedPrefixLength(removed, added) {
+  let length = 0;
+  while (
+    length < removed.length &&
+    length < added.length &&
+    diffPartKey(removed[length]) === diffPartKey(added[length])
+  ) {
+    length += 1;
+  }
+  return length;
+}
+
+function commonChangedSuffixLength(removed, added, prefixLength) {
+  let length = 0;
+  while (
+    length < removed.length - prefixLength &&
+    length < added.length - prefixLength &&
+    diffPartKey(removed[removed.length - 1 - length]) === diffPartKey(added[added.length - 1 - length])
+  ) {
+    length += 1;
+  }
+  return length;
+}
+
+function restoreCommonChangedAffixes(segment) {
+  const removed = segment.filter(part => part.type === "removed");
+  const added = segment.filter(part => part.type === "added");
+  if (!removed.length || !added.length) return segment;
+
+  let prefixLength = commonChangedPrefixLength(removed, added);
+  if (!isMeaningfulCommonChangedRun(removed.slice(0, prefixLength))) prefixLength = 0;
+
+  let suffixLength = commonChangedSuffixLength(removed, added, prefixLength);
+  if (!isMeaningfulCommonChangedRun(removed.slice(removed.length - suffixLength))) suffixLength = 0;
+  if (!prefixLength && !suffixLength) return segment;
+
+  const prefix = removed
+    .slice(0, prefixLength)
+    .map((part, index) => sameDiffPartFromChangedPair(part, added[index]));
+  const suffixRemovedStart = removed.length - suffixLength;
+  const suffixAddedStart = added.length - suffixLength;
+  const suffix = removed
+    .slice(suffixRemovedStart)
+    .map((part, index) => sameDiffPartFromChangedPair(part, added[suffixAddedStart + index]));
+
+  return [
+    ...prefix,
+    ...removed.slice(prefixLength, suffixRemovedStart),
+    ...added.slice(prefixLength, suffixAddedStart),
+    ...suffix
+  ];
+}
+
+function shouldRestoreChangedTokenRun(segment) {
+  const changedParts = segment.filter(part => part.type === "added" || part.type === "removed");
+  if (!changedParts.some(part => part.type === "added")) return false;
+  if (!changedParts.some(part => part.type === "removed")) return false;
+  if (segment.some(part => part.type === "same")) return false;
+  return changedParts.every(part => !isDiffSequenceWordText(part.text));
+}
+
+function restoreIdenticalChangedTokens(parts) {
+  const restored = [];
+  let index = 0;
+
+  while (index < parts.length) {
+    if (parts[index].type === "same") {
+      restored.push(parts[index]);
+      index += 1;
+      continue;
+    }
+
+    const segmentStart = index;
+    while (index < parts.length && parts[index].type !== "same") {
+      index += 1;
+    }
+
+    const segment = parts.slice(segmentStart, index);
+    const affixRestored = restoreCommonChangedAffixes(segment);
+    if (affixRestored !== segment) {
+      restored.push(...affixRestored);
+      continue;
+    }
+    if (!shouldRestoreChangedTokenRun(segment)) {
+      restored.push(...segment);
+      continue;
+    }
+    restored.push(...diffChangedTokenRun(
+      segment.filter(part => part.type === "removed"),
+      segment.filter(part => part.type === "added")
+    ));
+  }
+
+  return restored;
+}
+
+function shouldAbsorbWeakReplacementAnchor(parts, index) {
+  const part = parts[index];
+  if (part?.type !== "same" || !isDiffSequenceWordText(part.text)) return false;
+
+  const previousIndex = previousSameWordIndex(parts, index);
+  const followingIndex = nextSameWordIndex(parts, index);
+  if (previousIndex < 0 || followingIndex < 0) return false;
+
+  const counts = changedWordCounts(parts, previousIndex + 1, index);
+  return counts.added >= 2 && counts.removed >= 2 && counts.added + counts.removed <= 10;
+}
+
+function cleanupWeakReplacementAnchors(parts) {
+  const absorbIndexes = new Set();
+
+  parts.forEach((part, index) => {
+    if (!shouldAbsorbWeakReplacementAnchor(parts, index)) return;
+    absorbIndexes.add(index);
+    for (let current = index + 1; current < parts.length; current += 1) {
+      if (parts[current].type !== "same" || !isDiffSequenceWhitespaceText(parts[current].text)) break;
+      absorbIndexes.add(current);
+    }
+  });
+
+  const absorbedParts = absorbIndexes.size ? parts.map((part, index) => {
+    if (!absorbIndexes.has(index)) return part;
+    return {
+      ...part,
+      type: "added",
+      beforeIndex: undefined
+    };
+  }) : parts;
+
+  return restoreIdenticalChangedTokens(coalesceReplacementSegments(
+    coalesceInterleavedReplacementSegments(
+      coalesceAlternatingChangedWordSegments(absorbedParts)
+    )
+  ));
+}
+
+function diffSequence(before, after) {
+  const rows = Array.from({ length: before.length + 1 }, () => Array(after.length + 1).fill(0));
+
+  for (let i = before.length - 1; i >= 0; i -= 1) {
+    for (let j = after.length - 1; j >= 0; j -= 1) {
+      rows[i][j] = before[i].key === after[j].key
+        ? rows[i + 1][j + 1] + 1
+        : Math.max(rows[i + 1][j], rows[i][j + 1]);
+    }
+  }
+
+  const result = [];
+  let i = 0;
+  let j = 0;
+
+  while (i < before.length && j < after.length) {
+    if (before[i].key === after[j].key) {
+      result.push({
+        type: "same",
+        text: after[j].text,
+        marks: after[j].marks || before[i].marks || {},
+        beforeIndex: before[i].index ?? i,
+        beforeStart: before[i].start,
+        beforeEnd: before[i].end,
+        afterIndex: after[j].index ?? j,
+        afterStart: after[j].start,
+        afterEnd: after[j].end
+      });
+      i += 1;
+      j += 1;
+    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
+      result.push({
+        type: "removed",
+        text: before[i].text,
+        marks: before[i].marks || {},
+        beforeIndex: before[i].index ?? i,
+        beforeStart: before[i].start,
+        beforeEnd: before[i].end
+      });
+      i += 1;
+    } else {
+      result.push({
+        type: "added",
+        text: after[j].text,
+        marks: after[j].marks || {},
+        afterIndex: after[j].index ?? j,
+        afterStart: after[j].start,
+        afterEnd: after[j].end
+      });
+      j += 1;
+    }
+  }
+
+  while (i < before.length) {
+    result.push({
+      type: "removed",
+      text: before[i].text,
+      marks: before[i].marks || {},
+      beforeIndex: before[i].index ?? i,
+      beforeStart: before[i].start,
+      beforeEnd: before[i].end
+    });
+    i += 1;
+  }
+  while (j < after.length) {
+    result.push({
+      type: "added",
+      text: after[j].text,
+      marks: after[j].marks || {},
+      afterIndex: after[j].index ?? j,
+      afterStart: after[j].start,
+      afterEnd: after[j].end
+    });
+    j += 1;
+  }
+
+  return cleanupWeakReplacementAnchors(result);
+}
+
+function normalizeDiffSource(text) {
+  return asText(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
+}
+
+function tokenizeSegment(text, marks = {}) {
+  const normalized = normalizeDiffSource(text);
+  const tokenRegex = /\n|[^\S\n]+|[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu;
+  const semanticKey = marks.whitespace ? "" : `${marks.bold ? "b" : ""}${marks.italic ? "i" : ""}${marks.underline ? "u" : ""}${marks.strike ? "s" : ""}`;
+  const tokens = [];
+  let match = tokenRegex.exec(normalized);
+
+  while (match) {
+    const token = match[0];
+    tokens.push({
+      key: /^\s+$/u.test(token) ? token : `${token}|${semanticKey}`,
+      text: token,
+      marks: { ...marks },
+      isWhitespace: /^\s+$/u.test(token),
+      start: match.index,
+      end: match.index + token.length
+    });
+    match = tokenRegex.exec(normalized);
+  }
+
+  return tokens.map((token, index) => ({ ...token, index }));
+}
+
+const DIFF_COMMON_WORDS = new Set([
+  "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from",
+  "had", "has", "have", "he", "her", "his", "i", "in", "is", "it", "its", "me",
+  "my", "not", "of", "on", "or", "our", "she", "so", "that", "the", "their",
+  "them", "then", "there", "they", "this", "to", "was", "we", "were", "with",
+  "you", "your"
+]);
+
+const DIFF_CLAUSE_STARTERS = new Set([
+  "and", "but", "or", "so", "then", "yet", "though", "although", "because",
+  "while", "when", "where", "who", "which", "that", "one", "two", "some",
+  "couple", "another", "other", "others", "going", "no", "i", "he", "she",
+  "they", "we", "it", "the", "there", "this"
+]);
+
+const DIFF_BOUNDARY_CONJUNCTIONS = new Set(["and", "but", "or", "so", "yet"]);
+const DIFF_LONG_COMMA_CLAUSE_MIN_TERMS = 4;
+const DIFF_LONG_CONJUNCTION_CLAUSE_MIN_TERMS = 4;
+
+function isDiffWordToken(token) {
+  return /^[\p{L}\p{N}]+$/u.test(token?.text || "");
+}
+
+function diffTermForToken(token) {
+  return String(token?.text || "").toLowerCase();
+}
+
+function comparableDiffTerm(term) {
+  return String(term || "").replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
+}
+
+function diffTermsMatch(left, right) {
+  if (left === right) return true;
+
+  const normalizedLeft = comparableDiffTerm(left);
+  const normalizedRight = comparableDiffTerm(right);
+  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
+}
+
+function meaningfulTermsForTokens(tokens) {
+  const terms = tokens
+    .filter(isDiffWordToken)
+    .map(diffTermForToken)
+    .filter(term => term.length > 1 && !DIFF_COMMON_WORDS.has(term));
+  if (terms.length) return terms;
+  return tokens
+    .filter(isDiffWordToken)
+    .map(diffTermForToken)
+    .filter(term => term.length > 1);
+}
+
+function isDiffClauseDashToken(token) {
+  const text = token?.text || "";
+  return text === "\u2014" || text === "\u2013";
+}
+
+function splitDiffBlocks(tokens) {
+  const blocks = [];
+  let current = [];
+  let pendingSentenceBoundary = false;
+  const closingPunctuation = new Set([")", "]", "}", "\"", "'", "\u201d", "\u2019"]);
+
+  const flush = () => {
+    if (!current.length) return;
+    if (current.some(token => String(token.text || "").trim() || token.text === "\n")) {
+      blocks.push(current);
+    }
+    current = [];
+    pendingSentenceBoundary = false;
+  };
+
+  const shouldSplitAfterComma = index => {
+    let nextWord = "";
+    const clauseTokens = [];
+    for (let nextIndex = index + 1; nextIndex < tokens.length; nextIndex += 1) {
+      const nextToken = tokens[nextIndex];
+      if (nextToken.text === "\n") return true;
+      if (/[.!?:;]/u.test(nextToken.text || "") || nextToken.text === "," || isDiffClauseDashToken(nextToken)) break;
+      clauseTokens.push(nextToken);
+      if (/^\s+$/u.test(nextToken.text || "")) continue;
+      if (!isDiffWordToken(nextToken)) break;
+      if (!nextWord) nextWord = diffTermForToken(nextToken);
+    }
+    return Boolean(
+      nextWord &&
+      (
+        DIFF_CLAUSE_STARTERS.has(nextWord) ||
+        meaningfulTermsForTokens(clauseTokens).length >= DIFF_LONG_COMMA_CLAUSE_MIN_TERMS
+      )
+    );
+  };
+
+  const shouldSplitAfterConjunction = index => {
+    if (!isDiffWordToken(tokens[index])) return false;
+    if (!DIFF_BOUNDARY_CONJUNCTIONS.has(diffTermForToken(tokens[index]))) return false;
+
+    let nextWord = "";
+    const clauseTokens = [];
+    for (let nextIndex = index + 1; nextIndex < tokens.length; nextIndex += 1) {
+      const nextToken = tokens[nextIndex];
+      if (nextToken.text === "\n") break;
+      if (/[.!?:;]/u.test(nextToken.text || "") || nextToken.text === "," || isDiffClauseDashToken(nextToken)) break;
+      clauseTokens.push(nextToken);
+      if (/^\s+$/u.test(nextToken.text || "")) continue;
+      if (!isDiffWordToken(nextToken)) break;
+      if (!nextWord) nextWord = diffTermForToken(nextToken);
+    }
+    return Boolean(
+      nextWord &&
+      meaningfulTermsForTokens(clauseTokens).length >= DIFF_LONG_CONJUNCTION_CLAUSE_MIN_TERMS
+    );
+  };
+
+  tokens.forEach((token, index) => {
+    const isWhitespace = /^\s+$/u.test(token.text || "");
+    if (token.text === "(" && current.some(currentToken => String(currentToken.text || "").trim())) flush();
+    if (pendingSentenceBoundary && !isWhitespace && !closingPunctuation.has(token.text)) flush();
+
+    current.push(token);
+    if (token.text === "\n") {
+      flush();
+    } else if (
+      /[.!?:;]/u.test(token.text || "") ||
+      isDiffClauseDashToken(token) ||
+      (token.text === "," && shouldSplitAfterComma(index)) ||
+      shouldSplitAfterConjunction(index)
+    ) {
+      pendingSentenceBoundary = true;
+    }
+  });
+
+  flush();
+  return blocks;
+}
+
+function blockSimilarity(beforeBlock, afterBlock) {
+  const beforeTerms = meaningfulTermsForTokens(beforeBlock);
+  const afterTerms = meaningfulTermsForTokens(afterBlock);
+  if (!beforeTerms.length || !afterTerms.length) return 0;
+
+  const availableBeforeTerms = [...beforeTerms];
+  let shared = 0;
+  afterTerms.forEach(term => {
+    const matchedIndex = availableBeforeTerms.findIndex(beforeTerm => diffTermsMatch(beforeTerm, term));
+    if (matchedIndex < 0) return;
+    shared += 1;
+    availableBeforeTerms.splice(matchedIndex, 1);
+  });
+  if (!shared) return 0;
+  return (2 * shared) / (beforeTerms.length + afterTerms.length);
+}
+
+function shouldAlignBlocks(beforeBlock, afterBlock) {
+  const beforeTerms = meaningfulTermsForTokens(beforeBlock);
+  const afterTerms = meaningfulTermsForTokens(afterBlock);
+  const shorterLength = Math.min(beforeTerms.length, afterTerms.length);
+  if (!shorterLength) return false;
+
+  const similarity = blockSimilarity(beforeBlock, afterBlock);
+  const threshold = shorterLength <= 2 ? 0.5 : shorterLength <= 3 ? 0.42 : 0.38;
+  return similarity >= threshold;
+}
+
+function alignDiffBlocks(beforeBlocks, afterBlocks) {
+  const rows = Array.from({ length: beforeBlocks.length + 1 }, () => Array(afterBlocks.length + 1).fill(0));
+  const similarities = Array.from({ length: beforeBlocks.length }, () => Array(afterBlocks.length).fill(0));
+
+  for (let i = beforeBlocks.length - 1; i >= 0; i -= 1) {
+    for (let j = afterBlocks.length - 1; j >= 0; j -= 1) {
+      const similarity = shouldAlignBlocks(beforeBlocks[i], afterBlocks[j])
+        ? blockSimilarity(beforeBlocks[i], afterBlocks[j])
+        : 0;
+      similarities[i][j] = similarity;
+      rows[i][j] = Math.max(
+        rows[i + 1][j],
+        rows[i][j + 1],
+        similarity ? similarity + rows[i + 1][j + 1] : 0
+      );
+    }
+  }
+
+  const pairs = [];
+  let i = 0;
+  let j = 0;
+  while (i < beforeBlocks.length && j < afterBlocks.length) {
+    const similarity = similarities[i][j];
+    const matchScore = similarity ? similarity + rows[i + 1][j + 1] : -1;
+    if (similarity && matchScore >= rows[i + 1][j] && matchScore >= rows[i][j + 1]) {
+      pairs.push([i, j]);
+      i += 1;
+      j += 1;
+    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
+      i += 1;
+    } else {
+      j += 1;
+    }
+  }
+  return pairs;
+}
+
+function flattenDiffBlockRange(blocks, start, end) {
+  return blocks.slice(start, end).flat();
+}
+
+function diffBlockRangeSimilarity(beforeBlocks, afterBlocks, range) {
+  return blockSimilarity(
+    flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd),
+    flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd)
+  );
+}
+
+function shouldExpandDiffBlockRange(currentSimilarity, candidateSimilarity) {
+  const improvement = candidateSimilarity - currentSimilarity;
+  if (candidateSimilarity >= 0.9 && improvement >= 0.02) return true;
+  if (candidateSimilarity >= 0.68 && improvement >= 0.05) return true;
+  return currentSimilarity < 0.62 && improvement >= 0.1;
+}
+
+function diffBlockHasMeaningfulTerms(block) {
+  return meaningfulTermsForTokens(block).length > 0;
+}
+
+function previousDiffExpansionStart(blocks, start, limit) {
+  let candidateStart = start - 1;
+  while (candidateStart > limit && !diffBlockHasMeaningfulTerms(blocks[candidateStart])) {
+    candidateStart -= 1;
+  }
+  return candidateStart;
+}
+
+function nextDiffExpansionEnd(blocks, end, limit) {
+  let candidateEnd = end + 1;
+  while (candidateEnd < limit && !diffBlockHasMeaningfulTerms(blocks[candidateEnd - 1])) {
+    candidateEnd += 1;
+  }
+  return candidateEnd;
+}
+
+function expandDiffBlockPairs(pairs, beforeBlocks, afterBlocks) {
+  const ranges = pairs.map(([beforeIndex, afterIndex]) => ({
+    beforeStart: beforeIndex,
+    beforeEnd: beforeIndex + 1,
+    afterStart: afterIndex,
+    afterEnd: afterIndex + 1
+  }));
+  let changed = true;
+  let guard = beforeBlocks.length + afterBlocks.length;
+
+  while (changed && guard > 0) {
+    changed = false;
+    guard -= 1;
+    ranges.forEach((range, index) => {
+      const prevBeforeLimit = index > 0 ? ranges[index - 1].beforeEnd : 0;
+      const prevAfterLimit = index > 0 ? ranges[index - 1].afterEnd : 0;
+      const nextBeforeLimit = index + 1 < ranges.length ? ranges[index + 1].beforeStart : beforeBlocks.length;
+      const nextAfterLimit = index + 1 < ranges.length ? ranges[index + 1].afterStart : afterBlocks.length;
+      const currentSimilarity = diffBlockRangeSimilarity(beforeBlocks, afterBlocks, range);
+      let bestRange = null;
+      let bestSimilarity = currentSimilarity;
+      const candidates = [];
+
+      if (range.beforeStart > prevBeforeLimit) {
+        candidates.push({ ...range, beforeStart: previousDiffExpansionStart(beforeBlocks, range.beforeStart, prevBeforeLimit) });
+      }
+      if (range.afterStart > prevAfterLimit) {
+        candidates.push({ ...range, afterStart: previousDiffExpansionStart(afterBlocks, range.afterStart, prevAfterLimit) });
+      }
+      if (range.beforeEnd < nextBeforeLimit) {
+        candidates.push({ ...range, beforeEnd: nextDiffExpansionEnd(beforeBlocks, range.beforeEnd, nextBeforeLimit) });
+      }
+      if (range.afterEnd < nextAfterLimit) {
+        candidates.push({ ...range, afterEnd: nextDiffExpansionEnd(afterBlocks, range.afterEnd, nextAfterLimit) });
+      }
+
+      candidates.forEach(candidate => {
+        const candidateSimilarity = diffBlockRangeSimilarity(beforeBlocks, afterBlocks, candidate);
+        if (
+          candidateSimilarity > bestSimilarity &&
+          shouldExpandDiffBlockRange(currentSimilarity, candidateSimilarity)
+        ) {
+          bestRange = candidate;
+          bestSimilarity = candidateSimilarity;
+        }
+      });
+
+      if (bestRange) {
+        range.beforeStart = bestRange.beforeStart;
+        range.beforeEnd = bestRange.beforeEnd;
+        range.afterStart = bestRange.afterStart;
+        range.afterEnd = bestRange.afterEnd;
+        changed = true;
+      }
+    });
+  }
+
+  return ranges;
+}
+
+function diffUnmatchedBlock(tokens, type) {
+  return tokens.map(token => ({
+    type,
+    text: token.text,
+    marks: token.marks || {},
+    beforeIndex: type === "removed" ? token.index : undefined,
+    beforeStart: type === "removed" ? token.start : undefined,
+    beforeEnd: type === "removed" ? token.end : undefined,
+    afterIndex: type === "added" ? token.index : undefined,
+    afterStart: type === "added" ? token.start : undefined,
+    afterEnd: type === "added" ? token.end : undefined
+  }));
+}
+
+function diffBlocksHaveSameTokens(beforeBlock, afterBlock) {
+  if (beforeBlock.length !== afterBlock.length) return false;
+  return beforeBlock.every((token, index) => token.key === afterBlock[index].key);
+}
+
+function appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeStart, beforeEnd, afterStart, afterEnd) {
+  let beforeIndex = beforeStart;
+  let afterIndex = afterStart;
+
+  while (beforeIndex < beforeEnd || afterIndex < afterEnd) {
+    if (
+      beforeIndex < beforeEnd &&
+      afterIndex < afterEnd &&
+      diffBlocksHaveSameTokens(beforeBlocks[beforeIndex], afterBlocks[afterIndex])
+    ) {
+      parts.push(...diffSequence(beforeBlocks[beforeIndex], afterBlocks[afterIndex]));
+      beforeIndex += 1;
+      afterIndex += 1;
+      continue;
+    }
+    if (beforeIndex < beforeEnd) {
+      parts.push(...diffUnmatchedBlock(beforeBlocks[beforeIndex], "removed"));
+      beforeIndex += 1;
+      continue;
+    }
+    parts.push(...diffUnmatchedBlock(afterBlocks[afterIndex], "added"));
+    afterIndex += 1;
+  }
+}
+
+function diffReportTexts(beforeText, afterText) {
+  const beforeBlocks = splitDiffBlocks(tokenizeSegment(beforeText));
+  const afterBlocks = splitDiffBlocks(tokenizeSegment(afterText));
+  const pairs = expandDiffBlockPairs(alignDiffBlocks(beforeBlocks, afterBlocks), beforeBlocks, afterBlocks);
+  const parts = [];
+  let beforeIndex = 0;
+  let afterIndex = 0;
+
+  pairs.forEach(range => {
+    appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, range.beforeStart, afterIndex, range.afterStart);
+    parts.push(...diffSequence(
+      flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd),
+      flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd)
+    ));
+    beforeIndex = range.beforeEnd;
+    afterIndex = range.afterEnd;
+  });
+
+  appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, beforeBlocks.length, afterIndex, afterBlocks.length);
+  return restoreIdenticalChangedTokens(parts);
+}
+
+function diffPartRange(part, type) {
+  const start = type === "added"
+    ? part.afterStart ?? part.start
+    : part.beforeStart ?? part.start;
+  const end = type === "added"
+    ? part.afterEnd ?? part.end
+    : part.beforeEnd ?? part.end;
+  return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
+}
+
+function makeChangeSegmentFromParts(sourceText, parts, type) {
+  const ranges = parts.map(part => diffPartRange(part, type)).filter(Boolean);
+  const text = parts.map(part => part.text || "").join("").replace(/\s+/g, " ").trim();
+  if (!text || !ranges.length) return null;
+
+  const start = Math.min(...ranges.map(range => range.start));
+  const end = Math.max(...ranges.map(range => range.end));
+  return {
+    text,
+    before: contextBeforeChange(sourceText, start),
+    after: contextAfterChange(sourceText, end)
+  };
+}
+
+function changeSegmentsFromDiff(parts, type, sourceText, limit) {
+  const segments = [];
+  let truncated = false;
+  let count = 0;
+  let current = [];
+
+  const flush = () => {
+    const segment = makeChangeSegmentFromParts(sourceText, current, type);
+    current = [];
+    if (!segment) return;
+
+    count += 1;
+    if (segments.length < limit) segments.push(segment);
+    else truncated = true;
+  };
+
+  parts.forEach(part => {
+    if (part.type === type) {
+      current.push(part);
+      return;
+    }
+    if (current.length) flush();
+  });
+  if (current.length) flush();
+
+  return { segments, truncated, count };
+}
+
+function summarizeTextChanges(oldText, newText, limit = 200) {
+  const oldSource = normalizeDiffSource(oldText);
+  const newSource = normalizeDiffSource(newText);
+  const parts = diffReportTexts(oldSource, newSource);
+  const added = changeSegmentsFromDiff(parts, "added", newSource, limit);
+  const removed = changeSegmentsFromDiff(parts, "removed", oldSource, limit);
+
+  return {
+    added: added.segments,
+    removed: removed.segments,
+    addedCount: added.count,
+    removedCount: removed.count,
+    addedTruncated: added.truncated,
+    removedTruncated: removed.truncated
+  };
+}
+
+function reportChangeLine(segment) {
+  const before = markdownInline(segment.before);
+  const changed = markdownInline(segment.text);
+  const after = markdownInline(segment.after);
+  return [
+    before ? `*${before}*` : "",
+    changed ? `**${changed}**` : "",
+    after ? `*${after}*` : ""
+  ].filter(Boolean).join(" ");
+}
+
+function appendChangeList(lines, title, segments, truncated, count = segments.length) {
+  lines.push(`**${title}: ${count}**`);
+  if (!count) {
+    lines.push("");
+    lines.push("None");
+  } else {
+    lines.push("");
+    segments.forEach((segment, index) => {
+      lines.push(`${index + 1}. ${reportChangeLine(segment)}`);
+    });
+    if (truncated) lines.push("");
+    if (truncated) lines.push("Additional changes omitted from this summary.");
+  }
+  lines.push("");
+}
+
+function appendChangeSummary(lines, beforeText, afterText, title = "Changes from previous version", headingLevel = 4) {
+  const changes = summarizeTextChanges(beforeText, afterText);
+  lines.push(`${"#".repeat(headingLevel)} ${markdownHeadingText(title)}`);
+  lines.push("");
+  appendChangeList(lines, "Added", changes.added, changes.addedTruncated, changes.addedCount);
+  appendChangeList(lines, "Removed", changes.removed, changes.removedTruncated, changes.removedCount);
+}
+
+function appendFullText(lines, text) {
+  lines.push("#### Full text");
+  lines.push("");
+  lines.push(markdownCodeFence(text));
+  lines.push("");
+}
+
+function appendPageHistoryReport(lines, sectionTitle, versionBaseLabel, history, options = {}) {
+  lines.push(`## ${markdownHeadingText(sectionTitle)}`);
+  if (options.actualTitle && options.actualTitle !== versionBaseLabel) {
+    lines.push("");
+    lines.push(`Title: ${markdownInline(options.actualTitle)}`);
+  }
+  lines.push("");
+
+  history.forEach((version, index) => {
+    const versionLabel = index === 0 ? versionBaseLabel : `${versionBaseLabel}.${index + 1}`;
+    const text = textForHistoryVersion(version);
+    lines.push(`### ${markdownHeadingText(versionLabel)}`);
+    if (version.createdAt) lines.push(`Recorded: ${formatDate(version.createdAt)}`);
+    lines.push("");
+    if (index > 0) {
+      appendChangeSummary(lines, textForHistoryVersion(history[index - 1]), text);
+    }
+    appendFullText(lines, text);
+  });
+}
+
+function backupHistoryReport(state, options = {}) {
+  const source = historySourceInfo(options);
+  const lines = [
+    `# ${markdownHeadingText(source.fileName)} version history`,
+    "",
+    `Generated: ${formatDate(nowIso())}`,
+    ""
+  ];
+
+  const projectNotesHistory = historyWithCurrentVersion(state.initialNotes, PROJECT_NOTES_TITLE);
+  appendPageHistoryReport(lines, PROJECT_NOTES_TITLE, PROJECT_NOTES_TITLE, projectNotesHistory);
+
+  let previousDraftFinalText = null;
+  (state.drafts || []).forEach((draft, index) => {
+    const draftNumber = index + 1;
+    const draftLabel = `Draft ${draftNumber}`;
+    const draftTitle = asText(draft.title).trim();
+    const sectionTitle = draftTitle && draftTitle !== draftLabel
+      ? `${draftLabel}: ${draftTitle}`
+      : draftLabel;
+    const history = historyWithCurrentVersion(draft, draftTitle || draftLabel);
+    appendPageHistoryReport(lines, sectionTitle, draftLabel, history, { actualTitle: draftTitle });
+
+    const finalText = textForHistoryVersion(history[history.length - 1]) || asText(draft.content);
+    if (previousDraftFinalText !== null) {
+      lines.push(`## Changes from final Draft ${draftNumber - 1} to final Draft ${draftNumber}`);
+      lines.push("");
+      appendChangeSummary(lines, previousDraftFinalText, finalText, "Draft-to-draft changes", 3);
+    }
+    previousDraftFinalText = finalText;
+  });
+
+  return `${lines.join("\n").replace(/\n{4,}/g, "\n\n\n")}\n`;
+}
+
+function backupProjectFiles(state, options = {}) {
+  const textFolderPath = originalTextBackupFolderPath();
+  const markdownFolderPath = markdownHistoryBackupFolderPath();
+  if (!textFolderPath || !markdownFolderPath) return null;
+
+  fs.mkdirSync(textFolderPath, { recursive: true });
+  fs.mkdirSync(markdownFolderPath, { recursive: true });
+  const normalized = normalizeState(state);
+  const source = historySourceInfo(options);
+  const textFileName = safeBackupFileName(source.fileName, "draft-history.txt");
+  const textFilePath = path.join(textFolderPath, textFileName);
+  const historyReportPath = path.join(
+    markdownFolderPath,
+    `${safeHistoryBaseName(source.fileName)}${BACKUP_HISTORY_REPORT_SUFFIX}`
+  );
+  const stateWithHistory = applyExternalVersionHistory(normalized, options).state;
+
+  fs.writeFileSync(textFilePath, formatExport(normalized), "utf8");
+  fs.writeFileSync(historyReportPath, backupHistoryReport(stateWithHistory, options), "utf8");
+
+  return {
+    textFolderPath,
+    markdownFolderPath,
+    textFilePath,
+    historyReportPath
+  };
+}
+
+function writeAllWithBackup(state, options = {}) {
+  const savedState = writeAll(state, options);
+  return {
+    state: savedState,
+    backup: backupProjectFiles(savedState, options)
+  };
 }
 
 function stateForStorage(state) {
@@ -1190,7 +2563,8 @@ function statePathPayload(options = {}) {
     versionHistoryPath: findVersionHistoryFilePath({
       filePath: historySourcePath,
       fileName: options.fileName || (historySourcePath ? path.basename(historySourcePath) : "draft-history.txt")
-    })
+    }),
+    backupFolderPath: readBackupFolderPath()
   };
 }
 
@@ -1391,7 +2765,7 @@ async function chooseTextFileToSave(suggestedName) {
   return runPowerShell(command);
 }
 
-function windowsFolderDialogCommand(initialDirectory) {
+function windowsFolderDialogCommand(initialDirectory, description) {
   return [
     "Add-Type -AssemblyName System.Windows.Forms",
     "Add-Type -AssemblyName System.Drawing",
@@ -1405,7 +2779,7 @@ function windowsFolderDialogCommand(initialDirectory) {
     "$owner.Show()",
     "$owner.Activate()",
     "$dialog = New-Object System.Windows.Forms.FolderBrowserDialog",
-    "$dialog.Description = 'Select the version history folder'",
+    `$dialog.Description = ${powershellString(description)}`,
     "$dialog.ShowNewFolderButton = $true",
     `$dialog.SelectedPath = ${powershellString(initialDirectory)}`,
     "$result = $dialog.ShowDialog($owner)",
@@ -1419,10 +2793,20 @@ async function chooseVersionHistoryFolder() {
   const initialDirectory = readVersionHistoryFolderPath() || existingDirectory(readTextFileLink() || EXPORT_FILE);
 
   if (process.platform === "win32") {
-    return runPowerShell(windowsFolderDialogCommand(initialDirectory));
+    return runPowerShell(windowsFolderDialogCommand(initialDirectory, "Select the backup and version history folder"));
   }
 
   throw new Error("Version history folder selection is only available in the desktop Windows dialog right now.");
+}
+
+async function chooseBackupFolder() {
+  const initialDirectory = readVersionHistoryFolderPath() || existingDirectory(readTextFileLink() || EXPORT_FILE);
+
+  if (process.platform === "win32") {
+    return runPowerShell(windowsFolderDialogCommand(initialDirectory, "Select the backup and version history folder"));
+  }
+
+  throw new Error("Backup folder selection is only available in the desktop Windows dialog right now.");
 }
 
 function openFileLocation(filePath) {
@@ -1562,32 +2946,34 @@ async function handleApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/close") {
     markClientActive();
     const body = await readBody(req);
+    let result = null;
     if (body) {
       const payload = parseStatePayload(body);
-      writeAll(payload.state, {
+      result = writeAllWithBackup(payload.state, {
         filePath: payload.filePath,
         fileName: payload.fileName
       });
     } else {
-      writeAll(readState());
+      result = writeAllWithBackup(readState());
     }
-    sendJson(res, 200, { ok: true });
+    sendJson(res, 200, { ok: true, backup: result?.backup || null });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/shutdown") {
     const body = await readBody(req);
+    let result = null;
     if (body) {
       const payload = parseStatePayload(body);
-      writeAll(payload.state, {
+      result = writeAllWithBackup(payload.state, {
         filePath: payload.filePath,
         fileName: payload.fileName
       });
     } else {
-      writeAll(readState());
+      result = writeAllWithBackup(readState());
     }
 
-    sendJson(res, 200, { ok: true });
+    sendJson(res, 200, { ok: true, backup: result?.backup || null });
     setTimeout(() => {
       closeServerAndExit();
     }, 50).unref();
@@ -1603,6 +2989,34 @@ async function handleApi(req, res, pathname) {
       "content-length": Buffer.byteLength(body)
     });
     res.end(body);
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/backup/activate") {
+    markClientActive();
+    const folderPath = await chooseBackupFolder();
+    if (!folderPath) {
+      sendJson(res, 200, { ok: false, cancelled: true });
+      return;
+    }
+
+    const backupFolderPath = writeVersionHistoryFolderPath(folderPath);
+    sendJson(res, 200, {
+      ok: true,
+      backupFolderPath,
+      ...statePathPayload()
+    });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/backup/deactivate") {
+    markClientActive();
+    writeVersionHistoryFolderPath(null);
+    sendJson(res, 200, {
+      ok: true,
+      backupFolderPath: null,
+      ...statePathPayload()
+    });
     return;
   }
 
@@ -1813,7 +3227,7 @@ function createHttpServer() {
 
 function flushOnExit() {
   try {
-    writeAll(readState());
+    writeAllWithBackup(readState());
   } catch (error) {
     console.error(error);
   }
