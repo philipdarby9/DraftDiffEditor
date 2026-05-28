@@ -190,15 +190,12 @@ function allowedFormatValuesForField(field) {
 const MENU_SHORTCUT_LABELS = {
   new: { mac: "⌘N", default: "Ctrl+N" },
   open: { mac: "⌘O", default: "Ctrl+O" },
-  openRecent: { mac: "Cmd+Shift+O", default: "Ctrl+Shift+O" },
   openLocation: { mac: "⌘⌥O", default: "Ctrl+Alt+O" },
   saveAs: { mac: "⌘⇧S", default: "Ctrl+Shift+S" },
-  versionHistoryFolder: { mac: "Cmd+Opt+H", default: "Ctrl+Alt+H" },
   close: { mac: "⌘W", default: "Ctrl+W" },
   undo: { mac: "⌘Z", default: "Ctrl+Z" },
   redo: { mac: "⌘⇧Z", default: "Ctrl+Y" },
   search: { mac: "Cmd+F", default: "Ctrl+F" },
-  panelDrag: { mac: "Cmd+Opt+P", default: "Ctrl+Alt+P" },
   zoomIn: { mac: "⌘+", default: "Ctrl++" },
   zoomOut: { mac: "⌘-", default: "Ctrl+-" },
   pages1: { mac: "⌘1", default: "Ctrl+1" },
@@ -286,27 +283,6 @@ function handleGlobalShortcut(event) {
     return true;
   }
 
-  const isVersionHistoryFolderShortcut = isMacPlatform()
-    ? event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey && key === "h"
-    : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey && key === "h";
-
-  if (isVersionHistoryFolderShortcut) {
-    event.preventDefault();
-    selectVersionHistoryFolder();
-    return true;
-  }
-
-  const isPanelDragShortcut = isMacPlatform()
-    ? event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey && key === "p"
-    : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey && key === "p";
-
-  if (isPanelDragShortcut) {
-    event.preventDefault();
-    setPanelDragEnabled(!panelDragEnabled);
-    closeTopMenus();
-    return true;
-  }
-
   if (event.altKey) return false;
   if (!hasPlatformShortcutModifier(event)) return false;
 
@@ -340,12 +316,6 @@ function handleGlobalShortcut(event) {
   if (!event.shiftKey && key === "o") {
     event.preventDefault();
     openTextProject();
-    return true;
-  }
-
-  if (event.shiftKey && key === "o") {
-    event.preventDefault();
-    openRecentFilesSubmenu();
     return true;
   }
 

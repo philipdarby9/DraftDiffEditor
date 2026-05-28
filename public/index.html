@@ -26,7 +26,7 @@
               <button id="file-new" type="button"><span class="menu-check">✓</span><span>New</span><span class="menu-shortcut" data-shortcut="new">Ctrl+N</span></button>
               <button id="file-open" type="button"><span class="menu-check">✓</span><span>Open</span><span class="menu-shortcut" data-shortcut="open">Ctrl+O</span></button>
               <div id="file-open-recent" class="file-submenu">
-                <button id="file-open-recent-button" type="button" aria-haspopup="menu" aria-expanded="false"><span class="menu-check" aria-hidden="true"></span><span>Open recent</span><span class="menu-shortcut menu-shortcut-with-arrow"><span data-shortcut="openRecent">Ctrl+Shift+O</span><span class="menu-arrow" aria-hidden="true">›</span></span></button>
+                <button id="file-open-recent-button" type="button" aria-haspopup="menu" aria-expanded="false"><span class="menu-check" aria-hidden="true"></span><span>Open recent</span><span class="menu-shortcut menu-shortcut-with-arrow"><span aria-hidden="true"></span><span class="menu-arrow" aria-hidden="true">›</span></span></button>
                 <div id="file-open-recent-menu" class="file-submenu-panel" role="menu" aria-label="Recent files">
                   <button type="button" disabled><span class="menu-check" aria-hidden="true"></span><span>No recent files</span><span class="menu-shortcut" aria-hidden="true"></span></button>
                 </div>
@@ -34,8 +34,8 @@
               <button id="file-open-location" type="button"><span class="menu-check" aria-hidden="true"></span><span>Open file location</span><span class="menu-shortcut" data-shortcut="openLocation">Ctrl+Alt+O</span></button>
               <span class="menu-divider" aria-hidden="true"></span>
               <button id="file-save-as" type="button"><span class="menu-check">✓</span><span>Save as</span><span class="menu-shortcut" data-shortcut="saveAs">Ctrl+Shift+S</span></button>
-              <button id="file-version-history-folder" type="button"><span class="menu-check" aria-hidden="true"></span><span>Version history folder</span><span class="menu-shortcut" data-shortcut="versionHistoryFolder">Ctrl+Alt+H</span></button>
               <button id="file-activate-backup" type="button" aria-pressed="false"><span class="menu-check" aria-hidden="true"></span><span>Activate backup</span><span class="menu-shortcut" aria-hidden="true"></span></button>
+              <button id="file-version-history-folder" type="button"><span class="menu-check" aria-hidden="true"></span><span>Backup folder</span><span class="menu-shortcut" aria-hidden="true"></span></button>
               <span class="menu-divider" aria-hidden="true"></span>
               <button id="file-close" type="button"><span class="menu-check" aria-hidden="true"></span><span>Close</span><span class="menu-shortcut" data-shortcut="close">Ctrl+W</span></button>
             </div>
@@ -63,7 +63,7 @@
           <details id="view-menu" class="file-menu">
             <summary>View</summary>
             <div class="file-menu-panel">
-              <button id="view-enable-panel-drag" type="button" aria-pressed="false"><span class="menu-check"></span><span>Enable panel drag</span><span class="menu-shortcut" data-shortcut="panelDrag">Ctrl+Alt+P</span></button>
+              <button id="view-enable-panel-drag" type="button" aria-pressed="false"><span class="menu-check"></span><span>Enable panel drag</span><span class="menu-shortcut" aria-hidden="true"></span></button>
               <span class="menu-divider" aria-hidden="true"></span>
               <div class="zoom-menu-control" aria-label="Zoom controls">
                 <span class="menu-check" aria-hidden="true"></span>
