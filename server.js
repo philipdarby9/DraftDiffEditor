@@ -1,8 +1,10 @@
 const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
+const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { URL } = require("node:url");
+const { Worker } = require("node:worker_threads");
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
@@ -15,21 +17,34 @@ const VERSION_HISTORY_FOLDER_FILE = path.join(DATA_DIR, "version-history-folder.
 const BACKUP_FOLDER_FILE = path.join(DATA_DIR, "backup-folder.json");
 const VERSION_HISTORY_FILE_SUFFIX = ".version-history.json";
 const BACKUP_HISTORY_REPORT_SUFFIX = ".version-history.md";
+const CUT_HISTORY_REPORT_SUFFIX = ".per-draft-cut-history.html";
 const PORT = Number(process.env.PORT || 4173);
 const PROJECT_NOTES_TITLE = "Project notes";
 const FORMAT_DEFAULT_VERSION = 2;
 const VIEW_STATE_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
 const MIN_PAGE_PANE_PERCENT = 12;
-const SERVER_BUILD = "server-compare-created-label-2026-05-20";
+const SERVER_BUILD = "server-per-draft-final-diffs-only-2026-05-31";
 const AUTO_EXIT_ON_IDLE = process.env.DRAFT_DIFF_AUTO_EXIT === "1";
 const CLIENT_IDLE_EXIT_MS = 5 * 60_000;
 const STARTUP_IDLE_EXIT_MS = 120_000;
+
+class BackupFolderMissingError extends Error {
+  constructor(folderPath) {
+    super(`Backup folder missing: ${folderPath}`);
+    this.name = "BackupFolderMissingError";
+    this.code = "BACKUP_FOLDER_MISSING";
+    this.statusCode = 409;
+    this.folderPath = folderPath;
+  }
+}
 
 let lastClientSeenAt = 0;
 let activeServer = null;
 let idleTimer = null;
 let processExitRequested = false;
+const cutHistoryJobs = new Map();
+const cutHistoryIdleWaiters = new Set();
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -579,6 +594,16 @@ function ensureDataDir() {
   fs.mkdirSync(DATA_DIR, { recursive: true });
 }
 
+function directoryExists(folderPath) {
+  if (!folderPath) return false;
+
+  try {
+    return fs.existsSync(folderPath) && fs.statSync(folderPath).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
 function readVersionHistoryFolderPath() {
   ensureDataDir();
 
@@ -597,6 +622,23 @@ function readVersionHistoryFolderPath() {
   } catch {
     return null;
   }
+}
+
+function versionHistoryFolderMissing() {
+  const folderPath = readVersionHistoryFolderPath();
+  return Boolean(folderPath && !directoryExists(folderPath));
+}
+
+function existingVersionHistoryFolderPath() {
+  const folderPath = readVersionHistoryFolderPath();
+  return directoryExists(folderPath) ? folderPath : null;
+}
+
+function requireVersionHistoryFolderPath() {
+  const folderPath = readVersionHistoryFolderPath();
+  if (!folderPath) return null;
+  if (!directoryExists(folderPath)) throw new BackupFolderMissingError(folderPath);
+  return folderPath;
 }
 
 function writeVersionHistoryFolderPath(folderPath) {
@@ -675,28 +717,37 @@ function safeBackupFileName(sourceName, fallbackName = "draft-history.txt") {
   return cleaned || fallback;
 }
 
-function versionHistoryJsonFolderPath() {
-  const folderPath = readVersionHistoryFolderPath();
+function versionHistoryJsonFolderPath(options = {}) {
+  const folderPath = options.requireExistingRoot
+    ? requireVersionHistoryFolderPath()
+    : existingVersionHistoryFolderPath();
   return folderPath ? path.join(folderPath, "json") : null;
 }
 
 function legacyVersionHistoryJsonFolderPath() {
-  const folderPath = readVersionHistoryFolderPath();
+  const folderPath = existingVersionHistoryFolderPath();
   return folderPath ? path.join(folderPath, "jsons") : null;
 }
 
 function originalTextBackupFolderPath() {
-  const folderPath = readBackupFolderPath();
+  const folderPath = requireVersionHistoryFolderPath();
   return folderPath ? path.join(folderPath, "original txt") : null;
 }
 
 function markdownHistoryBackupFolderPath() {
-  const folderPath = readBackupFolderPath();
+  const folderPath = requireVersionHistoryFolderPath();
   return folderPath ? path.join(folderPath, "version history md") : null;
 }
 
+function historySummaryBackupFolderPath() {
+  const folderPath = requireVersionHistoryFolderPath();
+  return folderPath ? path.join(folderPath, "version history summaries") : null;
+}
+
 function expectedVersionHistoryFilePath(options = {}) {
-  const folderPath = versionHistoryJsonFolderPath();
+  const folderPath = versionHistoryJsonFolderPath({
+    requireExistingRoot: Boolean(options.requireExistingRoot)
+  });
   if (!folderPath) return null;
   const source = historySourceInfo(options);
   return path.join(folderPath, `${safeHistoryBaseName(source.fileName)}${VERSION_HISTORY_FILE_SUFFIX}`);
@@ -718,7 +769,7 @@ function versionHistoryPayloadMatchesSource(payload, source) {
 }
 
 function findVersionHistoryFilePath(options = {}) {
-  const rootFolderPath = readVersionHistoryFolderPath();
+  const rootFolderPath = existingVersionHistoryFolderPath();
   const jsonFolderPath = versionHistoryJsonFolderPath();
   if (!rootFolderPath || !jsonFolderPath) return null;
 
@@ -894,14 +945,14 @@ function stateWithoutVersionHistory(state) {
 }
 
 function persistVersionHistory(state, options = {}) {
-  const folderPath = versionHistoryJsonFolderPath();
+  const folderPath = versionHistoryJsonFolderPath({ requireExistingRoot: true });
   if (!folderPath) return null;
 
   fs.mkdirSync(folderPath, { recursive: true });
-  const filePath = expectedVersionHistoryFilePath(options);
-  const stateToWrite = options.mergeExisting
-    ? applyExternalVersionHistory(state, options).state
-    : state;
+  const filePath = expectedVersionHistoryFilePath({ ...options, requireExistingRoot: true });
+  const stateToWrite = options.mergeExisting === false
+    ? state
+    : applyExternalVersionHistory(state, options).state;
   fs.writeFileSync(
     filePath,
     `${JSON.stringify(versionHistoryPayloadFromState(stateToWrite, options), null, 2)}\n`,
@@ -2133,24 +2184,53 @@ function appendPageHistoryReport(lines, sectionTitle, versionBaseLabel, history,
     lines.push(`### ${markdownHeadingText(versionLabel)}`);
     if (version.createdAt) lines.push(`Recorded: ${formatDate(version.createdAt)}`);
     lines.push("");
-    if (index > 0) {
+    if (index > 0 && options.includeChangeSummaries !== false) {
       appendChangeSummary(lines, textForHistoryVersion(history[index - 1]), text);
     }
     appendFullText(lines, text);
   });
 }
 
+function historyReportInputCharacters(state) {
+  let total = 0;
+  const addHistory = history => {
+    if (!Array.isArray(history)) return;
+    history.forEach(version => {
+      total += textForHistoryVersion(version).length;
+    });
+  };
+
+  total += asText(state?.initialNotes?.content).length;
+  addHistory(state?.initialNotes?.versionHistory);
+  (state?.drafts || []).forEach(draft => {
+    total += asText(draft?.content).length;
+    addHistory(draft?.versionHistory);
+  });
+  return total;
+}
+
+function shouldUseFastHistoryReport(state) {
+  return historyReportInputCharacters(state) > 750_000;
+}
+
 function backupHistoryReport(state, options = {}) {
   const source = historySourceInfo(options);
+  const includeChangeSummaries = options.includeChangeSummaries !== false;
   const lines = [
     `# ${markdownHeadingText(source.fileName)} version history`,
     "",
     `Generated: ${formatDate(nowIso())}`,
     ""
   ];
+  if (!includeChangeSummaries) {
+    lines.push("Change summaries omitted because this history is large. Full version texts are still included.");
+    lines.push("");
+  }
 
   const projectNotesHistory = historyWithCurrentVersion(state.initialNotes, PROJECT_NOTES_TITLE);
-  appendPageHistoryReport(lines, PROJECT_NOTES_TITLE, PROJECT_NOTES_TITLE, projectNotesHistory);
+  appendPageHistoryReport(lines, PROJECT_NOTES_TITLE, PROJECT_NOTES_TITLE, projectNotesHistory, {
+    includeChangeSummaries
+  });
 
   let previousDraftFinalText = null;
   (state.drafts || []).forEach((draft, index) => {
@@ -2161,10 +2241,13 @@ function backupHistoryReport(state, options = {}) {
       ? `${draftLabel}: ${draftTitle}`
       : draftLabel;
     const history = historyWithCurrentVersion(draft, draftTitle || draftLabel);
-    appendPageHistoryReport(lines, sectionTitle, draftLabel, history, { actualTitle: draftTitle });
+    appendPageHistoryReport(lines, sectionTitle, draftLabel, history, {
+      actualTitle: draftTitle,
+      includeChangeSummaries
+    });
 
     const finalText = textForHistoryVersion(history[history.length - 1]) || asText(draft.content);
-    if (previousDraftFinalText !== null) {
+    if (previousDraftFinalText !== null && includeChangeSummaries) {
       lines.push(`## Changes from final Draft ${draftNumber - 1} to final Draft ${draftNumber}`);
       lines.push("");
       appendChangeSummary(lines, previousDraftFinalText, finalText, "Draft-to-draft changes", 3);
@@ -2175,31 +2258,871 @@ function backupHistoryReport(state, options = {}) {
   return `${lines.join("\n").replace(/\n{4,}/g, "\n\n\n")}\n`;
 }
 
+function cutReportVersionLabel(index, total) {
+  return index === total - 1 ? `Version ${index + 1} / latest` : `Version ${index + 1}`;
+}
+
+function cutReportDate(iso) {
+  return iso ? formatDate(iso) : "unknown time";
+}
+
+function draftAnchorId(title, index) {
+  const slug = asText(title)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/gu, "-")
+    .replace(/^-+|-+$/gu, "");
+  return slug || `draft-${index + 1}`;
+}
+
+function removedPartRange(parts) {
+  const ranges = parts
+    .map(part => ({
+      start: part.beforeStart ?? part.start,
+      end: part.beforeEnd ?? part.end
+    }))
+    .filter(range => Number.isFinite(range.start) && Number.isFinite(range.end));
+
+  if (!ranges.length) return null;
+  return {
+    start: Math.min(...ranges.map(range => range.start)),
+    end: Math.max(...ranges.map(range => range.end))
+  };
+}
+
+function moveCutContextToWordBoundary(text, index, direction) {
+  let current = Math.max(0, Math.min(text.length, index));
+  if (direction < 0) {
+    while (current > 0 && !/\s/u.test(text[current - 1])) current -= 1;
+    return current;
+  }
+  while (current < text.length && !/\s/u.test(text[current])) current += 1;
+  return current;
+}
+
+function cutContextStart(text, cutStart, maxChars = 190) {
+  const minStart = Math.max(0, cutStart - maxChars);
+  const prefix = text.slice(minStart, cutStart);
+  const matches = Array.from(prefix.matchAll(/(?:\n\s*\n|[.!?:;]\s+)/gu));
+  const boundaryMatch = matches[matches.length - 1];
+
+  if (boundaryMatch) {
+    const candidate = minStart + boundaryMatch.index + boundaryMatch[0].length;
+    if (candidate >= minStart && candidate < cutStart) return candidate;
+  }
+
+  return moveCutContextToWordBoundary(text, minStart, 1);
+}
+
+function cutContextEnd(text, cutEnd, maxChars = 230) {
+  const maxEnd = Math.min(text.length, cutEnd + maxChars);
+  const suffix = text.slice(cutEnd, maxEnd);
+  const boundaryMatch = suffix.match(/(?:\n\s*\n|[.!?:;]\s+)/u);
+
+  if (boundaryMatch) {
+    const candidate = cutEnd + boundaryMatch.index + boundaryMatch[0].length;
+    if (candidate > cutEnd && candidate <= maxEnd) return candidate;
+  }
+
+  return moveCutContextToWordBoundary(text, maxEnd, -1);
+}
+
+function cutContextHtml(sourceText, range) {
+  if (!range) return "";
+
+  const text = normalizeDiffSource(sourceText);
+  const start = Math.max(0, Math.min(text.length, range.start));
+  const end = Math.max(start, Math.min(text.length, range.end));
+  const contextStart = cutContextStart(text, start);
+  const contextEnd = cutContextEnd(text, end);
+  const prefix = text.slice(contextStart, start);
+  const cut = text.slice(start, end);
+  const suffix = text.slice(end, contextEnd);
+
+  return [
+    contextStart > 0 ? "..." : "",
+    escapeHtml(prefix),
+    `<mark>${escapeHtml(cut)}</mark>`,
+    escapeHtml(suffix),
+    contextEnd < text.length ? "..." : ""
+  ].join("");
+}
+
+function cutSegmentFromRemovedParts(sourceText, parts) {
+  const range = removedPartRange(parts);
+  const source = normalizeDiffSource(sourceText);
+  const raw = range
+    ? source.slice(range.start, range.end)
+    : parts.map(part => part.text || "").join("");
+  const text = raw.replace(/\s+/gu, " ").trim();
+  if (!text) return null;
+
+  const words = wordCountForText(text);
+  if (!words) return null;
+
+  const type = raw.includes("\n") || /[.!?:;]/u.test(raw) || words >= 18 ? "line/passage" : "within-line cut";
+  return {
+    type,
+    text,
+    words,
+    context: cutContextHtml(source, range)
+  };
+}
+
+function diffSideRangeFromPart(part, side) {
+  const start = side === "after"
+    ? part.afterStart
+    : part.beforeStart;
+  const end = side === "after"
+    ? part.afterEnd
+    : part.beforeEnd;
+  return Number.isFinite(start) && Number.isFinite(end) ? { start, end } : null;
+}
+
+function diffChangedSideWindow(parts, side) {
+  const changedIndexes = [];
+  const ranges = [];
+
+  parts.forEach((part, index) => {
+    if (!isChangedDiffPart(part)) return;
+    changedIndexes.push(index);
+    const range = diffSideRangeFromPart(part, side);
+    if (range) ranges.push(range);
+  });
+
+  if (!changedIndexes.length) return null;
+  if (ranges.length) {
+    return {
+      start: Math.min(...ranges.map(range => range.start)),
+      end: Math.max(...ranges.map(range => range.end))
+    };
+  }
+
+  const firstChangedIndex = changedIndexes[0];
+  const lastChangedIndex = changedIndexes[changedIndexes.length - 1];
+  let beforeAnchor = null;
+  let afterAnchor = null;
+
+  for (let index = firstChangedIndex - 1; index >= 0; index -= 1) {
+    const range = diffSideRangeFromPart(parts[index], side);
+    if (range) {
+      beforeAnchor = range.end;
+      break;
+    }
+  }
+
+  for (let index = lastChangedIndex + 1; index < parts.length; index += 1) {
+    const range = diffSideRangeFromPart(parts[index], side);
+    if (range) {
+      afterAnchor = range.start;
+      break;
+    }
+  }
+
+  const anchor = Number.isFinite(beforeAnchor) ? beforeAnchor : (Number.isFinite(afterAnchor) ? afterAnchor : 0);
+  return { start: anchor, end: anchor };
+}
+
+function diffTransitionInfo(before, after, beforeIndex) {
+  const parts = diffReportTexts(before.content, after.content);
+  if (!parts.some(isChangedDiffPart)) return null;
+
+  return {
+    before,
+    after,
+    beforeIndex,
+    afterIndex: beforeIndex + 1,
+    beforeWindow: diffChangedSideWindow(parts, "before"),
+    afterWindow: diffChangedSideWindow(parts, "after")
+  };
+}
+
+function rangeGap(left, right) {
+  if (!left || !right) return Infinity;
+  if (left.end < right.start) return right.start - left.end;
+  if (right.end < left.start) return left.start - right.end;
+  return 0;
+}
+
+function rangesTouchSamePhrase(sharedText, left, right) {
+  const gap = rangeGap(left, right);
+  if (!Number.isFinite(gap)) return false;
+  if (gap <= 12) return true;
+  if (gap > 120) return false;
+
+  const betweenStart = Math.min(left.end, right.end);
+  const betweenEnd = Math.max(left.start, right.start);
+  const between = normalizeDiffSource(sharedText).slice(betweenStart, betweenEnd);
+  return !/[.!?\n]/u.test(between);
+}
+
+function shouldMergeCutHistoryTransitions(previous, next, sharedText) {
+  return rangesTouchSamePhrase(sharedText, previous.afterWindow, next.beforeWindow);
+}
+
+function cutSegmentsFromVersions(beforeText, afterText) {
+  const beforeSource = normalizeDiffSource(beforeText);
+  const afterSource = normalizeDiffSource(afterText);
+  const parts = diffReportTexts(beforeSource, afterSource);
+  const segments = [];
+  let current = [];
+
+  const flush = () => {
+    const segment = cutSegmentFromRemovedParts(beforeSource, current);
+    current = [];
+    if (segment) segments.push(segment);
+  };
+
+  parts.forEach(part => {
+    if (part.type === "removed") {
+      current.push(part);
+      return;
+    }
+    if (current.length) flush();
+  });
+
+  if (current.length) flush();
+  return segments;
+}
+
+function coalescedCutHistoryTransitions(versions) {
+  const transitions = [];
+  let run = null;
+
+  const flushRun = () => {
+    if (!run) return;
+    const cuts = cutSegmentsFromVersions(run.before.content, run.after.content);
+    if (cuts.length) {
+      transitions.push({
+        before: run.before,
+        after: run.after,
+        beforeIndex: run.beforeIndex,
+        afterIndex: run.afterIndex,
+        coalescedVersionCount: run.afterIndex - run.beforeIndex,
+        cuts
+      });
+    }
+    run = null;
+  };
+
+  for (let versionIndex = 0; versionIndex < versions.length - 1; versionIndex += 1) {
+    const info = diffTransitionInfo(versions[versionIndex], versions[versionIndex + 1], versionIndex);
+    if (!info) continue;
+
+    if (
+      run &&
+      run.afterIndex === info.beforeIndex &&
+      shouldMergeCutHistoryTransitions(run.lastInfo, info, versions[info.beforeIndex].content)
+    ) {
+      run.after = info.after;
+      run.afterIndex = info.afterIndex;
+      run.lastInfo = info;
+      continue;
+    }
+
+    flushRun();
+    run = {
+      before: info.before,
+      after: info.after,
+      beforeIndex: info.beforeIndex,
+      afterIndex: info.afterIndex,
+      lastInfo: info
+    };
+  }
+
+  flushRun();
+  return transitions;
+}
+
+function cutHistoryVersionsForDraft(draft, index) {
+  const fallbackTitle = draft?.title || `Draft ${index + 1}`;
+  return historyWithCurrentVersion(draft, fallbackTitle).map(version => ({
+    createdAt: version.createdAt || draft?.updatedAt || draft?.createdAt || null,
+    content: normalizeDiffSource(textForHistoryVersion(version))
+  }));
+}
+
+function analyseDraftCutHistory(draft, index) {
+  const title = draft?.title || `Draft ${index + 1}`;
+  const versions = cutHistoryVersionsForDraft(draft, index);
+  const currentText = versions.length ? versions[versions.length - 1].content : normalizeDiffSource(draft?.content || "");
+  const transitions = coalescedCutHistoryTransitions(versions);
+
+  const cutEntries = transitions.reduce((sum, transition) => sum + transition.cuts.length, 0);
+  const cutWords = transitions.reduce(
+    (sum, transition) => sum + transition.cuts.reduce((innerSum, cut) => innerSum + cut.words, 0),
+    0
+  );
+
+  return {
+    title,
+    anchorId: draftAnchorId(title, index),
+    currentText,
+    currentWords: wordCountForText(currentText),
+    historyCount: normalizePageVersionHistory(draft?.versionHistory, draft, title).length,
+    versions,
+    transitions,
+    cutEntries,
+    cutWords
+  };
+}
+
+function cutTransitionHeading(transition, totalVersions) {
+  const beforeText = `${cutReportVersionLabel(transition.beforeIndex, totalVersions)} (${cutReportDate(transition.before.createdAt)})`;
+  const afterIndex = Number.isInteger(transition.afterIndex) ? transition.afterIndex : transition.beforeIndex + 1;
+  const afterText = `${cutReportVersionLabel(afterIndex, totalVersions)} (${cutReportDate(transition.after.createdAt)})`;
+  const autosaves = transition.coalescedVersionCount > 1
+    ? `; ${transition.coalescedVersionCount.toLocaleString("en-GB")} autosave snapshots coalesced`
+    : "";
+  return `${beforeText} -> ${afterText}${autosaves}`;
+}
+
+function finalDraftDiffAnchorId(index) {
+  return `final-draft-change-${index + 1}-${index + 2}`;
+}
+
+function finalDraftDiffWordStats(parts) {
+  return parts.reduce((stats, part) => {
+    if (part.type === "added" && isDiffSequenceWordText(part.text)) stats.addedWords += 1;
+    if (part.type === "removed" && isDiffSequenceWordText(part.text)) stats.removedWords += 1;
+    return stats;
+  }, { addedWords: 0, removedWords: 0 });
+}
+
+function finalDraftDiffsForDrafts(drafts) {
+  const comparisons = [];
+  for (let index = 0; index < drafts.length - 1; index += 1) {
+    const left = drafts[index];
+    const right = drafts[index + 1];
+    const parts = diffReportTexts(left.currentText, right.currentText);
+    const stats = finalDraftDiffWordStats(parts);
+    comparisons.push({
+      ...stats,
+      anchorId: finalDraftDiffAnchorId(index),
+      changed: parts.some(part => part.type === "added" || part.type === "removed"),
+      left,
+      right,
+      parts
+    });
+  }
+  return comparisons;
+}
+
+function renderFinalDraftDiffPart(part) {
+  const text = escapeHtml(part.text || "");
+  if (!text) return "";
+  if (part.type === "added") return `<span class="compare-token added">${text}</span>`;
+  if (part.type === "removed") return `<span class="compare-token removed">${text}</span>`;
+  return text;
+}
+
+function compactFinalDraftDiffParts(parts) {
+  const compacted = [];
+  parts.forEach(part => {
+    const type = part.type === "added" || part.type === "removed" ? part.type : "same";
+    const text = part.text || "";
+    if (!text) return;
+
+    const previous = compacted[compacted.length - 1];
+    if (previous?.type === type) {
+      previous.text += text;
+      return;
+    }
+    compacted.push({ type, text });
+  });
+  return compacted;
+}
+
+function finalDraftDiffMetaText(change) {
+  return change.changed
+    ? `${change.addedWords.toLocaleString("en-GB")} added ${change.addedWords === 1 ? "word" : "words"}; ${change.removedWords.toLocaleString("en-GB")} removed ${change.removedWords === 1 ? "word" : "words"}.`
+    : "No final-draft text changes detected.";
+}
+
+function finalDraftDiffBodyHtml(change) {
+  return change.changed
+    ? `<div class="final-draft-diff-text">${compactFinalDraftDiffParts(change.parts).map(renderFinalDraftDiffPart).join("")}</div>`
+    : "<p>No final-draft text changes detected between these drafts.</p>";
+}
+
+function draftFinalComparisonHtml(draft, finalDraftDiff) {
+  if (!finalDraftDiff) {
+    return `<details><summary>Current ${escapeHtml(draft.title)} baseline text</summary><div class="text">${escapeHtml(draft.currentText)}</div></details>`;
+  }
+
+  return `<details><summary>Final changes from ${escapeHtml(finalDraftDiff.left.title)} to ${escapeHtml(finalDraftDiff.right.title)}</summary><p class="meta">${escapeHtml(finalDraftDiffMetaText(finalDraftDiff))}</p>${finalDraftDiffBodyHtml(finalDraftDiff)}</details>`;
+}
+
+function backupCutHistoryReport(state, options = {}) {
+  const source = historySourceInfo(options);
+  const sourceName = source.fileName || "draft-history.txt";
+  const jsonPath = options.versionHistoryPath || "";
+  const liveTextPath = source.filePath || "";
+  const drafts = (state.drafts || []).map(analyseDraftCutHistory);
+  const finalDraftDiffs = finalDraftDiffsForDrafts(drafts);
+  const totalVersions = drafts.reduce((sum, draft) => sum + draft.versions.length, 0);
+  const totalCutEntries = drafts.reduce((sum, draft) => sum + draft.cutEntries, 0);
+  const totalCutWords = drafts.reduce((sum, draft) => sum + draft.cutWords, 0);
+  const rows = drafts.map(draft => {
+    const savedHistory = draft.historyCount
+      ? `${draft.historyCount.toLocaleString("en-GB")} saved`
+      : "current only";
+    return `<tr><td><a href="#${escapeHtml(draft.anchorId)}">${escapeHtml(draft.title)}</a></td><td>${draft.versions.length.toLocaleString("en-GB")}</td><td>${draft.currentWords.toLocaleString("en-GB")}</td><td>${draft.cutEntries.toLocaleString("en-GB")}</td><td>${draft.cutWords.toLocaleString("en-GB")}</td><td>${escapeHtml(savedHistory)}</td></tr>`;
+  }).join("\n");
+  const contents = drafts
+    .map(draft => `<a href="#${escapeHtml(draft.anchorId)}">${escapeHtml(draft.title)}</a>`);
+  const contentsHtml = contents
+    .join("");
+  const sections = drafts.map((draft, index) => {
+    const transitions = draft.transitions.length
+      ? draft.transitions.map(transition => {
+        const cuts = transition.cuts.map((cut, index) => {
+          const context = cut.context
+            ? `<p class="context-label">Context in previous version</p><blockquote class="removed-context">${cut.context}</blockquote>`
+            : `<blockquote>${escapeHtml(cut.text)}</blockquote>`;
+          return `<div class="cut"><p class="meta">${index + 1}. ${escapeHtml(cut.type)}; ${cut.words.toLocaleString("en-GB")} ${cut.words === 1 ? "word" : "words"}</p>${context}</div>`;
+        }).join("\n");
+        return `<article class="transition"><h3>${escapeHtml(cutTransitionHeading(transition, draft.versions.length))}</h3>${cuts}</article>`;
+      }).join("\n")
+      : "<p>No cuts detected for this draft.</p>";
+
+    return `<section id="${escapeHtml(draft.anchorId)}"><h2>${escapeHtml(draft.title)}</h2><p class="meta">${draft.versions.length.toLocaleString("en-GB")} saved/current versions checked. ${draft.cutEntries.toLocaleString("en-GB")} cut entries, ${draft.cutWords.toLocaleString("en-GB")} cut words.</p>${draftFinalComparisonHtml(draft, finalDraftDiffs[index - 1] || null)}${transitions}</section>`;
+  }).join("\n");
+
+  return `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>${escapeHtml(sourceName)} per-draft cut history</title>
+<style>
+body{margin:0;background:#fbfbfa;color:#202020;font:16px/1.55 Georgia,'Times New Roman',serif}
+main{max-width:1040px;margin:0 auto;padding:32px 28px 64px}
+h1,h2,h3,summary,.meta,table{font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+h1{font-size:28px;margin:0 0 8px}
+h2{border-top:1px solid #d8d8d8;margin-top:34px;padding-top:22px}
+h3{font-size:16px;margin:18px 0 8px}
+.meta{color:#666;font-size:13px}
+.summary{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:22px 0}
+.stat{background:#fff;border:1px solid #d8d8d8;padding:12px}
+.stat strong{display:block;font:700 20px/1.2 system-ui,-apple-system,Segoe UI,sans-serif}
+.contents{display:flex;flex-wrap:wrap;gap:8px;margin:18px 0}
+.contents a{border:1px solid #d8d8d8;background:#fff;color:#17456f;font:600 13px/1.2 system-ui,-apple-system,Segoe UI,sans-serif;padding:7px 10px;text-decoration:none}
+.contents a:hover,.contents a:focus{background:#eef5fa;text-decoration:underline}
+.final-draft-links{display:flex;flex-wrap:wrap;gap:8px;margin:12px 0 18px}
+.final-draft-links a{border:1px solid #d8d8d8;background:#fff;color:#17456f;font:600 13px/1.2 system-ui,-apple-system,Segoe UI,sans-serif;padding:7px 10px;text-decoration:none}
+.final-draft-links a:hover,.final-draft-links a:focus{background:#eef5fa;text-decoration:underline}
+.final-draft-diff{background:#fff;border:1px solid #d8d8d8;margin:14px 0;padding:12px 14px;break-inside:avoid}
+.final-draft-diff-text{white-space:pre-wrap;font:15px/1.62 Georgia,'Times New Roman',serif}
+.compare-token{border-radius:2px;padding:0 1px}
+.compare-token.added{background:#dff5df;color:#17602b;text-decoration:none}
+.compare-token.removed{background:#ffe1d6;color:#9b1c1c;text-decoration:line-through}
+table{border-collapse:collapse;width:100%;font-size:14px;margin:18px 0}
+th,td{border-bottom:1px solid #d8d8d8;padding:8px;text-align:left;vertical-align:top}
+td a{color:#17456f;font-weight:600}
+section{scroll-margin-top:18px}
+details{background:#fff;border:1px solid #d8d8d8;margin:12px 0;padding:10px 14px}
+summary{cursor:pointer;font-weight:700}
+.text,blockquote{white-space:pre-wrap}
+blockquote{background:#fff;border-left:4px solid #777;margin:6px 0 14px;padding:10px 14px}
+.context-label{font:600 12px/1.2 system-ui,-apple-system,Segoe UI,sans-serif;color:#666;margin:0 0 4px}
+.removed-context mark{background:#ffe1d6;color:#7f220f;padding:0 2px}
+.transition{break-inside:avoid}
+.cut{margin-left:8px}
+@media print{body{background:#fff}details{border:0;padding:0}details:not([open])>:not(summary){display:block}summary{list-style:none}}
+</style>
+</head>
+<body>
+<main>
+<h1>${escapeHtml(sourceName)}: per-draft cut history</h1>
+<p class="meta">Generated ${escapeHtml(formatDate(nowIso()))}. Source JSON: ${escapeHtml(jsonPath)}. Live current text: ${escapeHtml(liveTextPath)}.</p>
+<p>This report is grouped by the ${drafts.length.toLocaleString("en-GB")} drafts in the live current text file. Each draft section shows the final changes from the previous draft to that draft, then coalesces adjacent autosave snapshots that touch the same local word or phrase and records passages, plus smaller within-line cuts, that disappear across that change run. It is based on saved version-history snapshots, so unsaved keystrokes between snapshots cannot be recovered.</p>
+<div class="summary"><div class="stat"><strong>${drafts.length.toLocaleString("en-GB")}</strong> current drafts</div><div class="stat"><strong>${finalDraftDiffs.length.toLocaleString("en-GB")}</strong> final comparisons</div><div class="stat"><strong>${totalVersions.toLocaleString("en-GB")}</strong> versions checked</div><div class="stat"><strong>${totalCutEntries.toLocaleString("en-GB")}</strong> cut entries</div><div class="stat"><strong>${totalCutWords.toLocaleString("en-GB")}</strong> cut words</div></div>
+<nav class="contents" aria-label="Draft contents">${contentsHtml}</nav>
+<table><thead><tr><th>Draft</th><th>Versions checked</th><th>Current words</th><th>Cut entries</th><th>Cut words</th><th>Saved history</th></tr></thead><tbody>${rows}</tbody></table>
+${sections}
+</main>
+</body>
+</html>
+`;
+}
+
+function historyArrayFromPayloadEntry(entry) {
+  return Array.isArray(entry?.history)
+    ? entry.history
+    : Array.isArray(entry?.versionHistory)
+      ? entry.versionHistory
+      : [];
+}
+
+function latestHistoryEntry(history) {
+  return history.length ? history[history.length - 1] : {};
+}
+
+function parseLiveDraftContents(text) {
+  const byTitle = new Map();
+  const byIndex = [];
+  normalizeDiffSource(text).split(/\n---\n/u).forEach(section => {
+    const lines = section.replace(/^\n+|\n+$/gu, "").split("\n");
+    const title = lines[0] || "";
+    if (!lines.some(line => /^Word count:/u.test(line))) return;
+
+    const contentStart = lines.findIndex((line, index) => index > 0 && line === "");
+    const content = contentStart >= 0 ? lines.slice(contentStart + 1).join("\n").trimEnd() : "";
+    const normalizedContent = content === "[No text yet]" ? "" : content;
+    byTitle.set(title, normalizedContent);
+    byIndex.push({ title, content: normalizedContent });
+  });
+  return { byTitle, byIndex };
+}
+
+function stateFromVersionHistoryPayload(payload, liveText = "") {
+  const liveDrafts = parseLiveDraftContents(liveText);
+  const storyHistory = historyArrayFromPayloadEntry(payload.story || payload.initialNotes);
+  const latestStory = latestHistoryEntry(storyHistory);
+  const createdAt = payload.projectCreatedAt || latestStory.createdAt || payload.updatedAt || nowIso();
+  const updatedAt = payload.projectUpdatedAt || payload.updatedAt || latestStory.createdAt || createdAt;
+
+  return {
+    version: 1,
+    createdAt,
+    updatedAt,
+    initialNotes: {
+      id: payload.story?.id || "initial-notes",
+      title: PROJECT_NOTES_TITLE,
+      createdAt: latestStory.createdAt || createdAt,
+      updatedAt: latestStory.createdAt || updatedAt,
+      content: latestStory.content || "",
+      contentHtml: latestStory.contentHtml || textToHtml(latestStory.content || ""),
+      format: normalizeFormat(latestStory.format || {}),
+      versionHistory: storyHistory
+    },
+    drafts: (payload.drafts || [])
+      .slice()
+      .sort((left, right) => {
+        const leftIndex = Number.isInteger(left?.index) ? left.index : 0;
+        const rightIndex = Number.isInteger(right?.index) ? right.index : 0;
+        return leftIndex - rightIndex;
+      })
+      .map((draft, index) => {
+        const history = historyArrayFromPayloadEntry(draft);
+        const latest = latestHistoryEntry(history);
+        const title = latest.title || draft?.title || `Draft ${index + 1}`;
+        const content = liveDrafts.byTitle.get(title) ?? liveDrafts.byIndex[index]?.content ?? latest.content ?? "";
+        return {
+          id: draft?.id || `draft-${index + 1}`,
+          title,
+          createdAt: draft?.createdAt || latest.createdAt || createdAt,
+          updatedAt: latest.createdAt || draft?.createdAt || updatedAt,
+          content,
+          contentHtml: latest.content === content ? latest.contentHtml || textToHtml(content) : textToHtml(content),
+          format: normalizeFormat(latest.format || {}),
+          versionHistory: history,
+          notes: {
+            id: `notes-${draft?.id || index + 1}`,
+            title: `${title} Notes`,
+            createdAt: draft?.createdAt || createdAt,
+            updatedAt: draft?.createdAt || updatedAt,
+            content: "",
+            contentHtml: "",
+            format: { ...DEFAULT_FORMAT }
+          }
+        };
+      })
+  };
+}
+
+function readFileHashInput(filePath) {
+  return fs.existsSync(filePath) ? fs.readFileSync(filePath) : Buffer.alloc(0);
+}
+
+function stableHistoryForHash(history) {
+  return (Array.isArray(history) ? history : []).map(entry => ({
+    createdAt: asText(entry?.createdAt),
+    title: asText(entry?.title),
+    content: asText(entry?.content),
+    contentHtml: asText(entry?.contentHtml),
+    format: normalizeFormat(entry?.format || {})
+  }));
+}
+
+function stableVersionHistoryPayloadForHash(payload) {
+  if (!payload || typeof payload !== "object") return null;
+  return {
+    sourceFileName: asText(payload.sourceFileName),
+    sourceFilePath: asText(payload.sourceFilePath),
+    story: stableHistoryForHash(historyArrayFromPayloadEntry(payload.story || payload.initialNotes)),
+    drafts: (payload.drafts || [])
+      .slice()
+      .sort((left, right) => {
+        const leftIndex = Number.isInteger(left?.index) ? left.index : 0;
+        const rightIndex = Number.isInteger(right?.index) ? right.index : 0;
+        return leftIndex - rightIndex;
+      })
+      .map((draft, index) => ({
+        index: Number.isInteger(draft?.index) ? draft.index : index,
+        title: asText(draft?.title),
+        createdAt: asText(draft?.createdAt),
+        history: stableHistoryForHash(historyArrayFromPayloadEntry(draft))
+      }))
+  };
+}
+
+function cutHistoryInputHash({ versionHistoryPath, textFilePath, build = SERVER_BUILD }) {
+  const hash = crypto.createHash("sha256");
+  const payload = parseVersionHistoryFile(versionHistoryPath);
+  const stablePayload = stableVersionHistoryPayloadForHash(payload);
+  hash.update(String(build || ""));
+  hash.update("\0");
+  hash.update(stablePayload ? JSON.stringify(stablePayload) : readFileHashInput(versionHistoryPath));
+  hash.update("\0");
+  hash.update(readFileHashInput(textFilePath));
+  return hash.digest("hex");
+}
+
+function cutHistoryCacheFolderPath(historyReportPath) {
+  const resolvedReportPath = path.resolve(historyReportPath);
+  const summariesFolder = path.dirname(resolvedReportPath);
+  const backupRootFolder = path.dirname(summariesFolder);
+  return path.join(backupRootFolder, "version history summary cache");
+}
+
+function cutHistoryMetadataPath(historyReportPath) {
+  const resolvedReportPath = path.resolve(historyReportPath);
+  return path.join(cutHistoryCacheFolderPath(resolvedReportPath), `${path.basename(resolvedReportPath)}.meta.json`);
+}
+
+function legacyCutHistoryMetadataPath(historyReportPath) {
+  return `${historyReportPath}.meta.json`;
+}
+
+function removeLegacyCutHistoryMetadata(historyReportPath) {
+  try {
+    const legacyPath = path.resolve(legacyCutHistoryMetadataPath(historyReportPath));
+    const currentPath = path.resolve(cutHistoryMetadataPath(historyReportPath));
+    if (legacyPath !== currentPath) fs.rmSync(legacyPath, { force: true });
+  } catch {}
+}
+
+function readCutHistoryMetadata(historyReportPath) {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(cutHistoryMetadataPath(historyReportPath), "utf8").replace(/^\uFEFF/u, ""));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeAtomicText(filePath, content, options = {}) {
+  fs.mkdirSync(path.dirname(filePath), { recursive: true });
+  const temporaryFolderPath = options.temporaryFolderPath
+    ? path.resolve(options.temporaryFolderPath)
+    : path.dirname(filePath);
+  fs.mkdirSync(temporaryFolderPath, { recursive: true });
+  const tmpPath = path.join(temporaryFolderPath, `${path.basename(filePath)}.${process.pid}.${Date.now()}.tmp`);
+  fs.writeFileSync(tmpPath, content, "utf8");
+  try {
+    fs.renameSync(tmpPath, filePath);
+  } catch (error) {
+    if (error.code === "EPERM") {
+      fs.writeFileSync(filePath, content, "utf8");
+      try {
+        fs.rmSync(tmpPath, { force: true });
+      } catch {}
+      return;
+    }
+    if (error.code !== "EEXIST") throw error;
+    fs.rmSync(filePath, { force: true });
+    fs.renameSync(tmpPath, filePath);
+  }
+}
+
+function removeLegacyMarkdownHistoryReport(sourceFileName) {
+  try {
+    const legacyMarkdownPath = path.join(
+      markdownHistoryBackupFolderPath(),
+      `${safeHistoryBaseName(sourceFileName)}${BACKUP_HISTORY_REPORT_SUFFIX}`
+    );
+    fs.rmSync(legacyMarkdownPath, { force: true });
+  } catch {}
+}
+
+function writeCutHistoryReportFromFiles(options = {}) {
+  const versionHistoryPathValue = asText(options.versionHistoryPath);
+  const textFilePathValue = asText(options.textFilePath);
+  const historyReportPathValue = asText(options.historyReportPath);
+  const build = asText(options.build) || SERVER_BUILD;
+  if (!versionHistoryPathValue || !textFilePathValue || !historyReportPathValue) {
+    throw new Error("Cut-history report paths are incomplete.");
+  }
+  const versionHistoryPath = path.resolve(versionHistoryPathValue);
+  const textFilePath = path.resolve(textFilePathValue);
+  const historyReportPath = path.resolve(historyReportPathValue);
+
+  const inputHash = cutHistoryInputHash({ versionHistoryPath, textFilePath, build });
+  removeLegacyCutHistoryMetadata(historyReportPath);
+  const metadata = readCutHistoryMetadata(historyReportPath);
+  if (
+    metadata?.inputHash === inputHash &&
+    metadata?.build === build &&
+    fs.existsSync(historyReportPath)
+  ) {
+    return { skipped: true, historyReportPath };
+  }
+
+  const payload = parseVersionHistoryFile(versionHistoryPath);
+  if (!payload) throw new Error(`Version history JSON could not be read: ${versionHistoryPath}`);
+  const liveText = fs.readFileSync(textFilePath, "utf8").replace(/^\uFEFF/u, "");
+  const state = stateFromVersionHistoryPayload(payload, liveText);
+  const sourceFileName = payload.sourceFileName || options.sourceFileName || path.basename(textFilePath);
+  const sourceFilePath = payload.sourceFilePath || options.sourceFilePath || textFilePath;
+  const html = backupCutHistoryReport(state, {
+    fileName: sourceFileName,
+    filePath: sourceFilePath,
+    versionHistoryPath
+  });
+
+  writeAtomicText(historyReportPath, html, {
+    temporaryFolderPath: cutHistoryCacheFolderPath(historyReportPath)
+  });
+  writeAtomicText(cutHistoryMetadataPath(historyReportPath), `${JSON.stringify({
+    inputHash,
+    build,
+    versionHistoryPath,
+    textFilePath,
+    historyReportPath,
+    generatedAt: nowIso()
+  }, null, 2)}\n`);
+  removeLegacyMarkdownHistoryReport(sourceFileName);
+
+  return { skipped: false, historyReportPath };
+}
+
+function cutHistoryWorkerSource() {
+  return `
+    const { parentPort, workerData } = require("node:worker_threads");
+    Promise.resolve()
+      .then(() => {
+        const server = require(workerData.serverPath);
+        return server.writeCutHistoryReportFromFiles(workerData);
+      })
+      .then(result => parentPort.postMessage({ ok: true, result }))
+      .catch(error => {
+        parentPort.postMessage({
+          ok: false,
+          error: error && error.stack ? error.stack : String(error)
+        });
+      });
+  `;
+}
+
+function startCutHistoryWorker(jobKey, job) {
+  const worker = new Worker(cutHistoryWorkerSource(), {
+    eval: true,
+    workerData: {
+      ...job,
+      build: SERVER_BUILD,
+      serverPath: __filename
+    }
+  });
+  const record = { worker, pending: null };
+  cutHistoryJobs.set(jobKey, record);
+
+  worker.on("message", message => {
+    if (message?.ok === false) console.error(message.error);
+  });
+  worker.on("error", error => {
+    console.error(error);
+  });
+  worker.on("exit", code => {
+    if (code) console.error(`Cut-history summary worker exited with code ${code}.`);
+    const current = cutHistoryJobs.get(jobKey);
+    const pending = current?.pending || null;
+    cutHistoryJobs.delete(jobKey);
+    if (pending) {
+      startCutHistoryWorker(jobKey, pending);
+      return;
+    }
+    maybeExitAfterCutHistoryJobs();
+  });
+}
+
+function resolveCutHistoryIdleWaiters() {
+  if (cutHistoryJobs.size) return;
+  cutHistoryIdleWaiters.forEach(resolve => resolve());
+  cutHistoryIdleWaiters.clear();
+}
+
+function waitForCutHistoryJobs(timeoutMs = 0) {
+  if (!cutHistoryJobs.size) return Promise.resolve();
+
+  return new Promise(resolve => {
+    let timer = null;
+    const finish = () => {
+      if (timer) clearTimeout(timer);
+      cutHistoryIdleWaiters.delete(finish);
+      resolve();
+    };
+    cutHistoryIdleWaiters.add(finish);
+    if (timeoutMs > 0) {
+      timer = setTimeout(finish, timeoutMs);
+      timer.unref?.();
+    }
+  });
+}
+
+function queueCutHistoryReport(job) {
+  const jobKey = path.resolve(job.historyReportPath);
+  const existing = cutHistoryJobs.get(jobKey);
+  if (existing) {
+    existing.pending = job;
+    return { queued: true, pending: true, historyReportPath: job.historyReportPath };
+  }
+
+  startCutHistoryWorker(jobKey, job);
+  return { queued: true, pending: false, historyReportPath: job.historyReportPath };
+}
+
+function maybeExitAfterCutHistoryJobs() {
+  if (cutHistoryJobs.size) return false;
+  resolveCutHistoryIdleWaiters();
+  if (!processExitRequested) return false;
+  process.exit(0);
+  return true;
+}
+
 function backupProjectFiles(state, options = {}) {
   const textFolderPath = originalTextBackupFolderPath();
-  const markdownFolderPath = markdownHistoryBackupFolderPath();
-  if (!textFolderPath || !markdownFolderPath) return null;
+  const summaryFolderPath = historySummaryBackupFolderPath();
+  if (!textFolderPath || !summaryFolderPath) return null;
 
   fs.mkdirSync(textFolderPath, { recursive: true });
-  fs.mkdirSync(markdownFolderPath, { recursive: true });
+  fs.mkdirSync(summaryFolderPath, { recursive: true });
   const normalized = normalizeState(state);
   const source = historySourceInfo(options);
   const textFileName = safeBackupFileName(source.fileName, "draft-history.txt");
   const textFilePath = path.join(textFolderPath, textFileName);
   const historyReportPath = path.join(
-    markdownFolderPath,
-    `${safeHistoryBaseName(source.fileName)}${BACKUP_HISTORY_REPORT_SUFFIX}`
+    summaryFolderPath,
+    `${safeHistoryBaseName(source.fileName)}${CUT_HISTORY_REPORT_SUFFIX}`
   );
-  const stateWithHistory = applyExternalVersionHistory(normalized, options).state;
+  const versionHistoryPath = findVersionHistoryFilePath(options) || "";
 
   fs.writeFileSync(textFilePath, formatExport(normalized), "utf8");
-  fs.writeFileSync(historyReportPath, backupHistoryReport(stateWithHistory, options), "utf8");
+  const historyReport = versionHistoryPath
+    ? queueCutHistoryReport({
+      versionHistoryPath,
+      textFilePath,
+      historyReportPath,
+      sourceFileName: source.fileName,
+      sourceFilePath: source.filePath
+    })
+    : null;
 
   return {
     textFolderPath,
-    markdownFolderPath,
+    summaryFolderPath,
     textFilePath,
-    historyReportPath
+    historyReportPath,
+    historyReport
   };
 }
 
@@ -2212,7 +3135,7 @@ function writeAllWithBackup(state, options = {}) {
 }
 
 function stateForStorage(state) {
-  return readVersionHistoryFolderPath() ? stateWithoutVersionHistory(state) : state;
+  return existingVersionHistoryFolderPath() ? stateWithoutVersionHistory(state) : state;
 }
 
 function parseJsonFile(filePath) {
@@ -2486,7 +3409,9 @@ function maybeExitWhenIdle(startedAt) {
 }
 
 function windowlessExitFallback() {
-  setTimeout(() => process.exit(0), 1500).unref();
+  setTimeout(() => {
+    if (!cutHistoryJobs.size) process.exit(0);
+  }, 30 * 60_000).unref();
 }
 
 function closeServerAndExit() {
@@ -2500,12 +3425,14 @@ function closeServerAndExit() {
   }
 
   if (activeServer?.listening) {
-    activeServer.close(() => process.exit(0));
+    activeServer.close(() => {
+      if (!maybeExitAfterCutHistoryJobs()) windowlessExitFallback();
+    });
     windowlessExitFallback();
     return;
   }
 
-  process.exit(0);
+  if (!maybeExitAfterCutHistoryJobs()) windowlessExitFallback();
 }
 
 function readBody(req) {
@@ -2554,18 +3481,34 @@ function parseStatePayload(body) {
 function statePathPayload(options = {}) {
   const linkedTextPath = readTextFileLink();
   const historySourcePath = options.filePath || linkedTextPath || (options.fileName ? "" : EXPORT_FILE);
+  const versionHistoryFolderPath = readVersionHistoryFolderPath();
+  const missingBackupFolder = versionHistoryFolderMissing();
   return {
     exportPath: EXPORT_FILE,
     statePath: STATE_FILE,
     linkedTextPath,
     linkedTextFileName: linkedTextPath ? path.basename(linkedTextPath) : null,
-    versionHistoryFolderPath: readVersionHistoryFolderPath(),
+    versionHistoryFolderPath,
+    versionHistoryFolderMissing: missingBackupFolder,
     versionHistoryPath: findVersionHistoryFilePath({
       filePath: historySourcePath,
       fileName: options.fileName || (historySourcePath ? path.basename(historySourcePath) : "draft-history.txt")
     }),
-    backupFolderPath: readBackupFolderPath()
+    backupFolderPath: versionHistoryFolderPath,
+    backupFolderMissing: missingBackupFolder
   };
+}
+
+function writeBackupFromRequestBody(body) {
+  if (body) {
+    const payload = parseStatePayload(body);
+    return writeAllWithBackup(payload.state, {
+      filePath: payload.filePath,
+      fileName: payload.fileName
+    });
+  }
+
+  return writeAllWithBackup(readState());
 }
 
 function parseDraftPageKey(key) {
@@ -2946,32 +3889,22 @@ async function handleApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/close") {
     markClientActive();
     const body = await readBody(req);
-    let result = null;
-    if (body) {
-      const payload = parseStatePayload(body);
-      result = writeAllWithBackup(payload.state, {
-        filePath: payload.filePath,
-        fileName: payload.fileName
-      });
-    } else {
-      result = writeAllWithBackup(readState());
-    }
+    const result = writeBackupFromRequestBody(body);
+    sendJson(res, 200, { ok: true, backup: result?.backup || null });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/backup/project") {
+    markClientActive();
+    const body = await readBody(req);
+    const result = writeBackupFromRequestBody(body);
     sendJson(res, 200, { ok: true, backup: result?.backup || null });
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/shutdown") {
     const body = await readBody(req);
-    let result = null;
-    if (body) {
-      const payload = parseStatePayload(body);
-      result = writeAllWithBackup(payload.state, {
-        filePath: payload.filePath,
-        fileName: payload.fileName
-      });
-    } else {
-      result = writeAllWithBackup(readState());
-    }
+    const result = writeBackupFromRequestBody(body);
 
     sendJson(res, 200, { ok: true, backup: result?.backup || null });
     setTimeout(() => {
@@ -3220,7 +4153,11 @@ function createHttpServer() {
       });
       fs.createReadStream(filePath).pipe(res);
     } catch (error) {
-      sendJson(res, 500, { error: error.message });
+      sendJson(res, error.statusCode || 500, {
+        error: error.message,
+        code: error.code || null,
+        folderPath: error.folderPath || null
+      });
     }
   });
 }
@@ -3273,13 +4210,13 @@ function startServer(options = {}) {
   });
 }
 
-function stopServer(serverToStop = activeServer) {
+function stopServer(serverToStop = activeServer, options = {}) {
   if (idleTimer) {
     clearInterval(idleTimer);
     idleTimer = null;
   }
 
-  flushOnExit();
+  if (options.flush !== false) flushOnExit();
 
   if (!serverToStop) return Promise.resolve();
 
@@ -3320,5 +4257,7 @@ module.exports = {
   SERVER_BUILD,
   flushOnExit,
   startServer,
-  stopServer
+  stopServer,
+  waitForCutHistoryJobs,
+  writeCutHistoryReportFromFiles
 };

@@ -7,6 +7,7 @@ let mainWindow = null;
 let serverApi = null;
 let serverHandle = null;
 let allowWindowClose = false;
+let gracefulQuitStarted = false;
 let spellCheckerPromise = null;
 let customSpellings = new Set();
 let spellcheckCache = new Map();
@@ -337,6 +338,23 @@ async function createWindow() {
   await mainWindow.loadURL(serverHandle.url);
 }
 
+async function quitAfterServerWork() {
+  if (gracefulQuitStarted) return;
+  gracefulQuitStarted = true;
+
+  try {
+    if (serverApi) {
+      serverApi.flushOnExit();
+      await serverApi.waitForCutHistoryJobs?.(30 * 60_000);
+      await serverApi.stopServer(serverHandle?.server, { flush: false });
+    }
+  } catch (error) {
+    console.error(error);
+  } finally {
+    app.exit(0);
+  }
+}
+
 app.whenReady()
   .then(() => {
     ipcMain.handle("draft-diff:zoom", (_event, direction) => {
@@ -396,11 +414,17 @@ app.on("activate", () => {
 });
 
 app.on("window-all-closed", () => {
-  app.quit();
+  void quitAfterServerWork();
 });
 
-app.on("before-quit", () => {
-  if (!serverApi) return;
-  serverApi.flushOnExit();
-  void serverApi.stopServer(serverHandle?.server);
+app.on("before-quit", event => {
+  if (gracefulQuitStarted) return;
+  event.preventDefault();
+
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.close();
+    return;
+  }
+
+  void quitAfterServerWork();
 });

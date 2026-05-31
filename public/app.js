@@ -87,6 +87,8 @@ let linkedTextPath = "";
 let versionHistoryFolderPath = "";
 let versionHistoryPath = "";
 let backupFolderPath = "";
+let backupFolderMissing = false;
+let isPromptingForBackupFolder = false;
 let stateRevision = 0;
 let saveQueued = false;
 let saveRetryCount = 0;
@@ -770,8 +772,10 @@ function syncBackupMenu() {
 
   const active = Boolean(backupFolderPath);
   els.fileActivateBackup.setAttribute("aria-pressed", String(active));
-  els.fileActivateBackup.title = active
-    ? `Backups active: ${backupFolderPath}\\original txt; version histories: ${backupFolderPath}\\version history md; JSON: ${backupFolderPath}\\json`
+  els.fileActivateBackup.title = backupFolderMissing && active
+    ? `Backup folder missing: ${backupFolderPath}`
+    : active
+    ? `Backups active: ${backupFolderPath}\\original txt; summaries: ${backupFolderPath}\\version history summaries; JSON: ${backupFolderPath}\\json`
     : "Choose a backup and version history folder";
 }
 
@@ -5887,6 +5891,149 @@ function projectNotesVersionPage(version, index) {
   };
 }
 
+function versionDiffSideTokenWindow(parts, side) {
+  const indexKey = side === "after" ? "afterIndex" : "beforeIndex";
+  const changedIndexes = [];
+  const tokenIndexes = [];
+
+  parts.forEach((part, index) => {
+    if (!isChangedDiffPart(part)) return;
+    changedIndexes.push(index);
+    if (Number.isInteger(part[indexKey])) tokenIndexes.push(part[indexKey]);
+  });
+
+  if (!changedIndexes.length) return null;
+  if (tokenIndexes.length) {
+    return {
+      start: Math.min(...tokenIndexes),
+      end: Math.max(...tokenIndexes) + 1
+    };
+  }
+
+  const firstChangedIndex = changedIndexes[0];
+  const lastChangedIndex = changedIndexes[changedIndexes.length - 1];
+  let beforeAnchor = null;
+  let afterAnchor = null;
+
+  for (let index = firstChangedIndex - 1; index >= 0; index -= 1) {
+    if (Number.isInteger(parts[index][indexKey])) {
+      beforeAnchor = parts[index][indexKey] + 1;
+      break;
+    }
+  }
+
+  for (let index = lastChangedIndex + 1; index < parts.length; index += 1) {
+    if (Number.isInteger(parts[index][indexKey])) {
+      afterAnchor = parts[index][indexKey];
+      break;
+    }
+  }
+
+  const anchor = Number.isInteger(beforeAnchor) ? beforeAnchor : (Number.isInteger(afterAnchor) ? afterAnchor : 0);
+  return { start: anchor, end: anchor };
+}
+
+function versionTokenWindowGap(left, right) {
+  if (!left || !right) return Infinity;
+  if (left.end < right.start) return right.start - left.end;
+  if (right.end < left.start) return left.start - right.end;
+  return 0;
+}
+
+function versionTokensBetweenWindows(tokens, left, right) {
+  const start = Math.min(left.end, right.end);
+  const end = Math.max(left.start, right.start);
+  return tokens.slice(start, end).map(token => token.text || "").join("");
+}
+
+function versionWindowsTouchSamePhrase(sharedPage, left, right) {
+  const gap = versionTokenWindowGap(left, right);
+  if (!Number.isFinite(gap)) return false;
+  if (gap <= 4) return true;
+  if (gap > 24) return false;
+
+  const tokens = semanticTokensFromHtml(sharedPage.contentHtml || textToHtml(sharedPage.content || ""));
+  const between = versionTokensBetweenWindows(tokens, left, right);
+  return !/[.!?\n]/u.test(between);
+}
+
+function versionTransitionInfo(versions, pageForVersion, beforeIndex) {
+  const before = pageForVersion(versions[beforeIndex], beforeIndex);
+  const after = pageForVersion(versions[beforeIndex + 1], beforeIndex + 1);
+  const parts = diffRichPages(before, after);
+  if (!parts.some(isChangedDiffPart)) return null;
+
+  return {
+    before,
+    after,
+    beforeIndex,
+    afterIndex: beforeIndex + 1,
+    beforeWindow: versionDiffSideTokenWindow(parts, "before"),
+    afterWindow: versionDiffSideTokenWindow(parts, "after")
+  };
+}
+
+function shouldMergeVersionTransitions(previous, next, sharedPage) {
+  return versionWindowsTouchSamePhrase(sharedPage, previous.afterWindow, next.beforeWindow);
+}
+
+function coalescedVersionRuns(versions, pageForVersion) {
+  const runs = [];
+  let run = null;
+
+  const flushRun = () => {
+    if (!run) return;
+    runs.push({
+      beforeIndex: run.beforeIndex,
+      afterIndex: run.afterIndex,
+      beforeVersion: versions[run.beforeIndex],
+      afterVersion: versions[run.afterIndex],
+      coalescedVersionCount: run.afterIndex - run.beforeIndex
+    });
+    run = null;
+  };
+
+  for (let index = 0; index < versions.length - 1; index += 1) {
+    const info = versionTransitionInfo(versions, pageForVersion, index);
+    if (!info) continue;
+
+    if (
+      run &&
+      run.afterIndex === info.beforeIndex &&
+      shouldMergeVersionTransitions(run.lastInfo, info, pageForVersion(versions[info.beforeIndex], info.beforeIndex))
+    ) {
+      run.afterIndex = info.afterIndex;
+      run.lastInfo = info;
+      continue;
+    }
+
+    flushRun();
+    run = {
+      beforeIndex: info.beforeIndex,
+      afterIndex: info.afterIndex,
+      lastInfo: info
+    };
+  }
+
+  flushRun();
+  return runs;
+}
+
+function coalescedDraftVersionRuns(draft) {
+  const versions = ensureDraftVersionHistory(draft);
+  return coalescedVersionRuns(versions, (version, index) => draftVersionPage(draft, version, index));
+}
+
+function coalescedProjectNotesVersionRuns() {
+  const versions = ensureProjectNotesVersionHistory();
+  return coalescedVersionRuns(versions, projectNotesVersionPage);
+}
+
+function versionCoalescedMetaHtml(count) {
+  if (!(count > 1)) return "";
+  return `<div>${Number(count).toLocaleString("en-GB")} autosaves coalesced</div>`;
+}
+
 function baseVersionPageHtml(draft, version, index) {
   const page = draftVersionPage(draft, version, index);
   const versionLabel = draftVersionNumber(draft, index);
@@ -5948,12 +6095,12 @@ function baseProjectNotesVersionPageHtml(version, index) {
   `;
 }
 
-function versionComparePageHtml(draft, version, index, previousVersion = null) {
+function versionComparePageHtml(draft, version, index, previousVersion = null, previousIndex = index - 1, options = {}) {
   const page = draftVersionPage(draft, version, index);
   if (!previousVersion) return baseVersionPageHtml(draft, version, index);
 
   const versionLabel = draftVersionNumber(draft, index);
-  const previousPage = draftVersionPage(draft, previousVersion, index - 1);
+  const previousPage = draftVersionPage(draft, previousVersion, previousIndex);
   const pair = {
     before: previousPage,
     after: page,
@@ -5974,6 +6121,7 @@ function versionComparePageHtml(draft, version, index, previousVersion = null) {
         </div>
         <div class="meta version-page-meta">
           <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+          ${versionCoalescedMetaHtml(options.coalescedVersionCount)}
           <div class="compare-stats">
             <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
             <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
@@ -5995,12 +6143,12 @@ function versionComparePageHtml(draft, version, index, previousVersion = null) {
   `;
 }
 
-function projectNotesVersionComparePageHtml(version, index, previousVersion = null) {
+function projectNotesVersionComparePageHtml(version, index, previousVersion = null, previousIndex = index - 1, options = {}) {
   const page = projectNotesVersionPage(version, index);
   if (!previousVersion) return baseProjectNotesVersionPageHtml(version, index);
 
   const versionLabel = projectNotesVersionNumber(index);
-  const previousPage = projectNotesVersionPage(previousVersion, index - 1);
+  const previousPage = projectNotesVersionPage(previousVersion, previousIndex);
   const pair = {
     before: previousPage,
     after: page,
@@ -6021,6 +6169,7 @@ function projectNotesVersionComparePageHtml(version, index, previousVersion = nu
         </div>
         <div class="meta version-page-meta">
           <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+          ${versionCoalescedMetaHtml(options.coalescedVersionCount)}
           <div class="compare-stats">
             <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
             <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
@@ -6043,9 +6192,17 @@ function projectNotesVersionComparePageHtml(version, index, previousVersion = nu
 
 function renderDraftVersionHistoryStrip(draft) {
   const versions = ensureDraftVersionHistory(draft);
-  const pages = versions.map((version, index) =>
-    versionComparePageHtml(draft, version, index, versions[index - 1] || null)
-  );
+  const pages = versions.length ? [baseVersionPageHtml(draft, versions[0], 0)] : [];
+  coalescedDraftVersionRuns(draft).forEach(run => {
+    pages.push(versionComparePageHtml(
+      draft,
+      run.afterVersion,
+      run.afterIndex,
+      run.beforeVersion,
+      run.beforeIndex,
+      { coalescedVersionCount: run.coalescedVersionCount }
+    ));
+  });
   const visiblePages = compareVisiblePageCount(pages.length);
   const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: 0px;`;
   return `<div class="compare-strip version-history-strip" style="${style}">${pages.join("")}</div>`;
@@ -6053,9 +6210,16 @@ function renderDraftVersionHistoryStrip(draft) {
 
 function renderProjectNotesVersionHistoryStrip() {
   const versions = ensureProjectNotesVersionHistory();
-  const pages = versions.map((version, index) =>
-    projectNotesVersionComparePageHtml(version, index, versions[index - 1] || null)
-  );
+  const pages = versions.length ? [baseProjectNotesVersionPageHtml(versions[0], 0)] : [];
+  coalescedProjectNotesVersionRuns().forEach(run => {
+    pages.push(projectNotesVersionComparePageHtml(
+      run.afterVersion,
+      run.afterIndex,
+      run.beforeVersion,
+      run.beforeIndex,
+      { coalescedVersionCount: run.coalescedVersionCount }
+    ));
+  });
   const visiblePages = compareVisiblePageCount(pages.length);
   const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: 0px;`;
   return `<div class="compare-strip version-history-strip" style="${style}">${pages.join("")}</div>`;
@@ -6327,6 +6491,9 @@ function readableSaveFailure(message = "") {
   if (/linked text file write failed|EACCES|EPERM|access is denied|denied/i.test(text)) {
     return "Save failed: linked text file blocked";
   }
+  if (/backup folder missing/i.test(text)) {
+    return "Save paused: backup folder missing";
+  }
   if (/Unexpected token|JSON|payload|state/i.test(text)) {
     return "Save failed: project data was rejected";
   }
@@ -6339,15 +6506,30 @@ function readableSaveFailure(message = "") {
 async function responseSaveFailure(response) {
   try {
     const payload = await response.json();
+    if (payload?.code === "BACKUP_FOLDER_MISSING") {
+      backupFolderMissing = true;
+      backupFolderPath = payload.folderPath || backupFolderPath;
+      versionHistoryFolderPath = payload.folderPath || versionHistoryFolderPath;
+      syncBackupMenu();
+      window.setTimeout(promptForMissingBackupFolder, 0);
+      return {
+        message: "Save paused: backup folder missing",
+        retry: false
+      };
+    }
     return readableSaveFailure(payload?.error);
   } catch {
     return readableSaveFailure(response.statusText || `HTTP ${response.status}`);
   }
 }
 
-function handleSaveFailure(message) {
+function handleSaveFailure(failure) {
+  const message = typeof failure === "object" && failure
+    ? failure.message
+    : failure;
+  const retry = !(typeof failure === "object" && failure && failure.retry === false);
   isSaving = false;
-  if (saveRetryCount < MAX_SAVE_RETRIES) {
+  if (retry && saveRetryCount < MAX_SAVE_RETRIES) {
     saveRetryCount += 1;
     setStatus(`${message}; retrying`);
     queueSave(Math.min(1500 * saveRetryCount, 6000));
@@ -6372,8 +6554,18 @@ function downloadExportText(fileName) {
 function updateStoragePathsFromPayload(payload = {}) {
   exportPath = payload.exportPath || exportPath;
   linkedTextPath = payload.linkedTextPath || linkedTextPath || "";
-  versionHistoryFolderPath = payload.versionHistoryFolderPath || versionHistoryFolderPath || "";
-  versionHistoryPath = payload.versionHistoryPath || versionHistoryPath || "";
+  if (Object.prototype.hasOwnProperty.call(payload, "versionHistoryFolderPath")) {
+    versionHistoryFolderPath = payload.versionHistoryFolderPath || "";
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "versionHistoryPath")) {
+    versionHistoryPath = payload.versionHistoryPath || "";
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(payload, "backupFolderMissing")
+    || Object.prototype.hasOwnProperty.call(payload, "versionHistoryFolderMissing")
+  ) {
+    backupFolderMissing = Boolean(payload.backupFolderMissing || payload.versionHistoryFolderMissing);
+  }
   if (Object.prototype.hasOwnProperty.call(payload, "backupFolderPath")) {
     backupFolderPath = payload.backupFolderPath || payload.versionHistoryFolderPath || "";
   }
@@ -6403,6 +6595,26 @@ async function applyExternalVersionHistory(projectState, options = {}) {
   } catch (error) {
     console.error(error);
     return { state: projectState, loaded: false };
+  }
+}
+
+async function promptForMissingBackupFolder() {
+  if (!backupFolderMissing || isPromptingForBackupFolder) return;
+  isPromptingForBackupFolder = true;
+
+  try {
+    const missingPath = backupFolderPath || versionHistoryFolderPath || "the selected backup folder";
+    const chooseNow = window.confirm(
+      `Backup folder not found:\n\n${missingPath}\n\nChoose the moved folder now?`
+    );
+    if (!chooseNow) {
+      setStatus("Backup folder missing; saves paused until you choose the moved folder");
+      return;
+    }
+
+    await selectVersionHistoryFolder();
+  } finally {
+    isPromptingForBackupFolder = false;
   }
 }
 
@@ -6451,6 +6663,10 @@ async function saveAsTextProject(stateOverride = null, suggestedFileName = null)
   );
 
   try {
+    if (!stateOverride && state) {
+      setStatus("Queueing HTML summary...");
+      await writeProjectBackupNow();
+    }
     setStatus("Choose a save location...");
     const response = await fetch("/api/save-as-text-file", {
       method: "POST",
@@ -6494,6 +6710,7 @@ async function newTextProject() {
   closeFileMenu();
 
   try {
+    if (state) await prepareCurrentProjectForOpen();
     const nextState = createDefaultState();
     const saved = await saveAsTextProject(nextState, "draft-history.txt");
     if (!saved) return;
@@ -6574,6 +6791,8 @@ async function prepareCurrentProjectForOpen() {
   await cacheLinkedProjectStateOnServer();
   window.clearTimeout(saveTimer);
   await saveNow();
+  setStatus("Queueing HTML summary...");
+  await writeProjectBackupNow();
   return projectStateFromSnapshot(serializeProjectState());
 }
 
@@ -6706,6 +6925,11 @@ async function toggleBackup() {
   closeFileMenu();
 
   try {
+    if (backupFolderMissing) {
+      await selectVersionHistoryFolder();
+      return;
+    }
+
     if (backupFolderPath) {
       const response = await fetch("/api/backup/deactivate", { method: "POST" });
       if (!response.ok) throw new Error(await response.text());
@@ -6749,6 +6973,21 @@ function prepareClosePayload() {
   });
 }
 
+async function writeProjectBackupNow() {
+  if (!state) return null;
+
+  const response = await fetch("/api/backup/project", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: prepareClosePayload()
+  });
+  if (!response.ok) {
+    const failure = await responseSaveFailure(response);
+    throw new Error(typeof failure === "object" && failure ? failure.message : failure);
+  }
+  return response.json();
+}
+
 async function closeApp() {
   closeFileMenu();
   window.clearTimeout(saveTimer);
@@ -6766,7 +7005,10 @@ async function closeApp() {
       headers: { "content-type": "application/json" },
       body
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) {
+      const failure = await responseSaveFailure(response);
+      throw new Error(typeof failure === "object" && failure ? failure.message : failure);
+    }
 
     window.setTimeout(() => {
       window.close();
@@ -6855,6 +7097,7 @@ async function loadState() {
   versionHistoryFolderPath = payload.versionHistoryFolderPath || "";
   versionHistoryPath = payload.versionHistoryPath || "";
   backupFolderPath = payload.backupFolderPath || payload.versionHistoryFolderPath || "";
+  backupFolderMissing = Boolean(payload.backupFolderMissing || payload.versionHistoryFolderMissing);
   projectFileName = payload.linkedTextFileName || fileNameFromPath(exportPath) || projectFileName;
   updateProjectTitle();
   syncBackupMenu();
@@ -6863,6 +7106,10 @@ async function loadState() {
   render();
   resetHistory();
   focusPageEditor(activeEditorKey);
+  if (backupFolderMissing) {
+    setStatus("Backup folder missing; choose the moved folder");
+    window.setTimeout(promptForMissingBackupFolder, 0);
+  }
 }
 
 function setActiveFromPageKey(pageKey) {
