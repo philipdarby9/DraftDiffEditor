@@ -8,6 +8,7 @@ let serverApi = null;
 let serverHandle = null;
 let allowWindowClose = false;
 let gracefulQuitStarted = false;
+let pendingCloseSummaryBody = "";
 let spellCheckerPromise = null;
 let customSpellings = new Set();
 let spellcheckCache = new Map();
@@ -19,6 +20,7 @@ const APP_USER_MODEL_ID = "com.philipdarby.draftdiffeditor";
 const MAX_SPELLCHECK_CACHE_ENTRIES = 5000;
 const DATA_DIR_ENV_VAR = "DRAFT_DIFF_DATA_DIR";
 const DATA_DIR_ARG = "--data-dir";
+const WINDOW_CLOSE_PERSIST_TIMEOUT_MS = 30 * 60_000;
 
 if (process.platform === "win32") {
   app.setAppUserModelId(APP_USER_MODEL_ID);
@@ -76,6 +78,25 @@ function resolveConfiguredDataDir() {
   if (fromEnv) return path.resolve(fromEnv);
 
   return app.isPackaged ? path.join(app.getPath("userData"), "data") : "";
+}
+
+function resolveDesktopPath(value) {
+  const filePath = String(value || "").trim();
+  if (!filePath) throw new Error("Missing file path");
+  return path.resolve(filePath);
+}
+
+async function openDesktopPath(value) {
+  const filePath = resolveDesktopPath(value);
+  const error = await shell.openPath(filePath);
+  if (error) throw new Error(error);
+  return { ok: true, filePath };
+}
+
+function showDesktopItemInFolder(value) {
+  const filePath = resolveDesktopPath(value);
+  shell.showItemInFolder(filePath);
+  return { ok: true, filePath, directoryPath: path.dirname(filePath) };
 }
 
 function configureSpellChecker(session) {
@@ -257,6 +278,17 @@ function loadServerApi() {
   return serverApi;
 }
 
+function closePayloadWithOptions(body, options = {}) {
+  const text = String(body || "");
+  try {
+    const payload = JSON.parse(text || "{}");
+    if (!payload || typeof payload !== "object" || Array.isArray(payload)) return text;
+    return JSON.stringify({ ...payload, ...options });
+  } catch {
+    return text;
+  }
+}
+
 async function createWindow() {
   const { startServer } = loadServerApi();
   serverHandle = await startServer({ port: 0, host: "127.0.0.1" });
@@ -293,18 +325,32 @@ async function createWindow() {
     event.preventDefault();
     const windowToClose = mainWindow;
     let settled = false;
+    let closeFallback = null;
     const finishClose = () => {
       if (settled) return;
       settled = true;
+      if (closeFallback) clearTimeout(closeFallback);
       allowWindowClose = true;
       if (windowToClose && !windowToClose.isDestroyed()) windowToClose.close();
     };
+    const cancelClose = error => {
+      if (settled) return;
+      settled = true;
+      if (closeFallback) clearTimeout(closeFallback);
+      if (error) console.error(error);
+      if (windowToClose && !windowToClose.isDestroyed()) {
+        windowToClose.show();
+        windowToClose.focus();
+      }
+    };
 
-    setTimeout(finishClose, 1500);
+    closeFallback = setTimeout(finishClose, WINDOW_CLOSE_PERSIST_TIMEOUT_MS);
+    closeFallback.unref?.();
+    if (windowToClose && !windowToClose.isDestroyed()) windowToClose.hide();
     windowToClose.webContents.executeJavaScript(
       "window.draftDiffPersistBeforeClose ? window.draftDiffPersistBeforeClose() : true",
       true
-    ).then(finishClose, finishClose);
+    ).then(finishClose, cancelClose);
   });
   mainWindow.on("closed", () => {
     mainWindow = null;
@@ -344,7 +390,24 @@ async function quitAfterServerWork() {
 
   try {
     if (serverApi) {
-      serverApi.flushOnExit();
+      const closeSummaryBody = pendingCloseSummaryBody;
+      pendingCloseSummaryBody = "";
+      if (closeSummaryBody) {
+        try {
+          serverApi.writeBackupFromRequestBody(
+            closePayloadWithOptions(closeSummaryBody, {
+              waitForSummary: true,
+              skipSummary: true,
+              allowMissingVersionHistoryFolder: true,
+              allowLinkedTextFileFailure: true
+            })
+          );
+        } catch (error) {
+          console.error(error);
+        }
+      } else {
+        serverApi.flushOnExit();
+      }
       await serverApi.waitForCutHistoryJobs?.(30 * 60_000);
       await serverApi.stopServer(serverHandle?.server, { flush: false });
     }
@@ -359,6 +422,54 @@ app.whenReady()
   .then(() => {
     ipcMain.handle("draft-diff:zoom", (_event, direction) => {
       setWindowZoom(direction);
+    });
+    ipcMain.handle("draft-diff:hide-for-close", () => {
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.hide();
+      return true;
+    });
+    ipcMain.handle("draft-diff:show-after-close-error", () => {
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.show();
+        mainWindow.focus();
+      }
+      return true;
+    });
+    ipcMain.handle("draft-diff:save-state", (_event, body) => {
+      const api = loadServerApi();
+      return api.saveStateFromRequestBody(String(body || ""));
+    });
+    ipcMain.handle("draft-diff:backup-project", (_event, body) => {
+      const api = loadServerApi();
+      return api.backupProjectFromRequestBody(String(body || ""));
+    });
+    ipcMain.handle("draft-diff:version-history-summary-start", (_event, body) => {
+      const api = loadServerApi();
+      return api.startVersionHistorySummaryJobFromRequestBody(String(body || ""));
+    });
+    ipcMain.handle("draft-diff:version-history-summary-progress", (_event, jobId) => {
+      const api = loadServerApi();
+      return api.versionHistorySummaryJobProgress(String(jobId || ""));
+    });
+    ipcMain.handle("draft-diff:open-path", (_event, filePath) => openDesktopPath(filePath));
+    ipcMain.handle("draft-diff:show-item-in-folder", (_event, filePath) => showDesktopItemInFolder(filePath));
+    ipcMain.handle("draft-diff:open-text-file", () => {
+      const api = loadServerApi();
+      return api.openTextFileFromDialog();
+    });
+    ipcMain.handle("draft-diff:recent-text-files", () => {
+      const api = loadServerApi();
+      return api.recentTextFilesPayload();
+    });
+    ipcMain.handle("draft-diff:open-recent-text-file", (_event, body) => {
+      const api = loadServerApi();
+      return api.openRecentTextFileFromRequestBody(String(body || ""));
+    });
+    ipcMain.handle("draft-diff:persist-close", (_event, body) => {
+      const api = loadServerApi();
+      const closeBody = String(body || "");
+      api.writeStateFromRequestBody(closeBody);
+      pendingCloseSummaryBody = closeBody;
+      return true;
     });
     ipcMain.handle("draft-diff:add-word-to-dictionary", (event, value) => {
       const word = normalizeSpellcheckWord(value);

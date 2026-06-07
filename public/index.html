@@ -36,6 +36,7 @@
               <button id="file-save-as" type="button"><span class="menu-check">✓</span><span>Save as</span><span class="menu-shortcut" data-shortcut="saveAs">Ctrl+Shift+S</span></button>
               <button id="file-activate-backup" type="button" aria-pressed="false"><span class="menu-check" aria-hidden="true"></span><span>Activate backup</span><span class="menu-shortcut" aria-hidden="true"></span></button>
               <button id="file-version-history-folder" type="button"><span class="menu-check" aria-hidden="true"></span><span>Backup folder</span><span class="menu-shortcut" aria-hidden="true"></span></button>
+              <button id="file-generate-history-summary" type="button"><span class="menu-check" aria-hidden="true"></span><span>Generate version history summary</span><span class="menu-shortcut" aria-hidden="true"></span></button>
               <span class="menu-divider" aria-hidden="true"></span>
               <button id="file-close" type="button"><span class="menu-check" aria-hidden="true"></span><span>Close</span><span class="menu-shortcut" data-shortcut="close">Ctrl+W</span></button>
             </div>
@@ -191,6 +192,23 @@
         </aside>
       </section>
     </main>
+
+    <section id="summary-progress-overlay" class="summary-progress-overlay" aria-label="Version history summary progress" hidden>
+      <div class="summary-progress-panel" role="status" aria-live="polite">
+        <h2>Generating version history summary</h2>
+        <p id="summary-progress-step" class="summary-progress-step">Preparing...</p>
+        <div class="summary-progress-track" aria-hidden="true">
+          <div id="summary-progress-bar" class="summary-progress-bar"></div>
+        </div>
+        <p id="summary-progress-meta" class="summary-progress-meta">0 of 0 · 0s</p>
+        <p id="summary-progress-path" class="summary-progress-path"></p>
+        <div id="summary-progress-actions" class="summary-progress-actions" hidden>
+          <button id="summary-progress-open" class="summary-progress-action summary-progress-primary" type="button">Open summary</button>
+          <button id="summary-progress-reveal" class="summary-progress-action" type="button">Open containing folder</button>
+          <button id="summary-progress-close" class="summary-progress-action" type="button">Close</button>
+        </div>
+      </div>
+    </section>
 
     <script src="/app.js?v=project-notes-history-2026-05-24"></script>
   </body>

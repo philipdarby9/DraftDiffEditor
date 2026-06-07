@@ -612,6 +612,105 @@ textarea,
   font-size: 11px;
 }
 
+.summary-progress-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 600;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(32, 29, 25, 0.34);
+  backdrop-filter: blur(2px);
+}
+
+.summary-progress-overlay[hidden] {
+  display: none;
+}
+
+.summary-progress-panel {
+  width: min(560px, 100%);
+  display: grid;
+  gap: 12px;
+  padding: 20px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r);
+  box-shadow: var(--shadow-menu);
+}
+
+.summary-progress-panel h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.summary-progress-step,
+.summary-progress-meta,
+.summary-progress-path {
+  margin: 0;
+  color: var(--fg-muted);
+  font-size: 13px;
+}
+
+.summary-progress-path {
+  overflow-wrap: anywhere;
+  color: var(--fg);
+}
+
+.summary-progress-track {
+  height: 10px;
+  overflow: hidden;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+}
+
+.summary-progress-bar {
+  width: 0%;
+  height: 100%;
+  background: var(--accent);
+  transition: width 160ms ease;
+}
+
+.summary-progress-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+.summary-progress-actions[hidden] {
+  display: none;
+}
+
+.summary-progress-action {
+  min-width: 86px;
+  height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+  color: var(--fg);
+  font: inherit;
+  cursor: pointer;
+}
+
+.summary-progress-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.summary-progress-action:hover {
+  background: var(--accent-soft);
+  color: var(--accent-deep);
+}
+
+.summary-progress-primary:hover {
+  background: var(--accent-deep);
+  color: #fff;
+}
+
 .zoom-menu-control {
   min-height: 30px;
   display: grid;
@@ -2451,10 +2550,21 @@ textarea {
   min-height: 220px;
   display: grid;
   place-content: center;
-  gap: 10px;
+  gap: 8px;
   padding: 28px;
   color: var(--fg-muted);
   font-size: 13px;
+  text-align: center;
+}
+
+.diff-loading-title {
+  color: var(--fg);
+  font-weight: 700;
+}
+
+.diff-loading-meta,
+.diff-loading-detail {
+  max-width: min(420px, 70vw);
 }
 
 .diff-loading-track {
@@ -2468,10 +2578,15 @@ textarea {
 
 .diff-loading-track span {
   display: block;
-  width: 42%;
+  width: 0%;
   height: 100%;
   background: var(--accent);
   border-radius: inherit;
+  transition: width 140ms ease;
+}
+
+.diff-loading-track.is-indeterminate span {
+  width: 42%;
   animation: diff-loading-slide 900ms ease-in-out infinite;
 }
 

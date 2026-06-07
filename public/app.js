@@ -13,6 +13,7 @@ const els = {
   fileSaveAs: document.querySelector("#file-save-as"),
   fileVersionHistoryFolder: document.querySelector("#file-version-history-folder"),
   fileActivateBackup: document.querySelector("#file-activate-backup"),
+  fileGenerateHistorySummary: document.querySelector("#file-generate-history-summary"),
   fileClose: document.querySelector("#file-close"),
   editUndo: document.querySelector("#edit-undo"),
   editRedo: document.querySelector("#edit-redo"),
@@ -50,7 +51,16 @@ const els = {
   searchPrev: document.querySelector("#search-prev"),
   searchNext: document.querySelector("#search-next"),
   searchClose: document.querySelector("#search-close"),
-  searchSummary: document.querySelector("#search-summary")
+  searchSummary: document.querySelector("#search-summary"),
+  summaryProgressOverlay: document.querySelector("#summary-progress-overlay"),
+  summaryProgressStep: document.querySelector("#summary-progress-step"),
+  summaryProgressBar: document.querySelector("#summary-progress-bar"),
+  summaryProgressMeta: document.querySelector("#summary-progress-meta"),
+  summaryProgressPath: document.querySelector("#summary-progress-path"),
+  summaryProgressActions: document.querySelector("#summary-progress-actions"),
+  summaryProgressOpen: document.querySelector("#summary-progress-open"),
+  summaryProgressReveal: document.querySelector("#summary-progress-reveal"),
+  summaryProgressClose: document.querySelector("#summary-progress-close")
 };
 
 const STORY_KEY = "story";
@@ -73,6 +83,7 @@ const UNDO_TYPING_GROUP_MAX_MS = 5000;
 const DRAFT_VERSION_CAPTURE_DELAY_MS = 2500;
 const FORMAT_DEFAULT_VERSION = 2;
 const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
+const DIFF_PROGRESS_FRAME_DELAY_MS = 0;
 
 let state = null;
 let selectedDraftId = null;
@@ -93,6 +104,8 @@ let stateRevision = 0;
 let saveQueued = false;
 let saveRetryCount = 0;
 let isClosingApp = false;
+let summaryProgressTimer = null;
+let latestSummaryReportPath = "";
 let viewStateSaveTimer = null;
 let isSavingViewState = false;
 let viewStateSaveQueued = false;
@@ -1359,6 +1372,7 @@ function ensurePageVersionHistory(page, fallbackTitle) {
     if (versionHasMeaningfulContent(current)) page.versionHistory.push(current);
   }
 
+  page.versionHistory = sortVersionHistoryByCreatedAt(page.versionHistory);
   return page.versionHistory;
 }
 
@@ -1377,6 +1391,79 @@ function pageVersionSignature(version) {
     contentHtml: version?.contentHtml || "",
     format: normalizeFormat(version?.format || {})
   });
+}
+
+function versionHistoryTime(version) {
+  const time = Date.parse(version?.createdAt || "");
+  return Number.isNaN(time) ? null : time;
+}
+
+function sortVersionHistoryByCreatedAt(history) {
+  return (Array.isArray(history) ? history : []).slice().sort((left, right) => {
+    const leftTime = versionHistoryTime(left);
+    const rightTime = versionHistoryTime(right);
+    if (leftTime === null || rightTime === null) return 0;
+    return leftTime - rightTime;
+  });
+}
+
+function latestVersionHistoryEntry(history) {
+  let latest = null;
+  let latestTime = -Infinity;
+  (Array.isArray(history) ? history : []).forEach(version => {
+    const time = versionHistoryTime(version);
+    if (time === null || time < latestTime) return;
+    latest = version;
+    latestTime = time;
+  });
+  return latest;
+}
+
+function currentPageHistorySnapshot(page, fallbackTitle) {
+  return pageVersionSnapshot(page, fallbackTitle, page.updatedAt || page.createdAt || nowIso());
+}
+
+function addCurrentPageToHistoryIfMissing(history, page, fallbackTitle) {
+  const current = currentPageHistorySnapshot(page, fallbackTitle);
+  if (!versionHasMeaningfulContent(current)) return history;
+
+  const currentSignature = pageVersionSignature(current);
+  if (history.some(version => pageVersionSignature(version) === currentSignature)) return history;
+  return sortVersionHistoryByCreatedAt([...history, current]);
+}
+
+function applyVersionHistoryEntryToPage(page, version, fallbackTitle) {
+  if (!page || !version) return;
+
+  const contentHtml = typeof version.contentHtml === "string"
+    ? sanitizeRichHtml(version.contentHtml)
+    : textToHtml(typeof version.content === "string" ? version.content : "");
+  const content = typeof version.content === "string" ? version.content : plainTextFromHtml(contentHtml);
+  page.title = version.title || page.title || fallbackTitle;
+  page.content = content;
+  page.contentHtml = contentHtml;
+  page.format = normalizeFormat(version.format || page.format || {});
+  page.updatedAt = version.createdAt || page.updatedAt || page.createdAt || nowIso();
+}
+
+function promotePageToNewestHistoryVersion(page, fallbackTitle) {
+  if (!page) return false;
+
+  let history = ensurePageVersionHistory(page, fallbackTitle);
+  const latest = latestVersionHistoryEntry(history);
+  const latestTime = versionHistoryTime(latest);
+  const currentTime = versionHistoryTime({ createdAt: page.updatedAt || page.createdAt });
+  if (!latest || latestTime === null || (currentTime !== null && latestTime <= currentTime)) return false;
+
+  const currentSignature = pageVersionSignature(currentPageHistorySnapshot(page, fallbackTitle));
+  const latestSignature = pageVersionSignature(latest);
+  if (currentSignature !== latestSignature) {
+    history = addCurrentPageToHistoryIfMissing(history, page, fallbackTitle);
+  }
+
+  applyVersionHistoryEntryToPage(page, latest, fallbackTitle);
+  page.versionHistory = history;
+  return true;
 }
 
 function appendPageVersionIfChanged(page, fallbackTitle) {
@@ -1581,10 +1668,12 @@ function restoreDraftVersionHistories(projectState, histories) {
   if (projectState?.initialNotes) {
     if (histories?.has(STORY_KEY)) projectState.initialNotes.versionHistory = histories.get(STORY_KEY);
     ensureProjectNotesVersionHistory(projectState);
+    promotePageToNewestHistoryVersion(projectState.initialNotes, PROJECT_NOTES_TITLE);
   }
   projectState?.drafts?.forEach(draft => {
     if (histories?.has(draft.id)) draft.versionHistory = histories.get(draft.id);
     ensureDraftVersionHistory(draft);
+    promotePageToNewestHistoryVersion(draft, draft.title || "Untitled draft");
   });
 }
 
@@ -3508,6 +3597,7 @@ function stateFromExportText(text, previousState = null) {
       notes
     };
     ensureDraftVersionHistory(importedDraft);
+    promotePageToNewestHistoryVersion(importedDraft, importedDraft.title || `Draft ${draftNumber}`);
     appendDraftVersionIfChanged(importedDraft);
     drafts.push(importedDraft);
   }
@@ -3523,6 +3613,7 @@ function stateFromExportText(text, previousState = null) {
     initialNotes.versionHistory = previousState.initialNotes.versionHistory;
   }
   ensurePageVersionHistory(initialNotes, PROJECT_NOTES_TITLE);
+  promotePageToNewestHistoryVersion(initialNotes, PROJECT_NOTES_TITLE);
   appendPageVersionIfChanged(initialNotes, PROJECT_NOTES_TITLE);
 
   return {
@@ -6203,9 +6294,7 @@ function renderDraftVersionHistoryStrip(draft) {
       { coalescedVersionCount: run.coalescedVersionCount }
     ));
   });
-  const visiblePages = compareVisiblePageCount(pages.length);
-  const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: 0px;`;
-  return `<div class="compare-strip version-history-strip" style="${style}">${pages.join("")}</div>`;
+  return compareStripHtml(pages, "version-history-strip");
 }
 
 function renderProjectNotesVersionHistoryStrip() {
@@ -6220,9 +6309,7 @@ function renderProjectNotesVersionHistoryStrip() {
       { coalescedVersionCount: run.coalescedVersionCount }
     ));
   });
-  const visiblePages = compareVisiblePageCount(pages.length);
-  const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: 0px;`;
-  return `<div class="compare-strip version-history-strip" style="${style}">${pages.join("")}</div>`;
+  return compareStripHtml(pages, "version-history-strip");
 }
 
 function selectedCompareIndexes() {
@@ -6239,6 +6326,14 @@ function compareVisiblePageCount(pageCount) {
   return Math.max(1, Math.min(normalizePagesOnScreenForSelection(pagesOnScreen), Number(pageCount) || 1));
 }
 
+function compareStripHtml(pages, className = "") {
+  const visiblePages = compareVisiblePageCount(pages.length);
+  const gapTotal = 0;
+  const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: ${gapTotal}px;`;
+  const classes = ["compare-strip", className].filter(Boolean).join(" ");
+  return `<div class="${classes}" style="${style}">${pages.join("")}</div>`;
+}
+
 function renderComparisonStrip(indexes) {
   const pages = [];
 
@@ -6250,10 +6345,7 @@ function renderComparisonStrip(indexes) {
     pages.push(markedComparePageHtml(pair));
   });
 
-  const visiblePages = compareVisiblePageCount(pages.length);
-  const gapTotal = 0;
-  const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: ${gapTotal}px;`;
-  return `<div class="compare-strip" style="${style}">${pages.join("")}</div>`;
+  return compareStripHtml(pages);
 }
 
 function changesPanelIsOpen() {
@@ -6358,13 +6450,296 @@ function renderDiff() {
     : `<p class="empty-state">No draft pages selected.</p>`;
 }
 
-function renderDiffLoading(label = "Loading changes") {
+function nextDiffProgressFrame() {
+  return new Promise(resolve => {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(resolve, DIFF_PROGRESS_FRAME_DELAY_MS);
+    });
+  });
+}
+
+function diffRenderIsCurrent(token) {
+  return token === diffRenderToken && changesPanelIsOpen();
+}
+
+function progressUnitText(unit, count) {
+  const text = String(unit || "item");
+  if (Number(count) === 1 || text.endsWith("s")) return text;
+  return `${text}s`;
+}
+
+function renderDiffLoading(progress = "Loading changes") {
+  const options = typeof progress === "string" ? { label: progress } : (progress || {});
+  const label = options.label || "Loading changes";
+  const total = Math.max(0, Number(options.total) || 0);
+  const completed = total ? Math.max(0, Math.min(total, Number(options.completed) || 0)) : 0;
+  const percent = total ? Math.round((completed / total) * 100) : 0;
+  const unit = progressUnitText(options.unit || "item", total);
+  const verb = options.verb || "loaded";
+  const meta = options.meta || (total
+    ? `${completed.toLocaleString("en-GB")} of ${total.toLocaleString("en-GB")} ${unit} ${verb}`
+    : "Preparing...");
+  const detail = options.detail
+    ? `<span class="diff-loading-detail">${escapeHtml(options.detail)}</span>`
+    : "";
+  const trackClass = total ? "diff-loading-track" : "diff-loading-track is-indeterminate";
+  const barStyle = total ? ` style="width: ${percent}%"` : "";
+
   els.diffOutput.innerHTML = `
     <div class="diff-loading" role="status" aria-live="polite">
-      <span>${escapeHtml(label)}</span>
-      <div class="diff-loading-track" aria-hidden="true"><span></span></div>
+      <span class="diff-loading-title">${escapeHtml(label)}</span>
+      <div class="${trackClass}" aria-hidden="true"><span${barStyle}></span></div>
+      <span class="diff-loading-meta">${escapeHtml(meta)}</span>
+      ${detail}
     </div>
   `;
+}
+
+async function renderComparisonStripProgressively(indexes, token, label = "Loading changes") {
+  const total = indexes.length;
+  if (!total) {
+    if (diffRenderIsCurrent(token)) els.diffOutput.innerHTML = `<p class="empty-state">No draft pages selected.</p>`;
+    return;
+  }
+
+  const pages = [];
+  const renderProgress = (completed, detail) => {
+    if (!diffRenderIsCurrent(token)) return;
+    renderDiffLoading({
+      label,
+      completed,
+      total,
+      unit: "draft page",
+      verb: "loaded",
+      detail
+    });
+  };
+
+  renderProgress(0, "Preparing comparison");
+  await nextDiffProgressFrame();
+  if (!diffRenderIsCurrent(token)) return;
+
+  pages.push(baseComparePageHtml(state.drafts[indexes[0]], "BASELINE"));
+  renderProgress(1, indexes.length > 1
+    ? `Comparing ${state.drafts[indexes[1]]?.title || "next draft"}`
+    : "Loaded baseline");
+  await nextDiffProgressFrame();
+
+  for (let position = 1; position < indexes.length; position += 1) {
+    if (!diffRenderIsCurrent(token)) return;
+
+    const draftIndex = indexes[position];
+    const beforeIndex = beforeIndexForSelectedDraft(indexes, position);
+    const pair = pairForIndexes(beforeIndex, draftIndex);
+    pages.push(markedComparePageHtml(pair));
+
+    const nextDraft = state.drafts[indexes[position + 1]];
+    renderProgress(position + 1, nextDraft
+      ? `Comparing ${nextDraft.title || "next draft"}`
+      : "Building comparison view");
+    await nextDiffProgressFrame();
+  }
+
+  if (!diffRenderIsCurrent(token)) return;
+  els.diffOutput.innerHTML = compareStripHtml(pages);
+}
+
+async function renderVersionHistoryStripProgressively(options) {
+  const {
+    token,
+    label,
+    versions,
+    pageForVersion,
+    basePageHtml,
+    comparePageHtml,
+    versionLabel,
+    emptyHtml = `<p class="empty-state">No version history to show.</p>`
+  } = options;
+  const total = versions.length;
+
+  if (!total) {
+    if (diffRenderIsCurrent(token)) els.diffOutput.innerHTML = emptyHtml;
+    return;
+  }
+
+  const pages = [];
+  const renderScanProgress = (completed, detail) => {
+    if (!diffRenderIsCurrent(token)) return;
+    renderDiffLoading({
+      label,
+      completed,
+      total,
+      unit: "version",
+      verb: "checked",
+      detail
+    });
+  };
+
+  renderScanProgress(0, "Preparing version history");
+  await nextDiffProgressFrame();
+  if (!diffRenderIsCurrent(token)) return;
+
+  pages.push(basePageHtml(versions[0], 0));
+  renderScanProgress(1, total > 1 ? `Checking ${versionLabel(1)}` : "Loaded first version");
+  await nextDiffProgressFrame();
+
+  const runs = [];
+  let run = null;
+  const flushRun = () => {
+    if (!run) return;
+    runs.push({
+      beforeIndex: run.beforeIndex,
+      afterIndex: run.afterIndex,
+      beforeVersion: versions[run.beforeIndex],
+      afterVersion: versions[run.afterIndex],
+      coalescedVersionCount: run.afterIndex - run.beforeIndex
+    });
+    run = null;
+  };
+
+  for (let index = 0; index < versions.length - 1; index += 1) {
+    if (!diffRenderIsCurrent(token)) return;
+
+    const info = versionTransitionInfo(versions, pageForVersion, index);
+    if (info) {
+      if (
+        run &&
+        run.afterIndex === info.beforeIndex &&
+        shouldMergeVersionTransitions(run.lastInfo, info, pageForVersion(versions[info.beforeIndex], info.beforeIndex))
+      ) {
+        run.afterIndex = info.afterIndex;
+        run.lastInfo = info;
+      } else {
+        flushRun();
+        run = {
+          beforeIndex: info.beforeIndex,
+          afterIndex: info.afterIndex,
+          lastInfo: info
+        };
+      }
+    }
+
+    const completed = index + 2;
+    renderScanProgress(completed, completed < total
+      ? `Checking ${versionLabel(completed)}`
+      : "Preparing changed version groups");
+    await nextDiffProgressFrame();
+  }
+
+  flushRun();
+  if (!diffRenderIsCurrent(token)) return;
+
+  if (runs.length) {
+    const pageTotal = 1 + runs.length;
+    const renderPageProgress = (completed, detail) => {
+      if (!diffRenderIsCurrent(token)) return;
+      renderDiffLoading({
+        label,
+        completed,
+        total: pageTotal,
+        unit: "history page",
+        verb: "rendered",
+        detail
+      });
+    };
+
+    renderPageProgress(1, `Rendering ${versionLabel(runs[0].afterIndex)}`);
+    await nextDiffProgressFrame();
+
+    for (let index = 0; index < runs.length; index += 1) {
+      if (!diffRenderIsCurrent(token)) return;
+      const currentRun = runs[index];
+      pages.push(comparePageHtml(currentRun));
+      const nextRun = runs[index + 1];
+      renderPageProgress(index + 2, nextRun
+        ? `Rendering ${versionLabel(nextRun.afterIndex)}`
+        : "Building history view");
+      await nextDiffProgressFrame();
+    }
+  }
+
+  if (!diffRenderIsCurrent(token)) return;
+  els.diffOutput.innerHTML = compareStripHtml(pages, "version-history-strip");
+}
+
+function renderDraftVersionHistoryProgressively(draft, token, label) {
+  const versions = ensureDraftVersionHistory(draft);
+  return renderVersionHistoryStripProgressively({
+    token,
+    label,
+    versions,
+    pageForVersion: (version, index) => draftVersionPage(draft, version, index),
+    basePageHtml: (version, index) => baseVersionPageHtml(draft, version, index),
+    comparePageHtml: run => versionComparePageHtml(
+      draft,
+      run.afterVersion,
+      run.afterIndex,
+      run.beforeVersion,
+      run.beforeIndex,
+      { coalescedVersionCount: run.coalescedVersionCount }
+    ),
+    versionLabel: index => `Draft ${draftVersionNumber(draft, index)}`
+  });
+}
+
+function renderProjectNotesVersionHistoryProgressively(token, label) {
+  const versions = ensureProjectNotesVersionHistory();
+  return renderVersionHistoryStripProgressively({
+    token,
+    label,
+    versions,
+    pageForVersion: projectNotesVersionPage,
+    basePageHtml: baseProjectNotesVersionPageHtml,
+    comparePageHtml: run => projectNotesVersionComparePageHtml(
+      run.afterVersion,
+      run.afterIndex,
+      run.beforeVersion,
+      run.beforeIndex,
+      { coalescedVersionCount: run.coalescedVersionCount }
+    ),
+    versionLabel: index => `Project notes ${projectNotesVersionNumber(index)}`
+  });
+}
+
+async function renderDiffProgressively(token, label = "Loading changes") {
+  const compareKicker = els.changesPanel?.querySelector(".compare-kicker");
+  if (versionHistoryDraftId) {
+    if (compareKicker) compareKicker.textContent = "VERSION HISTORY";
+    const historyLabel = label || "Loading version history";
+
+    if (versionHistoryDraftId === STORY_KEY) {
+      els.compareSubtitle.textContent = "Version history for Project notes";
+      await renderProjectNotesVersionHistoryProgressively(token, historyLabel);
+      return;
+    }
+
+    const draft = draftById(versionHistoryDraftId);
+    els.compareSubtitle.textContent = draft ? `Version history for ${draft.title}` : "Version history";
+    if (!draft) {
+      if (diffRenderIsCurrent(token)) els.diffOutput.innerHTML = `<p class="empty-state">Draft not found.</p>`;
+      return;
+    }
+
+    await renderDraftVersionHistoryProgressively(draft, token, historyLabel);
+    return;
+  }
+
+  if (!showChanges) {
+    if (compareKicker) compareKicker.textContent = "DRAFT COMPARISON";
+    if (diffRenderIsCurrent(token)) {
+      els.diffOutput.innerHTML = "";
+      els.compareSubtitle.textContent = "";
+    }
+    return;
+  }
+
+  if (compareKicker) compareKicker.textContent = "DRAFT COMPARISON";
+  const indexes = selectedCompareIndexes();
+  const baseline = state.drafts[indexes[0]];
+  els.compareSubtitle.textContent = els.compareMode.value === "first"
+    ? (baseline ? `Against ${baseline.title}` : "No baseline")
+    : "Consecutive";
+  await renderComparisonStripProgressively(indexes, token, label || "Loading changes");
 }
 
 function renderDiffSoon(label = "Loading changes") {
@@ -6375,14 +6750,19 @@ function renderDiffSoon(label = "Loading changes") {
 
   const token = diffRenderToken + 1;
   diffRenderToken = token;
-  renderDiffLoading(label);
-  window.requestAnimationFrame(() => {
-    window.setTimeout(() => {
-      if (token !== diffRenderToken || !changesPanelIsOpen()) return;
-      renderDiff();
+  const progressLabel = versionHistoryDraftId && label === "Loading changes"
+    ? "Loading version history"
+    : label;
+  renderDiffLoading({ label: progressLabel, detail: "Preparing..." });
+
+  void (async () => {
+    await nextDiffProgressFrame();
+    if (!diffRenderIsCurrent(token)) return;
+    await renderDiffProgressively(token, progressLabel);
+    if (diffRenderIsCurrent(token)) {
       window.requestAnimationFrame(() => updateCompactTitleLabels(els.diffOutput));
-    }, 0);
-  });
+    }
+  })();
 }
 
 function renderChangesVisibility() {
@@ -6664,7 +7044,7 @@ async function saveAsTextProject(stateOverride = null, suggestedFileName = null)
 
   try {
     if (!stateOverride && state) {
-      setStatus("Queueing HTML summary...");
+      setStatus("Saving backup...");
       await writeProjectBackupNow();
     }
     setStatus("Choose a save location...");
@@ -6761,9 +7141,15 @@ async function refreshRecentFilesMenu() {
   if (!els.fileOpenRecentMenu) return;
 
   try {
-    const response = await fetch("/api/recent-text-files", { cache: "no-store" });
-    if (!response.ok) throw new Error("Recent files unavailable");
-    const payload = await response.json();
+    let payload;
+    try {
+      const response = await fetch("/api/recent-text-files", { cache: "no-store" });
+      if (!response.ok) throw new Error("Recent files unavailable");
+      payload = await response.json();
+    } catch (error) {
+      if (!window.draftDiffDesktop?.recentTextFiles) throw error;
+      payload = await window.draftDiffDesktop.recentTextFiles();
+    }
     renderRecentFilesMenu(Array.isArray(payload.files) ? payload.files : []);
   } catch {
     els.fileOpenRecentMenu.innerHTML = '<button type="button" disabled><span class="menu-check" aria-hidden="true"></span><span>Recent files unavailable</span><span class="menu-shortcut" aria-hidden="true"></span></button>';
@@ -6791,7 +7177,7 @@ async function prepareCurrentProjectForOpen() {
   await cacheLinkedProjectStateOnServer();
   window.clearTimeout(saveTimer);
   await saveNow();
-  setStatus("Queueing HTML summary...");
+  setStatus("Saving backup...");
   await writeProjectBackupNow();
   return projectStateFromSnapshot(serializeProjectState());
 }
@@ -6812,16 +7198,26 @@ async function openTextProject() {
   try {
     const previousLinkedTextPath = linkedTextPath;
     const previousState = await prepareCurrentProjectForOpen();
-    const response = await fetch("/api/open-text-file", { method: "POST" });
-    if (response.ok) {
-      const payload = await response.json();
+    let payload = null;
+    try {
+      const response = await fetch("/api/open-text-file", { method: "POST" });
+      if (response.ok) {
+        payload = await response.json();
+      } else {
+        els.fileOpenInput.click();
+        return;
+      }
+    } catch (error) {
+      if (!window.draftDiffDesktop?.openTextFile) throw error;
+      payload = await window.draftDiffDesktop.openTextFile();
+    }
+
+    if (payload) {
       if (payload.cancelled) return;
 
       await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState);
       return;
     }
-
-    els.fileOpenInput.click();
   } catch (error) {
     if (isAbortError(error)) return;
     console.error(error);
@@ -6835,14 +7231,22 @@ async function openRecentTextProject(filePath) {
   try {
     const previousLinkedTextPath = linkedTextPath;
     const previousState = await prepareCurrentProjectForOpen();
-    const response = await fetch("/api/open-recent-text-file", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ filePath })
-    });
-    if (!response.ok) throw new Error(await response.text());
+    const body = JSON.stringify({ filePath });
+    let payload;
+    try {
+      const response = await fetch("/api/open-recent-text-file", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body
+      });
+      if (!response.ok) throw new Error(await response.text());
+      payload = await response.json();
+    } catch (error) {
+      if (!window.draftDiffDesktop?.openRecentTextFile) throw error;
+      payload = await window.draftDiffDesktop.openRecentTextFile(body);
+      if (payload?.ok === false) throw new Error(payload.error || "Recent file not found");
+    }
 
-    const payload = await response.json();
     await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState);
   } catch (error) {
     if (isAbortError(error)) return;
@@ -6959,7 +7363,7 @@ async function toggleBackup() {
   }
 }
 
-function prepareClosePayload() {
+function prepareClosePayload(options = {}) {
   if (!state) return "";
 
   syncFromInputs();
@@ -6969,23 +7373,222 @@ function prepareClosePayload() {
   return JSON.stringify({
     state,
     filePath: linkedTextPath,
-    fileName: projectFileName
+    fileName: projectFileName,
+    waitForSummary: Boolean(options.waitForSummary),
+    skipSummary: Boolean(options.skipSummary)
   });
 }
 
-async function writeProjectBackupNow() {
+async function writeProjectBackupNow(options = {}) {
   if (!state) return null;
 
-  const response = await fetch("/api/backup/project", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: prepareClosePayload()
+  const body = prepareClosePayload({
+    skipSummary: options.skipSummary !== false
   });
-  if (!response.ok) {
-    const failure = await responseSaveFailure(response);
-    throw new Error(typeof failure === "object" && failure ? failure.message : failure);
+  try {
+    const response = await fetch("/api/backup/project", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body
+    });
+    if (!response.ok) {
+      const failure = await responseSaveFailure(response);
+      throw new Error(typeof failure === "object" && failure ? failure.message : failure);
+    }
+    return response.json();
+  } catch (error) {
+    if (!window.draftDiffDesktop?.backupProject) throw error;
+    return window.draftDiffDesktop.backupProject(body);
   }
-  return response.json();
+}
+
+function formatElapsedMs(ms = 0) {
+  const totalSeconds = Math.max(0, Math.floor(Number(ms) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function showSummaryProgressOverlay() {
+  window.clearInterval(summaryProgressTimer);
+  latestSummaryReportPath = "";
+  if (els.summaryProgressOverlay) els.summaryProgressOverlay.hidden = false;
+  if (els.summaryProgressActions) els.summaryProgressActions.hidden = true;
+  if (els.summaryProgressOpen) els.summaryProgressOpen.disabled = true;
+  if (els.summaryProgressReveal) els.summaryProgressReveal.disabled = true;
+  if (els.summaryProgressPath) els.summaryProgressPath.textContent = "";
+  updateSummaryProgressOverlay({
+    status: "running",
+    step: "Preparing...",
+    completed: 0,
+    total: 1,
+    elapsedMs: 0
+  });
+}
+
+function hideSummaryProgressOverlay() {
+  window.clearInterval(summaryProgressTimer);
+  summaryProgressTimer = null;
+  if (els.summaryProgressOverlay) els.summaryProgressOverlay.hidden = true;
+}
+
+function updateSummaryProgressOverlay(progress = {}) {
+  const completed = Number(progress.completed) || 0;
+  const total = Math.max(Number(progress.total) || 1, 1);
+  const percent = progress.status === "complete"
+    ? 100
+    : Math.max(0, Math.min(99, Math.round((completed / total) * 100)));
+  if (els.summaryProgressStep) {
+    els.summaryProgressStep.textContent = progress.status === "failed"
+      ? `Failed: ${progress.error || "Summary generation failed"}`
+      : progress.step || "Working...";
+  }
+  if (els.summaryProgressBar) els.summaryProgressBar.style.width = `${percent}%`;
+  if (els.summaryProgressMeta) {
+    els.summaryProgressMeta.textContent = `${Math.min(completed, total).toLocaleString("en-GB")} of ${total.toLocaleString("en-GB")} · ${formatElapsedMs(progress.elapsedMs)}`;
+  }
+  if (els.summaryProgressPath && progress.result?.reportPath) {
+    latestSummaryReportPath = String(progress.result.reportPath || "");
+    els.summaryProgressPath.textContent = latestSummaryReportPath;
+  }
+  const canShowActions = progress.status === "complete" || progress.status === "failed";
+  const canOpenReport = Boolean(latestSummaryReportPath && progress.status === "complete");
+  if (els.summaryProgressActions) els.summaryProgressActions.hidden = !canShowActions;
+  if (els.summaryProgressOpen) {
+    els.summaryProgressOpen.hidden = !canOpenReport;
+    els.summaryProgressOpen.disabled = !canOpenReport || !window.draftDiffDesktop?.openPath;
+  }
+  if (els.summaryProgressReveal) {
+    els.summaryProgressReveal.hidden = !canOpenReport;
+    els.summaryProgressReveal.disabled = !canOpenReport || !window.draftDiffDesktop?.showItemInFolder;
+  }
+}
+
+async function openGeneratedSummaryReport() {
+  if (!latestSummaryReportPath) return;
+  try {
+    if (!window.draftDiffDesktop?.openPath) throw new Error("Desktop file opener unavailable");
+    await window.draftDiffDesktop.openPath(latestSummaryReportPath);
+    setStatus("Opened version history summary");
+  } catch (error) {
+    console.error(error);
+    setStatus(`Open failed: ${error?.message || "could not open summary"}`);
+  }
+}
+
+async function revealGeneratedSummaryReport() {
+  if (!latestSummaryReportPath) return;
+  try {
+    if (!window.draftDiffDesktop?.showItemInFolder) throw new Error("Desktop folder opener unavailable");
+    await window.draftDiffDesktop.showItemInFolder(latestSummaryReportPath);
+    setStatus("Opened summary folder");
+  } catch (error) {
+    console.error(error);
+    setStatus(`Open folder failed: ${error?.message || "could not open folder"}`);
+  }
+}
+
+async function startVersionHistorySummaryJob(body) {
+  try {
+    const response = await fetch("/api/version-history-summary/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  } catch (error) {
+    if (!window.draftDiffDesktop?.startVersionHistorySummary) throw error;
+    return window.draftDiffDesktop.startVersionHistorySummary(body);
+  }
+}
+
+async function fetchVersionHistorySummaryProgress(jobId) {
+  try {
+    const response = await fetch(`/api/version-history-summary/progress?id=${encodeURIComponent(jobId)}`, {
+      cache: "no-store"
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  } catch (error) {
+    if (!window.draftDiffDesktop?.versionHistorySummaryProgress) throw error;
+    return window.draftDiffDesktop.versionHistorySummaryProgress(jobId);
+  }
+}
+
+async function pollVersionHistorySummary(jobId) {
+  const payload = await fetchVersionHistorySummaryProgress(jobId);
+  if (!payload.ok) throw new Error(payload.error || "Summary progress unavailable");
+  const progress = payload.progress || {};
+  updateSummaryProgressOverlay(progress);
+
+  if (progress.status === "complete") {
+    window.clearInterval(summaryProgressTimer);
+    summaryProgressTimer = null;
+    setStatus("Version history summary generated");
+    return "complete";
+  }
+
+  if (progress.status === "failed") {
+    window.clearInterval(summaryProgressTimer);
+    summaryProgressTimer = null;
+    setStatus("Version history summary failed");
+    return "failed";
+  }
+
+  return progress.status || "running";
+}
+
+async function generateVersionHistorySummary() {
+  closeFileMenu();
+  if (!state) return;
+
+  try {
+    showSummaryProgressOverlay();
+    setStatus("Generating version history summary...");
+    syncFromInputs();
+    saveCurrentViewState();
+    flushDraftVersionCaptures();
+    rememberLinkedProjectState();
+    window.clearTimeout(saveTimer);
+    await saveNow();
+
+    const body = prepareClosePayload({ skipSummary: true });
+    const started = await startVersionHistorySummaryJob(body);
+    const jobId = started.jobId || started.progress?.id;
+    if (!jobId) throw new Error("Summary job did not start");
+    updateSummaryProgressOverlay(started.progress || {});
+
+    const initialStatus = await pollVersionHistorySummary(jobId);
+    if (initialStatus === "complete" || initialStatus === "failed") return;
+    summaryProgressTimer = window.setInterval(() => {
+      pollVersionHistorySummary(jobId).catch(error => {
+        console.error(error);
+        window.clearInterval(summaryProgressTimer);
+        summaryProgressTimer = null;
+        updateSummaryProgressOverlay({
+          status: "failed",
+          step: "Failed",
+          error: error?.message || "Summary progress unavailable",
+          completed: 0,
+          total: 1,
+          elapsedMs: 0
+        });
+        setStatus("Version history summary failed");
+      });
+    }, 400);
+  } catch (error) {
+    console.error(error);
+    updateSummaryProgressOverlay({
+      status: "failed",
+      step: "Failed",
+      error: error?.message || "Summary generation failed",
+      completed: 0,
+      total: 1,
+      elapsedMs: 0
+    });
+    setStatus("Version history summary failed");
+  }
 }
 
 async function closeApp() {
@@ -6993,12 +7596,16 @@ async function closeApp() {
   window.clearTimeout(saveTimer);
 
   try {
-    const body = prepareClosePayload();
-    if (state) {
-      await saveViewStateNow();
-    }
+    const body = prepareClosePayload({ skipSummary: true });
     isClosingApp = true;
     setStatus("Closing...");
+    if (window.draftDiffDesktop?.persistClose) {
+      await window.draftDiffDesktop.hideForClose?.();
+      await window.draftDiffDesktop.persistClose(body);
+      window.close();
+      document.body.innerHTML = '<main class="closed-screen"><h1>Draft Diff Editor closed</h1><p>You can close this tab.</p></main>';
+      return;
+    }
 
     const response = await fetch("/api/shutdown", {
       method: "POST",
@@ -7017,6 +7624,7 @@ async function closeApp() {
   } catch (error) {
     console.error(error);
     isClosingApp = false;
+    await window.draftDiffDesktop?.showAfterCloseError?.();
     setStatus(readableSaveFailure(error?.message || "Close failed"));
   }
 }
@@ -7038,24 +7646,33 @@ async function saveNow() {
   const requestRevision = stateRevision;
   isSaving = true;
   setStatus("Saving...");
+  const requestBody = {
+    state,
+    filePath: linkedTextPath,
+    fileName: projectFileName
+  };
 
   try {
-    const response = await fetch("/api/state", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        state,
-        filePath: linkedTextPath,
-        fileName: projectFileName
-      })
-    });
+    let payload;
+    try {
+      const response = await fetch("/api/state", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(requestBody)
+      });
 
-    if (!response.ok) {
-      handleSaveFailure(await responseSaveFailure(response));
-      return false;
+      if (!response.ok) {
+        handleSaveFailure(await responseSaveFailure(response));
+        return false;
+      }
+
+      payload = await response.json();
+    } catch (error) {
+      console.error(error);
+      if (!window.draftDiffDesktop?.saveState) throw error;
+      payload = await window.draftDiffDesktop.saveState(JSON.stringify(requestBody));
     }
 
-    const payload = await response.json();
     const responseMatchesCurrentState = requestRevision === stateRevision;
     if (responseMatchesCurrentState) state = payload.state;
 
@@ -7581,7 +8198,11 @@ els.fileOpenLocation.addEventListener("click", openFileLocation);
 els.fileSaveAs.addEventListener("click", () => saveAsTextProject());
 els.fileVersionHistoryFolder?.addEventListener("click", selectVersionHistoryFolder);
 els.fileActivateBackup?.addEventListener("click", toggleBackup);
+els.fileGenerateHistorySummary?.addEventListener("click", generateVersionHistorySummary);
 els.fileClose.addEventListener("click", closeApp);
+els.summaryProgressOpen?.addEventListener("click", openGeneratedSummaryReport);
+els.summaryProgressReveal?.addEventListener("click", revealGeneratedSummaryReport);
+els.summaryProgressClose?.addEventListener("click", hideSummaryProgressOverlay);
 els.editUndo.addEventListener("click", () => {
   undoProjectChange();
   closeTopMenus();
@@ -8077,7 +8698,7 @@ els.pageCanvas.addEventListener("keydown", event => {
 
 els.compareMode.addEventListener("change", () => {
   saveCurrentViewState();
-  renderDiff();
+  renderDiffSoon("Loading changes");
 });
 
 els.diffOutput.addEventListener("dblclick", event => {
@@ -8222,21 +8843,28 @@ window.addEventListener("resize", () => window.requestAnimationFrame(() => updat
 window.addEventListener("beforeunload", () => {
   if (!state || isClosingApp) return;
   sendViewStateBeacon();
-  const blob = new Blob([prepareClosePayload()], { type: "application/json" });
+  const blob = new Blob([prepareClosePayload({ skipSummary: true })], { type: "application/json" });
   navigator.sendBeacon("/api/close", blob);
 });
 
 window.draftDiffPersistBeforeClose = async () => {
   if (!state) return true;
+  if (isClosingApp) return true;
   window.clearTimeout(viewStateSaveTimer);
-  const body = prepareClosePayload();
-  await saveViewStateNow();
+  const body = prepareClosePayload({ skipSummary: true });
+  setStatus("Closing...");
+  if (window.draftDiffDesktop?.persistClose) {
+    await window.draftDiffDesktop.persistClose(body);
+    isClosingApp = true;
+    return true;
+  }
   const response = await fetch("/api/close", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body
   });
   if (!response.ok) throw new Error(await response.text());
+  isClosingApp = true;
   return true;
 };
 
