@@ -1,3 +1,12 @@
+const DiffCore = window.DraftDiffCore;
+if (!DiffCore) throw new Error("DraftDiffCore failed to load.");
+const StateCore = window.DraftDiffStateCore;
+if (!StateCore) throw new Error("DraftDiffStateCore failed to load.");
+const ToolbarCore = window.DraftDiffToolbarCore;
+if (!ToolbarCore) throw new Error("DraftDiffToolbarCore failed to load.");
+const RichTextCore = window.DraftDiffRichTextCore;
+if (!RichTextCore) throw new Error("DraftDiffRichTextCore failed to load.");
+
 const els = {
   saveStatus: document.querySelector("#save-status"),
   projectTitle: document.querySelector("#project-title"),
@@ -63,8 +72,8 @@ const els = {
   summaryProgressClose: document.querySelector("#summary-progress-close")
 };
 
-const STORY_KEY = "story";
-const PROJECT_NOTES_TITLE = "Project notes";
+const STORY_KEY = StateCore.STORY_KEY;
+const PROJECT_NOTES_TITLE = StateCore.PROJECT_NOTES_TITLE;
 const DISPLAY_STORAGE_KEY = "draftDiff.displayedPageKeys";
 const NOTES_COLLAPSED_STORAGE_KEY = "draftDiff.collapsedNotesIds";
 const NOTES_SIZE_STORAGE_KEY = "draftDiff.notesPanePercents";
@@ -72,23 +81,27 @@ const PAGES_ON_SCREEN_STORAGE_KEY = "draftDiff.pagesOnScreen";
 const FILE_VIEW_STATES_STORAGE_KEY = "draftDiff.fileViewStates";
 const PROJECT_STATE_CACHE_STORAGE_KEY = "draftDiff.projectStatesByPath";
 const DEFAULT_PAGES_ON_SCREEN = 2;
-const VIEW_STATE_VERSION = 2;
+const VIEW_STATE_VERSION = StateCore.VIEW_STATE_VERSION;
 const HISTORY_LIMIT = 100;
-const MIN_PAGE_PANE_PERCENT = 12;
+const MIN_PAGE_PANE_PERCENT = StateCore.MIN_PAGE_PANE_PERCENT;
 const MAX_SAVE_RETRIES = 3;
 const AUTOSAVE_DELAY_MS = 2000;
 const WORD_COUNT_REFRESH_DELAY_MS = 350;
 const UNDO_TYPING_GROUP_WINDOW_MS = 1200;
 const UNDO_TYPING_GROUP_MAX_MS = 5000;
 const DRAFT_VERSION_CAPTURE_DELAY_MS = 2500;
-const FORMAT_DEFAULT_VERSION = 2;
-const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
+const FORMAT_DEFAULT_VERSION = StateCore.FORMAT_DEFAULT_VERSION;
+const LEGACY_DEFAULT_FONT_FAMILY = StateCore.LEGACY_DEFAULT_FONT_FAMILY;
 const DIFF_PROGRESS_FRAME_DELAY_MS = 0;
+const DIFF_BLOCK_CACHE_LIMIT = 160;
+const DIFF_RESULT_CACHE_LIMIT = 80;
+const DIFF_RESULT_MAX_CACHE_PARTS = 20000;
 
 let state = null;
 let selectedDraftId = null;
 let activeArea = "draft";
 let saveTimer = null;
+let pageSaveTimer = null;
 let isSaving = false;
 let showChanges = false;
 let exportPath = "";
@@ -102,6 +115,8 @@ let backupFolderMissing = false;
 let isPromptingForBackupFolder = false;
 let stateRevision = 0;
 let saveQueued = false;
+let pendingPageSaveKeys = new Set();
+let pendingPageVersionHistorySaveKeys = new Set();
 let saveRetryCount = 0;
 let isClosingApp = false;
 let summaryProgressTimer = null;
@@ -138,6 +153,9 @@ let tabScrollbarDrag = null;
 let fallbackZoomFactor = 1;
 let recentSubmenuTracking = false;
 let diffRenderToken = 0;
+const diffBlockCache = new Map();
+const diffResultCache = new Map();
+const diffMeaningfulTermsCache = new WeakMap();
 let versionHistoryDraftId = null;
 let searchRefreshTimer = null;
 let spellcheckMenu = null;
@@ -161,35 +179,15 @@ const detachedPanelChannel = "BroadcastChannel" in window
   ? new BroadcastChannel(DETACHED_PANEL_CHANNEL)
   : null;
 
-const DEFAULT_FORMAT = {
-  fontFamily: "Consolas",
-  fontSize: "16",
-  lineHeight: "1.62"
-};
-
-const FONT_FAMILY_OPTIONS = [
-  "Consolas",
-  "Segoe UI",
-  "Arial",
-  "Calibri",
-  "Cambria",
-  "Candara",
-  "Constantia",
-  "Corbel",
-  "Georgia",
-  "Garamond",
-  "Book Antiqua",
-  "Palatino Linotype",
-  "Times New Roman",
-  "Courier New",
-  "Lucida Console",
-  "Verdana",
-  "Tahoma",
-  "Trebuchet MS"
-];
-
-const FONT_SIZE_OPTIONS = ["12", "14", "16", "18", "20", "24", "28", "32"];
-const LINE_HEIGHT_OPTIONS = ["1.2", "1.4", "1.62", "1.8", "2"];
+const DEFAULT_FORMAT = StateCore.DEFAULT_FORMAT;
+const FONT_FAMILY_OPTIONS = StateCore.FONT_FAMILY_OPTIONS;
+const FONT_SIZE_OPTIONS = StateCore.FONT_SIZE_OPTIONS;
+const LINE_HEIGHT_OPTIONS = StateCore.LINE_HEIGHT_OPTIONS;
+const toolbarIcons = ToolbarCore.toolbarIcons;
+const sanitizeRichHtml = RichTextCore.sanitizeRichHtml;
+const execRichTextCommand = RichTextCore.execRichTextCommand;
+const insertClipboardHtml = RichTextCore.insertClipboardHtml;
+const insertPlainText = RichTextCore.insertPlainText;
 
 const allowedFontFamilies = new Set(FONT_FAMILY_OPTIONS);
 const allowedFontSizes = new Set(FONT_SIZE_OPTIONS);
@@ -217,27 +215,6 @@ const MENU_SHORTCUT_LABELS = {
   pages2: { mac: "⌘2", default: "Ctrl+2" },
   pages3: { mac: "⌘3", default: "Ctrl+3" },
   pages4: { mac: "⌘4", default: "Ctrl+4" }
-};
-
-const toolbarIcons = {
-  undo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 5 10l4-4"></path><path d="M5 10h11a4 4 0 1 1 0 8h-1"></path></svg>',
-  redo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 4-4-4-4"></path><path d="M19 10H8a4 4 0 1 0 0 8h1"></path></svg>',
-  bold: '<span class="fr-letter-icon bold" aria-hidden="true">B</span>',
-  italic: '<span class="fr-letter-icon italic" aria-hidden="true">I</span>',
-  underline: '<span class="fr-letter-icon underline" aria-hidden="true">U</span>',
-  strike: '<span class="fr-letter-icon strike" aria-hidden="true">S</span>',
-  unorderedList: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11"></path><path d="M9 12h11"></path><path d="M9 18h11"></path><path d="M5 6v.01"></path><path d="M5 12v.01"></path><path d="M5 18v.01"></path></svg>',
-  orderedList: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6h9"></path><path d="M11 12h9"></path><path d="M12 18h8"></path><path d="M4 6h1v4"></path><path d="M4 10h2"></path><path d="M6 18H4c0-1.2 2-2.1 2-3.2 0-.7-.5-1.2-1.2-1.2-.5 0-.9.2-1.2.6"></path></svg>',
-  outdent: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6H9"></path><path d="M20 12h-7"></path><path d="M20 18H9"></path><path d="m8 8-4 4 4 4"></path></svg>',
-  indent: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6H9"></path><path d="M20 12h-7"></path><path d="M20 18H9"></path><path d="m4 8 4 4-4 4"></path></svg>',
-  alignLeft: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M4 12h10"></path><path d="M4 18h14"></path></svg>',
-  alignCenter: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M8 12h8"></path><path d="M6 18h12"></path></svg>',
-  alignRight: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M10 12h10"></path><path d="M6 18h14"></path></svg>',
-  clear: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 12.3h7.4"></path><path d="m5.3 8.8 3.9-4.2 2.2 2.1-3.9 4.2H5.3z"></path><path d="M4 13.1 12.5 3"></path></svg>',
-  format: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h10"></path><path d="M5.5 3v3M10.5 6.5v3M7.5 10v3"></path></svg>',
-  search: '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.2"></circle><path d="m10.2 10.2 3.1 3.1"></path></svg>',
-  history: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2a4.8 4.8 0 1 1-4.3 2.7"></path><path d="M3.2 3.6v2.7h2.7"></path><path d="M8 5.2v3.1l2.1 1.2"></path></svg>',
-  detach: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.4 3.6H4.1c-.8 0-1.4.6-1.4 1.4v6.9c0 .8.6 1.4 1.4 1.4H11c.8 0 1.4-.6 1.4-1.4v-1.3"></path><path d="M8.2 3.4h4.4v4.4"></path><path d="M7.2 8.8 12.4 3.6"></path></svg>'
 };
 
 function nowIso() {
@@ -617,20 +594,16 @@ function legacyViewState() {
   };
 }
 
-function saveDisplaySelection() {
-  saveCurrentViewState();
-}
-
-function saveCollapsedNotes() {
-  saveCurrentViewState();
+function saveLayoutViewState() {
+  saveCurrentViewState({ syncDom: false });
 }
 
 function saveNotesPanePercents() {
-  saveCurrentViewState();
+  saveLayoutViewState();
 }
 
 function savePagePanePercents() {
-  saveCurrentViewState();
+  saveLayoutViewState();
 }
 
 function getSelectedDraft() {
@@ -902,6 +875,7 @@ function setStatus(text) {
   } else {
     els.saveStatus.textContent = statusText;
   }
+  els.saveStatus.title = statusText;
   els.saveStatus.classList.toggle("is-saving", /saving|unsaved/i.test(text));
 }
 
@@ -927,76 +901,31 @@ function lineBreakCount(value) {
 }
 
 function normalizeFormat(format = {}) {
-  const fontFamily = allowedFontFamilies.has(format.fontFamily)
-    ? format.fontFamily
-    : DEFAULT_FORMAT.fontFamily;
-  const fontSize = allowedFontSizes.has(String(format.fontSize))
-    ? String(format.fontSize)
-    : DEFAULT_FORMAT.fontSize;
-  const lineHeight = allowedLineHeights.has(String(format.lineHeight))
-    ? String(format.lineHeight)
-    : DEFAULT_FORMAT.lineHeight;
-  return { fontFamily, fontSize, lineHeight };
+  return StateCore.normalizeFormat(format);
 }
 
 function upgradeLegacyDefaultFormat(format = {}, shouldUpgrade = false) {
-  const normalized = normalizeFormat(format);
-  return shouldUpgrade && normalized.fontFamily === LEGACY_DEFAULT_FONT_FAMILY
-    ? { ...normalized, fontFamily: DEFAULT_FORMAT.fontFamily }
-    : normalized;
+  return StateCore.upgradeLegacyDefaultFormat(format, shouldUpgrade);
 }
 
 function currentDefaultFormat(projectState = null) {
-  return normalizeFormat(projectState?.defaultFormat || DEFAULT_FORMAT);
+  return StateCore.currentDefaultFormat(projectState);
 }
 
 function migrateLegacyDefaultFonts(projectState) {
-  if (!projectState) return projectState;
-
-  const shouldUpgrade = projectState.formatDefaultVersion !== FORMAT_DEFAULT_VERSION;
-  projectState.defaultFormat = upgradeLegacyDefaultFormat(
-    projectState.defaultFormat || DEFAULT_FORMAT,
-    shouldUpgrade
-  );
-  if (!shouldUpgrade) return projectState;
-
-  const upgradePage = page => {
-    if (page) page.format = upgradeLegacyDefaultFormat(page.format, true);
-  };
-
-  upgradePage(projectState.initialNotes);
-  projectState.drafts?.forEach(draft => {
-    upgradePage(draft);
-    upgradePage(draft.notes);
-  });
-  projectState.formatDefaultVersion = FORMAT_DEFAULT_VERSION;
-  return projectState;
+  return StateCore.migrateLegacyDefaultFonts(projectState);
 }
 
 function projectStateWithoutVersionHistory(projectState) {
-  if (!projectState) return null;
-  const initialNotes = { ...(projectState.initialNotes || {}) };
-  delete initialNotes.versionHistory;
-  return {
-    ...projectState,
-    initialNotes,
-    drafts: (projectState.drafts || []).map(draft => {
-      const { versionHistory, ...rest } = draft;
-      return rest;
-    })
-  };
+  return StateCore.stateWithoutVersionHistory(projectState);
 }
 
 function serializeProjectState(projectState = state, options = {}) {
-  if (!projectState) return "";
-  const serializableState = options.includeVersionHistory === false
-    ? projectStateWithoutVersionHistory(projectState)
-    : projectState;
-  return JSON.stringify(serializableState);
+  return StateCore.serializeProjectState(projectState, options);
 }
 
 function projectStateFromSnapshot(snapshot) {
-  return migrateLegacyDefaultFonts(JSON.parse(snapshot));
+  return StateCore.projectStateFromSnapshot(snapshot);
 }
 
 function markStateChanged() {
@@ -1004,8 +933,69 @@ function markStateChanged() {
 }
 
 function queueSave(delay = AUTOSAVE_DELAY_MS) {
+  clearPendingPageSaves();
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(saveNow, delay);
+}
+
+function clearPendingPageSaves() {
+  pendingPageSaveKeys.clear();
+  pendingPageVersionHistorySaveKeys.clear();
+  window.clearTimeout(pageSaveTimer);
+  pageSaveTimer = null;
+}
+
+function queuePendingPageSaves(delay = 0) {
+  if (!pendingPageSaveKeys.size) return;
+  window.clearTimeout(pageSaveTimer);
+  pageSaveTimer = window.setTimeout(savePendingPagesNow, delay);
+}
+
+function queuePageSave(pageKey, delay = AUTOSAVE_DELAY_MS, options = {}) {
+  if (!pageKey) return;
+  pendingPageSaveKeys.add(pageKey);
+  if (options.includeVersionHistory) pendingPageVersionHistorySaveKeys.add(pageKey);
+  queuePendingPageSaves(delay);
+}
+
+function pageSavePayload(pageKey, options = {}) {
+  const page = pageForEditorKey(pageKey);
+  if (!page) return null;
+
+  ensurePageFields(page);
+  const parsed = parseDraftPageKey(pageKey);
+  const payloadPage = {
+    content: page.content,
+    contentHtml: page.contentHtml,
+    format: normalizeFormat(page.format)
+  };
+  if (parsed?.type === "content") payloadPage.title = page.title || "";
+  if (options.includeVersionHistory && Array.isArray(page.versionHistory)) {
+    payloadPage.versionHistory = page.versionHistory;
+  }
+
+  return {
+    key: pageKey,
+    page: payloadPage
+  };
+}
+
+function pageKeyForTitleInput(titleInput) {
+  const draftId = titleInput?.dataset?.titleDraftId;
+  return draftId && draftExists(draftId) ? draftContentKey(draftId) : "";
+}
+
+function syncDraftTitleInput(titleInput) {
+  const draft = draftById(titleInput?.dataset?.titleDraftId);
+  if (!draft) return "";
+
+  const nextTitle = titleInput.value || "Untitled draft";
+  if (draft.title !== nextTitle) {
+    draft.title = nextTitle;
+    draft.updatedAt = nowIso();
+  }
+  if (draft.notes) draft.notes.title = `${draft.title} Notes`;
+  return draftContentKey(draft.id);
 }
 
 function updateUndoRedoControls() {
@@ -1019,17 +1009,218 @@ function resetHistory() {
   updateUndoRedoControls();
 }
 
+function isPageHistoryEntry(entry) {
+  return entry?.type === "page" && typeof entry.key === "string";
+}
+
+function isDraftStructureHistoryEntry(entry) {
+  return entry?.type === "draft-structure" && Array.isArray(entry.draftOrder);
+}
+
+function isProjectFormatHistoryEntry(entry) {
+  return entry?.type === "project-format" && Array.isArray(entry.pageFormats);
+}
+
+function isFullHistoryEntry(entry) {
+  return typeof entry === "string" || entry?.type === "full";
+}
+
+function fullHistorySnapshot(entry) {
+  return typeof entry === "string" ? entry : entry?.snapshot || "";
+}
+
+function pageHistorySnapshot(page) {
+  if (!page) return null;
+  ensurePageFields(page);
+  return {
+    title: page.title || "",
+    content: page.content || "",
+    contentHtml: page.contentHtml || "",
+    format: normalizeFormat(page.format),
+    updatedAt: page.updatedAt || page.createdAt || nowIso()
+  };
+}
+
+function pageHistoryEntryForKey(pageKey) {
+  const page = pageForEditorKey(pageKey);
+  const snapshot = pageHistorySnapshot(page);
+  return snapshot ? { type: "page", key: pageKey, page: snapshot } : null;
+}
+
+function cloneHistoryValue(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function draftHistorySnapshot(draft) {
+  if (!draft?.id) return null;
+  const { versionHistory, ...draftSnapshot } = draft;
+  const snapshot = {
+    ...draftSnapshot,
+    format: normalizeFormat(draft.format)
+  };
+
+  if (draft.notes) {
+    const { versionHistory: notesVersionHistory, ...notesSnapshot } = draft.notes;
+    snapshot.notes = {
+      ...notesSnapshot,
+      format: normalizeFormat(draft.notes.format)
+    };
+  }
+
+  return cloneHistoryValue(snapshot);
+}
+
+function compactDraftStructureIds(affectedDraftIds = []) {
+  const ids = new Set(affectedDraftIds.filter(Boolean));
+  if (selectedDraftId) ids.add(selectedDraftId);
+  const parsedActive = parseDraftPageKey(activeEditorKey);
+  if (parsedActive?.draftId) ids.add(parsedActive.draftId);
+  if (versionHistoryDraftId && versionHistoryDraftId !== STORY_KEY) ids.add(versionHistoryDraftId);
+  return Array.from(ids);
+}
+
+function draftStructureHistoryEntry(affectedDraftIds = []) {
+  if (!state) return null;
+
+  const draftIds = compactDraftStructureIds(affectedDraftIds);
+  const draftsById = new Map((state.drafts || []).map(draft => [draft.id, draft]));
+  const draftSnapshots = draftIds
+    .map(draftId => draftHistorySnapshot(draftsById.get(draftId)))
+    .filter(Boolean);
+
+  return {
+    type: "draft-structure",
+    affectedDraftIds: Array.from(new Set(affectedDraftIds.filter(Boolean))),
+    draftOrder: (state.drafts || []).map(draft => draft.id).filter(Boolean),
+    drafts: draftSnapshots,
+    selectedDraftId,
+    activeArea,
+    activeEditorKey,
+    displayedPageKeys: Array.from(displayedPageKeys),
+    collapsedNotesIds: Array.from(collapsedNotesIds),
+    versionHistoryDraftId
+  };
+}
+
+function pageFormatHistorySnapshot(entry) {
+  if (!entry?.key || !entry.page) return null;
+  ensurePageFields(entry.page);
+  return {
+    key: entry.key,
+    format: normalizeFormat(entry.page.format)
+  };
+}
+
+function projectFormatHistoryEntry() {
+  if (!state) return null;
+  return {
+    type: "project-format",
+    defaultFormat: normalizeFormat(state.defaultFormat),
+    pageFormats: Array.from(pageEntriesForProjectState(state).values())
+      .map(pageFormatHistorySnapshot)
+      .filter(Boolean),
+    activeEditorKey
+  };
+}
+
+function pageHistorySignature(entry) {
+  if (!isPageHistoryEntry(entry)) return "";
+  return JSON.stringify({
+    key: entry.key,
+    title: entry.page?.title || "",
+    content: entry.page?.content || "",
+    contentHtml: entry.page?.contentHtml || "",
+    format: normalizeFormat(entry.page?.format || {})
+  });
+}
+
+function draftStructureHistorySignature(entry) {
+  if (!isDraftStructureHistoryEntry(entry)) return "";
+  return JSON.stringify({
+    affectedDraftIds: entry.affectedDraftIds || [],
+    draftOrder: entry.draftOrder || [],
+    drafts: entry.drafts || [],
+    selectedDraftId: entry.selectedDraftId || "",
+    activeArea: entry.activeArea || "",
+    activeEditorKey: entry.activeEditorKey || "",
+    displayedPageKeys: entry.displayedPageKeys || [],
+    collapsedNotesIds: entry.collapsedNotesIds || [],
+    versionHistoryDraftId: entry.versionHistoryDraftId || ""
+  });
+}
+
+function projectFormatHistorySignature(entry) {
+  if (!isProjectFormatHistoryEntry(entry)) return "";
+  return JSON.stringify({
+    defaultFormat: normalizeFormat(entry.defaultFormat),
+    pageFormats: entry.pageFormats || [],
+    activeEditorKey: entry.activeEditorKey || ""
+  });
+}
+
+function historyEntriesMatch(left, right) {
+  if (isPageHistoryEntry(left) || isPageHistoryEntry(right)) {
+    return isPageHistoryEntry(left)
+      && isPageHistoryEntry(right)
+      && pageHistorySignature(left) === pageHistorySignature(right);
+  }
+
+  if (isDraftStructureHistoryEntry(left) || isDraftStructureHistoryEntry(right)) {
+    return isDraftStructureHistoryEntry(left)
+      && isDraftStructureHistoryEntry(right)
+      && draftStructureHistorySignature(left) === draftStructureHistorySignature(right);
+  }
+
+  if (isProjectFormatHistoryEntry(left) || isProjectFormatHistoryEntry(right)) {
+    return isProjectFormatHistoryEntry(left)
+      && isProjectFormatHistoryEntry(right)
+      && projectFormatHistorySignature(left) === projectFormatHistorySignature(right);
+  }
+
+  if (isFullHistoryEntry(left) || isFullHistoryEntry(right)) {
+    return isFullHistoryEntry(left)
+      && isFullHistoryEntry(right)
+      && fullHistorySnapshot(left) === fullHistorySnapshot(right);
+  }
+
+  return false;
+}
+
+function pushUndoHistoryEntry(entry) {
+  if (!entry || historyEntriesMatch(entry, undoStack[undoStack.length - 1])) return;
+
+  undoStack.push(entry);
+  if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+  redoStack = [];
+  updateUndoRedoControls();
+}
+
 function recordUndoSnapshot() {
   if (!state || isRestoringHistory) return;
   typingUndoGroup = null;
 
   const snapshot = serializeProjectState(state, { includeVersionHistory: false });
-  if (!snapshot || snapshot === undoStack[undoStack.length - 1]) return;
+  if (!snapshot) return;
+  pushUndoHistoryEntry(snapshot);
+}
 
-  undoStack.push(snapshot);
-  if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
-  redoStack = [];
-  updateUndoRedoControls();
+function recordPageUndoSnapshot(pageKey) {
+  if (!state || isRestoringHistory) return;
+  typingUndoGroup = null;
+
+  pushUndoHistoryEntry(pageHistoryEntryForKey(pageKey));
+}
+
+function recordDraftStructureUndoSnapshot(affectedDraftIds = []) {
+  if (!state || isRestoringHistory) return;
+  typingUndoGroup = null;
+  pushUndoHistoryEntry(draftStructureHistoryEntry(affectedDraftIds));
+}
+
+function recordProjectFormatUndoSnapshot() {
+  if (!state || isRestoringHistory) return;
+  typingUndoGroup = null;
+  pushUndoHistoryEntry(projectFormatHistoryEntry());
 }
 
 function isGroupedTypingInput(inputType) {
@@ -1041,6 +1232,7 @@ function undoTargetForInputEvent(event) {
   const editorEl = closestElement(event.target, "[data-editor-key]");
   if (editorEl) {
     return {
+      type: "page",
       key: editorEl.dataset.editorKey,
       grouped: isGroupedTypingInput(event.inputType)
     };
@@ -1048,8 +1240,11 @@ function undoTargetForInputEvent(event) {
 
   const titleInput = closestElement(event.target, "[data-title-draft-id]");
   if (titleInput) {
+    const pageKey = pageKeyForTitleInput(titleInput);
+    if (!pageKey) return null;
     return {
-      key: `title:${titleInput.dataset.titleDraftId}`,
+      type: "page",
+      key: pageKey,
       grouped: isGroupedTypingInput(event.inputType)
     };
   }
@@ -1062,7 +1257,11 @@ function recordUndoSnapshotForInput(event) {
   if (!target) return;
 
   if (!target.grouped) {
-    recordUndoSnapshot();
+    if (target.type === "page") {
+      recordPageUndoSnapshot(target.key);
+    } else {
+      recordUndoSnapshot();
+    }
     return;
   }
 
@@ -1077,7 +1276,11 @@ function recordUndoSnapshotForInput(event) {
     return;
   }
 
-  recordUndoSnapshot();
+  if (target.type === "page") {
+    recordPageUndoSnapshot(target.key);
+  } else {
+    recordUndoSnapshot();
+  }
   typingUndoGroup = { key: target.key, startedAt: now, lastAt: now };
 }
 
@@ -1263,6 +1466,173 @@ function restoreHistorySnapshotWithTarget(snapshot, target) {
   isRestoringHistory = false;
 }
 
+function pageHistoryEntryForTarget(entry) {
+  if (!isPageHistoryEntry(entry)) return null;
+  return {
+    key: entry.key,
+    page: entry.page,
+    type: parseDraftPageKey(entry.key)?.type || "page"
+  };
+}
+
+function findPageHistoryChangeTarget(fromEntry, toEntry) {
+  if (!isPageHistoryEntry(fromEntry) || !isPageHistoryEntry(toEntry)) return null;
+
+  const beforeEntry = pageHistoryEntryForTarget(fromEntry);
+  const afterEntry = pageHistoryEntryForTarget(toEntry);
+  const beforeText = pagePlainTextForHistory(beforeEntry);
+  const afterText = pagePlainTextForHistory(afterEntry);
+  const titleChanged = (beforeEntry?.page?.title || "") !== (afterEntry?.page?.title || "");
+  const textChanged = beforeText !== afterText || (beforeEntry?.page?.contentHtml || "") !== (afterEntry?.page?.contentHtml || "");
+
+  return {
+    key: toEntry.key,
+    type: textChanged ? "text" : (titleChanged ? "title" : "panel"),
+    offset: firstChangedTextOffset(beforeText, afterText)
+  };
+}
+
+function applyPageHistoryEntry(entry) {
+  if (!isPageHistoryEntry(entry)) return false;
+
+  const parsed = parseDraftPageKey(entry.key);
+  const page = pageForEditorKey(entry.key);
+  if (!parsed || !page || !entry.page) return false;
+
+  const snapshot = pageHistorySnapshot(entry.page);
+  if (!snapshot) return false;
+
+  page.content = snapshot.content;
+  page.contentHtml = snapshot.contentHtml;
+  page.format = snapshot.format;
+  page.updatedAt = snapshot.updatedAt || nowIso();
+
+  if (parsed.type === "content" && typeof snapshot.title === "string") {
+    page.title = snapshot.title.trim() || "Untitled draft";
+    if (page.notes) page.notes.title = `${page.title} Notes`;
+  } else if (parsed.type === "story" && typeof snapshot.title === "string") {
+    page.title = snapshot.title || PROJECT_NOTES_TITLE;
+  }
+
+  ensurePageFields(page);
+  return true;
+}
+
+function restorePageHistoryEntryWithTarget(entry, target) {
+  isRestoringHistory = true;
+  if (!applyPageHistoryEntry(entry)) {
+    isRestoringHistory = false;
+    updateUndoRedoControls();
+    return;
+  }
+
+  editorSelections = {
+    ...editorSelections,
+    [entry.key]: {}
+  };
+  makeHistoryTargetVisible(target || { key: entry.key, type: "text", offset: 0 });
+  render();
+  schedulePageSave(entry.key);
+  updateUndoRedoControls();
+  revealHistoryChange(target || { key: entry.key, type: "text", offset: 0 });
+  isRestoringHistory = false;
+}
+
+function pageKeyForDraftStructureEntry(entry) {
+  if (pageKeyExists(entry?.activeEditorKey)) return entry.activeEditorKey;
+  if (entry?.activeArea === "story") return STORY_KEY;
+  return draftContentKey(selectedDraftId);
+}
+
+function applyDraftStructureHistoryEntry(entry) {
+  if (!state || !isDraftStructureHistoryEntry(entry)) return false;
+
+  const currentDrafts = new Map((state.drafts || []).map(draft => [draft.id, draft]));
+  const snapshots = new Map((entry.drafts || []).map(draft => [draft.id, draft]));
+  const nextDrafts = [];
+
+  (entry.draftOrder || []).forEach(draftId => {
+    const existingDraft = currentDrafts.get(draftId);
+    if (existingDraft) {
+      nextDrafts.push(existingDraft);
+      return;
+    }
+
+    const snapshot = snapshots.get(draftId);
+    if (snapshot) nextDrafts.push(cloneHistoryValue(snapshot));
+  });
+
+  const nextIds = new Set(nextDrafts.map(draft => draft.id));
+  (state.drafts || []).forEach(draft => {
+    if (nextIds.has(draft.id)) return;
+    clearDraftVersionTimer(draft.id);
+    delete editorSelections[draftContentKey(draft.id)];
+    delete editorSelections[draftNotesKey(draft.id)];
+  });
+
+  state.drafts = nextDrafts.length ? nextDrafts : [createDraft(null)];
+  selectedDraftId = draftExists(entry.selectedDraftId) ? entry.selectedDraftId : state.drafts[0]?.id || null;
+  activeArea = entry.activeArea === "story" ? "story" : "draft";
+  activeEditorKey = pageKeyExists(entry.activeEditorKey)
+    ? entry.activeEditorKey
+    : (activeArea === "story" ? STORY_KEY : draftContentKey(selectedDraftId));
+  versionHistoryDraftId = entry.versionHistoryDraftId === STORY_KEY || draftExists(entry.versionHistoryDraftId)
+    ? entry.versionHistoryDraftId
+    : null;
+
+  displayedPageKeys = new Set((entry.displayedPageKeys || []).filter(pageKeyExists));
+  collapsedNotesIds = new Set((entry.collapsedNotesIds || []).filter(draftExists));
+  ensureDisplaySelection();
+  return true;
+}
+
+function restoreDraftStructureHistoryEntryWithTarget(entry) {
+  isRestoringHistory = true;
+  if (!applyDraftStructureHistoryEntry(entry)) {
+    isRestoringHistory = false;
+    updateUndoRedoControls();
+    return;
+  }
+
+  const target = { key: pageKeyForDraftStructureEntry(entry), type: "panel", offset: 0 };
+  render();
+  scheduleSave();
+  queueViewStateSave(0);
+  updateUndoRedoControls();
+  revealHistoryChange(target);
+  isRestoringHistory = false;
+}
+
+function applyProjectFormatHistoryEntry(entry) {
+  if (!state || !isProjectFormatHistoryEntry(entry)) return false;
+
+  state.defaultFormat = normalizeFormat(entry.defaultFormat);
+  (entry.pageFormats || []).forEach(pageFormat => {
+    const page = pageForEditorKey(pageFormat.key);
+    if (!page) return;
+    ensurePageFields(page);
+    page.format = normalizeFormat(pageFormat.format);
+  });
+  return true;
+}
+
+function restoreProjectFormatHistoryEntryWithTarget(entry) {
+  isRestoringHistory = true;
+  if (!applyProjectFormatHistoryEntry(entry)) {
+    isRestoringHistory = false;
+    updateUndoRedoControls();
+    return;
+  }
+
+  const target = { key: pageKeyExists(entry.activeEditorKey) ? entry.activeEditorKey : activeEditorKey, type: "panel", offset: 0 };
+  makeHistoryTargetVisible(target);
+  render();
+  scheduleSave();
+  updateUndoRedoControls();
+  revealHistoryChange(target);
+  isRestoringHistory = false;
+}
+
 function undoProjectChange() {
   typingUndoGroup = null;
   if (!undoStack.length) {
@@ -1270,10 +1640,39 @@ function undoProjectChange() {
     return;
   }
 
+  const previousEntry = undoStack[undoStack.length - 1];
+  if (isPageHistoryEntry(previousEntry)) {
+    syncPageFromDom(previousEntry.key);
+    undoStack.pop();
+    const currentEntry = pageHistoryEntryForKey(previousEntry.key);
+    if (currentEntry && !historyEntriesMatch(currentEntry, previousEntry)) redoStack.push(currentEntry);
+    restorePageHistoryEntryWithTarget(previousEntry, findPageHistoryChangeTarget(currentEntry, previousEntry));
+    return;
+  }
+
+  if (isDraftStructureHistoryEntry(previousEntry)) {
+    syncFromInputs();
+    undoStack.pop();
+    const currentEntry = draftStructureHistoryEntry(previousEntry.affectedDraftIds || []);
+    if (currentEntry && !historyEntriesMatch(currentEntry, previousEntry)) redoStack.push(currentEntry);
+    restoreDraftStructureHistoryEntryWithTarget(previousEntry);
+    return;
+  }
+
+  if (isProjectFormatHistoryEntry(previousEntry)) {
+    syncFromInputs();
+    undoStack.pop();
+    const currentEntry = projectFormatHistoryEntry();
+    if (currentEntry && !historyEntriesMatch(currentEntry, previousEntry)) redoStack.push(currentEntry);
+    restoreProjectFormatHistoryEntryWithTarget(previousEntry);
+    return;
+  }
+
   syncFromInputs();
+  undoStack.pop();
+  const previousSnapshot = fullHistorySnapshot(previousEntry);
   const fromState = projectStateFromSnapshot(serializeProjectState(state, { includeVersionHistory: false }));
   const currentSnapshot = serializeProjectState(state, { includeVersionHistory: false });
-  const previousSnapshot = undoStack.pop();
   const toState = projectStateFromSnapshot(previousSnapshot);
   if (currentSnapshot && currentSnapshot !== previousSnapshot) redoStack.push(currentSnapshot);
   restoreHistorySnapshotWithTarget(previousSnapshot, findHistoryChangeTarget(fromState, toState));
@@ -1286,10 +1685,48 @@ function redoProjectChange() {
     return;
   }
 
+  const nextEntry = redoStack[redoStack.length - 1];
+  if (isPageHistoryEntry(nextEntry)) {
+    syncPageFromDom(nextEntry.key);
+    redoStack.pop();
+    const currentEntry = pageHistoryEntryForKey(nextEntry.key);
+    if (currentEntry && !historyEntriesMatch(currentEntry, nextEntry)) {
+      undoStack.push(currentEntry);
+      if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+    }
+    restorePageHistoryEntryWithTarget(nextEntry, findPageHistoryChangeTarget(currentEntry, nextEntry));
+    return;
+  }
+
+  if (isDraftStructureHistoryEntry(nextEntry)) {
+    syncFromInputs();
+    redoStack.pop();
+    const currentEntry = draftStructureHistoryEntry(nextEntry.affectedDraftIds || []);
+    if (currentEntry && !historyEntriesMatch(currentEntry, nextEntry)) {
+      undoStack.push(currentEntry);
+      if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+    }
+    restoreDraftStructureHistoryEntryWithTarget(nextEntry);
+    return;
+  }
+
+  if (isProjectFormatHistoryEntry(nextEntry)) {
+    syncFromInputs();
+    redoStack.pop();
+    const currentEntry = projectFormatHistoryEntry();
+    if (currentEntry && !historyEntriesMatch(currentEntry, nextEntry)) {
+      undoStack.push(currentEntry);
+      if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+    }
+    restoreProjectFormatHistoryEntryWithTarget(nextEntry);
+    return;
+  }
+
   syncFromInputs();
+  redoStack.pop();
+  const nextSnapshot = fullHistorySnapshot(nextEntry);
   const fromState = projectStateFromSnapshot(serializeProjectState(state, { includeVersionHistory: false }));
   const currentSnapshot = serializeProjectState(state, { includeVersionHistory: false });
-  const nextSnapshot = redoStack.pop();
   const toState = projectStateFromSnapshot(nextSnapshot);
   if (currentSnapshot && currentSnapshot !== nextSnapshot) {
     undoStack.push(currentSnapshot);
@@ -1319,169 +1756,70 @@ function ensurePageFields(page) {
   return page;
 }
 
+function stateCoreHistoryOptions() {
+  return {
+    ensurePage: ensurePageFields,
+    now: nowIso,
+    sanitizeHtml: sanitizeRichHtml,
+    textFromHtml: plainTextFromHtml
+  };
+}
+
 function pageVersionSnapshot(page, fallbackTitle, timestamp = nowIso()) {
   ensurePageFields(page);
-  return {
-    id: makeId("version"),
-    createdAt: timestamp,
-    title: page.title || fallbackTitle,
-    content: page.content || "",
-    contentHtml: page.contentHtml || textToHtml(page.content || ""),
-    format: normalizeFormat(page.format)
-  };
+  return StateCore.pageVersionSnapshot(page, fallbackTitle, timestamp);
 }
 
 function versionHasMeaningfulContent(version) {
-  return Boolean(String(version?.content || plainTextFromHtml(version?.contentHtml || "")).trim());
-}
-
-function normalizePageVersionEntry(entry, page, fallbackTitle, index) {
-  const createdAt = entry?.createdAt || page.updatedAt || page.createdAt || nowIso();
-  const contentHtml = typeof entry?.contentHtml === "string"
-    ? sanitizeRichHtml(entry.contentHtml)
-    : textToHtml(typeof entry?.content === "string" ? entry.content : page.content || "");
-  const content = typeof entry?.content === "string"
-    ? entry.content
-    : plainTextFromHtml(contentHtml);
-
-  return {
-    id: entry?.id || makeId("version"),
-    createdAt,
-    title: entry?.title || page.title || fallbackTitle,
-    content,
-    contentHtml,
-    format: normalizeFormat({ ...page.format, ...(entry?.format || {}) })
-  };
+  return StateCore.versionHasMeaningfulContent(version);
 }
 
 function ensurePageVersionHistory(page, fallbackTitle) {
-  if (!page) return [];
-  ensurePageFields(page);
-
-  const source = Array.isArray(page.versionHistory) ? page.versionHistory : [];
-  page.versionHistory = source
-    .filter(entry => entry && typeof entry === "object")
-    .map((entry, index) => normalizePageVersionEntry(entry, page, fallbackTitle, index));
-
-  while (page.versionHistory.length && !versionHasMeaningfulContent(page.versionHistory[0])) {
-    page.versionHistory.shift();
-  }
-
-  if (!page.versionHistory.length) {
-    const current = pageVersionSnapshot(page, fallbackTitle, page.updatedAt || nowIso());
-    if (versionHasMeaningfulContent(current)) page.versionHistory.push(current);
-  }
-
-  page.versionHistory = sortVersionHistoryByCreatedAt(page.versionHistory);
-  return page.versionHistory;
+  return StateCore.ensurePageVersionHistory(page, fallbackTitle, stateCoreHistoryOptions());
 }
 
 function ensureDraftVersionHistory(draft) {
-  return ensurePageVersionHistory(draft, draft?.title || "Untitled draft");
+  return StateCore.ensureDraftVersionHistory(draft, stateCoreHistoryOptions());
 }
 
 function ensureProjectNotesVersionHistory(projectState = state) {
-  return ensurePageVersionHistory(projectState?.initialNotes, PROJECT_NOTES_TITLE);
+  return StateCore.ensureProjectNotesVersionHistory(projectState, stateCoreHistoryOptions());
 }
 
 function pageVersionSignature(version) {
-  return JSON.stringify({
-    title: version?.title || "",
-    content: version?.content || "",
-    contentHtml: version?.contentHtml || "",
-    format: normalizeFormat(version?.format || {})
-  });
+  return StateCore.pageVersionSignature(version);
 }
 
 function versionHistoryTime(version) {
-  const time = Date.parse(version?.createdAt || "");
-  return Number.isNaN(time) ? null : time;
+  return StateCore.versionHistoryTime(version);
 }
 
 function sortVersionHistoryByCreatedAt(history) {
-  return (Array.isArray(history) ? history : []).slice().sort((left, right) => {
-    const leftTime = versionHistoryTime(left);
-    const rightTime = versionHistoryTime(right);
-    if (leftTime === null || rightTime === null) return 0;
-    return leftTime - rightTime;
-  });
+  return StateCore.sortVersionHistoryByCreatedAt(history);
 }
 
 function latestVersionHistoryEntry(history) {
-  let latest = null;
-  let latestTime = -Infinity;
-  (Array.isArray(history) ? history : []).forEach(version => {
-    const time = versionHistoryTime(version);
-    if (time === null || time < latestTime) return;
-    latest = version;
-    latestTime = time;
-  });
-  return latest;
+  return StateCore.latestVersionHistoryEntry(history);
 }
 
 function currentPageHistorySnapshot(page, fallbackTitle) {
-  return pageVersionSnapshot(page, fallbackTitle, page.updatedAt || page.createdAt || nowIso());
+  return StateCore.currentPageHistorySnapshot(page, fallbackTitle, stateCoreHistoryOptions());
 }
 
 function addCurrentPageToHistoryIfMissing(history, page, fallbackTitle) {
-  const current = currentPageHistorySnapshot(page, fallbackTitle);
-  if (!versionHasMeaningfulContent(current)) return history;
-
-  const currentSignature = pageVersionSignature(current);
-  if (history.some(version => pageVersionSignature(version) === currentSignature)) return history;
-  return sortVersionHistoryByCreatedAt([...history, current]);
+  return StateCore.addCurrentPageToHistoryIfMissing(history, page, fallbackTitle, stateCoreHistoryOptions());
 }
 
 function applyVersionHistoryEntryToPage(page, version, fallbackTitle) {
-  if (!page || !version) return;
-
-  const contentHtml = typeof version.contentHtml === "string"
-    ? sanitizeRichHtml(version.contentHtml)
-    : textToHtml(typeof version.content === "string" ? version.content : "");
-  const content = typeof version.content === "string" ? version.content : plainTextFromHtml(contentHtml);
-  page.title = version.title || page.title || fallbackTitle;
-  page.content = content;
-  page.contentHtml = contentHtml;
-  page.format = normalizeFormat(version.format || page.format || {});
-  page.updatedAt = version.createdAt || page.updatedAt || page.createdAt || nowIso();
+  return StateCore.applyVersionHistoryEntryToPage(page, version, fallbackTitle, stateCoreHistoryOptions());
 }
 
 function promotePageToNewestHistoryVersion(page, fallbackTitle) {
-  if (!page) return false;
-
-  let history = ensurePageVersionHistory(page, fallbackTitle);
-  const latest = latestVersionHistoryEntry(history);
-  const latestTime = versionHistoryTime(latest);
-  const currentTime = versionHistoryTime({ createdAt: page.updatedAt || page.createdAt });
-  if (!latest || latestTime === null || (currentTime !== null && latestTime <= currentTime)) return false;
-
-  const currentSignature = pageVersionSignature(currentPageHistorySnapshot(page, fallbackTitle));
-  const latestSignature = pageVersionSignature(latest);
-  if (currentSignature !== latestSignature) {
-    history = addCurrentPageToHistoryIfMissing(history, page, fallbackTitle);
-  }
-
-  applyVersionHistoryEntryToPage(page, latest, fallbackTitle);
-  page.versionHistory = history;
-  return true;
+  return StateCore.promotePageToNewestHistoryVersion(page, fallbackTitle, stateCoreHistoryOptions());
 }
 
 function appendPageVersionIfChanged(page, fallbackTitle) {
-  if (!page) return false;
-
-  const hadRecordedVersion = Array.isArray(page.versionHistory)
-    && page.versionHistory.some(versionHasMeaningfulContent);
-  const history = ensurePageVersionHistory(page, fallbackTitle);
-  if (!hadRecordedVersion && history.length) return true;
-
-  const current = pageVersionSnapshot(page, fallbackTitle, page.updatedAt || nowIso());
-  if (!history.length && !versionHasMeaningfulContent(current)) return false;
-
-  const previous = history[history.length - 1];
-  if (pageVersionSignature(previous) === pageVersionSignature(current)) return false;
-
-  history.push(current);
-  return true;
+  return StateCore.appendPageVersionIfChanged(page, fallbackTitle, stateCoreHistoryOptions());
 }
 
 function appendDraftVersionIfChanged(draft) {
@@ -1496,7 +1834,8 @@ function restoreDraftVersion(draftId, versionId) {
   const draft = draftById(draftId);
   if (!draft) return;
 
-  syncFromInputs();
+  const pageKey = draftContentKey(draft.id);
+  syncPageFromDom(pageKey);
   const history = ensureDraftVersionHistory(draft);
   const versionIndex = history.findIndex(version => version.id === versionId);
   if (versionIndex < 0) return;
@@ -1508,7 +1847,7 @@ function restoreDraftVersion(draftId, versionId) {
   );
   if (!confirmed) return;
 
-  recordUndoSnapshot();
+  recordPageUndoSnapshot(pageKey);
   clearDraftVersionTimer(draft.id);
   appendDraftVersionIfChanged(draft);
 
@@ -1524,9 +1863,13 @@ function restoreDraftVersion(draftId, versionId) {
   versionHistoryDraftId = draft.id;
   selectedDraftId = draft.id;
   activeArea = "draft";
-  activeEditorKey = draftContentKey(draft.id);
+  activeEditorKey = pageKey;
   displayPage(activeEditorKey, true);
-  scheduleSave({ syncInputs: false, refreshUi: false, refreshDiff: false });
+  schedulePageSave(pageKey, {
+    includeVersionHistory: true,
+    refreshUi: false,
+    refreshDiff: false
+  });
   render();
   setStatus(`Restored ${label}; saving...`);
 }
@@ -1534,7 +1877,7 @@ function restoreDraftVersion(draftId, versionId) {
 function restoreProjectNotesVersion(versionId) {
   if (!state?.initialNotes) return;
 
-  syncFromInputs();
+  syncPageFromDom(STORY_KEY);
   const history = ensureProjectNotesVersionHistory();
   const versionIndex = history.findIndex(version => version.id === versionId);
   if (versionIndex < 0) return;
@@ -1546,7 +1889,7 @@ function restoreProjectNotesVersion(versionId) {
   );
   if (!confirmed) return;
 
-  recordUndoSnapshot();
+  recordPageUndoSnapshot(STORY_KEY);
   clearDraftVersionTimer(STORY_KEY);
   appendProjectNotesVersionIfChanged();
 
@@ -1562,7 +1905,11 @@ function restoreProjectNotesVersion(versionId) {
   activeArea = "story";
   activeEditorKey = STORY_KEY;
   displayPage(STORY_KEY, true);
-  scheduleSave({ syncInputs: false, refreshUi: false, refreshDiff: false });
+  schedulePageSave(STORY_KEY, {
+    includeVersionHistory: true,
+    refreshUi: false,
+    refreshDiff: false
+  });
   render();
   setStatus(`Restored ${label}; saving...`);
 }
@@ -1605,6 +1952,15 @@ function flushVersionCapture(captureKey, options = {}) {
     : flushDraftVersionCapture(captureKey, options);
 }
 
+function scheduleVersionHistoryPageSave(pageKey, historyKey = pageKey) {
+  schedulePageSave(pageKey, {
+    includeVersionHistory: true,
+    refreshUi: false,
+    refreshDiff: false
+  });
+  if (versionHistoryDraftId === historyKey) renderDiffSoon("Loading version history");
+}
+
 function flushDraftVersionCaptures() {
   const changedCaptureKeys = [];
   [...draftVersionTimers.keys()].forEach(captureKey => {
@@ -1620,11 +1976,7 @@ function queueDraftVersionCapture(draftId) {
   draftVersionTimers.set(draftId, window.setTimeout(() => {
     draftVersionTimers.delete(draftId);
     if (appendDraftVersionIfChanged(draftById(draftId))) {
-      markStateChanged();
-      rememberLinkedProjectState();
-      setStatus(isSaving ? "Saving..." : "Unsaved changes");
-      queueSave();
-      if (versionHistoryDraftId === draftId) renderDiffSoon("Loading version history");
+      scheduleVersionHistoryPageSave(draftContentKey(draftId), draftId);
     }
   }, DRAFT_VERSION_CAPTURE_DELAY_MS));
 }
@@ -1636,11 +1988,7 @@ function queueProjectNotesVersionCapture() {
   draftVersionTimers.set(STORY_KEY, window.setTimeout(() => {
     draftVersionTimers.delete(STORY_KEY);
     if (appendProjectNotesVersionIfChanged()) {
-      markStateChanged();
-      rememberLinkedProjectState();
-      setStatus(isSaving ? "Saving..." : "Unsaved changes");
-      queueSave();
-      if (versionHistoryDraftId === STORY_KEY) renderDiffSoon("Loading version history");
+      scheduleVersionHistoryPageSave(STORY_KEY);
     }
   }, DRAFT_VERSION_CAPTURE_DELAY_MS));
 }
@@ -1844,13 +2192,20 @@ function applyPageSnapshot(key, snapshotPage) {
   return true;
 }
 
-function applyDetachedUnitSnapshot(unit) {
-  if (!unit?.pages?.length) return false;
-  let applied = false;
+function applyDetachedUnitSnapshotPageKeys(unit) {
+  const appliedPageKeys = [];
+  if (!unit?.pages?.length) return appliedPageKeys;
+
   unit.pages.forEach(page => {
-    if (page?.key && applyPageSnapshot(page.key, page.page || page)) applied = true;
+    if (page?.key && applyPageSnapshot(page.key, page.page || page)) {
+      appliedPageKeys.push(page.key);
+    }
   });
-  return applied;
+  return appliedPageKeys;
+}
+
+function applyDetachedUnitSnapshot(unit) {
+  return applyDetachedUnitSnapshotPageKeys(unit).length > 0;
 }
 
 function displayKeys() {
@@ -1944,11 +2299,13 @@ function restoreEditorSelections(stored) {
   });
 }
 
-function saveCurrentViewState() {
+function saveCurrentViewState(options = {}) {
   if (!state) return;
 
-  saveCurrentEditorViewState();
-  saveVisibleEditorScrollPositions();
+  if (options.syncDom !== false) {
+    saveCurrentEditorViewState();
+    saveVisibleEditorScrollPositions();
+  }
 
   const selectedDraftIndex = draftIndexForId(selectedDraftId);
   const selectedDraft = state.drafts[selectedDraftIndex] || state.drafts[0] || null;
@@ -2036,6 +2393,14 @@ function queueViewStateSave(delay = 350) {
   viewStateSaveTimer = window.setTimeout(() => {
     saveViewStateNow();
   }, delay);
+}
+
+function persistViewStateChange(delay = 0) {
+  if (!state) return;
+  saveCurrentViewState();
+  if (pendingPageSaveKeys.size) queuePendingPageSaves(0);
+  const hasPendingProjectSave = pendingPageSaveKeys.size || Boolean(saveTimer) || isSaving;
+  queueViewStateSave(hasPendingProjectSave ? Math.max(delay, AUTOSAVE_DELAY_MS + 100) : delay);
 }
 
 function sendViewStateBeacon() {
@@ -2142,10 +2507,7 @@ function ensureDisplaySelection() {
     displayedPageKeys = new Set(defaultDisplayKeys());
   }
 
-  saveDisplaySelection();
-  saveCollapsedNotes();
-  saveNotesPanePercents();
-  savePagePanePercents();
+  saveLayoutViewState();
   syncPagesOnScreenToDisplaySelection();
 }
 
@@ -2264,9 +2626,8 @@ function setPagesOnScreen(value) {
   normalizePagePanePercentsForLayout();
   applyPagePaneStyles();
   updatePagesOnScreenControls();
-  saveCurrentViewState();
-  queueViewStateSave(500);
-  if (changesPanelIsOpen()) renderDiff();
+  persistViewStateChange(500);
+  if (changesPanelIsOpen()) renderDiffSoon();
   window.requestAnimationFrame(() => {
     alignPageInCanvas(activeDisplayKey());
     updateAllNotesHeadingDensity();
@@ -2314,7 +2675,7 @@ function reattachDetachedUnit(key, options = {}) {
 
 function detachUnit(key) {
   if (!state) return;
-  syncFromInputs();
+  syncDetachedUnitFromDom(key);
 
   const unit = snapshotForDetachedUnit(key);
   if (!unit) return;
@@ -2349,15 +2710,19 @@ function detachUnit(key) {
 
 function handleDetachedUnitUpdate(key, unit) {
   if (!detachedUnitKeys.has(key)) return;
-  if (!applyDetachedUnitSnapshot(unit)) return;
+  const appliedPageKeys = applyDetachedUnitSnapshotPageKeys(unit);
+  if (!appliedPageKeys.length) return;
 
   markStateChanged();
+  saveRetryCount = 0;
   rememberLinkedProjectState();
   refreshRenderedPageLabels();
   renderDraftTabs();
-  renderDiff();
+  renderDiffSoon();
   setStatus(isSaving ? "Saving..." : "Unsaved changes");
-  queueSave();
+  Array.from(new Set(appliedPageKeys)).forEach(pageKey => {
+    queuePageSave(pageKey, AUTOSAVE_DELAY_MS);
+  });
 }
 
 async function refreshDetachedUnitFromServer(key) {
@@ -2737,9 +3102,8 @@ function ensureSearchScopeVisible() {
   if (!shouldRender) return false;
   hasStoredDisplaySelection = true;
   ensureDisplaySelection();
-  saveCurrentViewState();
+  persistViewStateChange(0);
   render();
-  queueViewStateSave(0);
   return true;
 }
 
@@ -2957,7 +3321,11 @@ function refreshSearchResults(options = {}) {
 
 function openSearch(options = {}) {
   if (!els.searchPopover) return;
-  syncFromInputs();
+  if (options.pageKey) {
+    syncPageFromDom(options.pageKey);
+  } else {
+    syncFromInputs();
+  }
   searchState.open = true;
   if (options.pageKey) {
     setSearchScopeSingle(options.pageKey);
@@ -3110,11 +3478,21 @@ function replaceSpellcheckWord(value) {
 
   const editorEl = range.startContainer.parentElement?.closest("[data-editor-key]");
   if (editorEl) activeEditorKey = editorEl.dataset.editorKey;
-  recordUndoSnapshot();
-  document.execCommand("insertText", false, value);
+  if (editorEl) {
+    recordPageUndoSnapshot(editorEl.dataset.editorKey);
+  } else {
+    recordUndoSnapshot();
+  }
+  insertPlainText(value, { document });
   if (editorEl) {
     const page = pageForEditorKey(editorEl.dataset.editorKey);
     if (page) syncRichPage(page, editorEl);
+    schedulePageSave(editorEl.dataset.editorKey, {
+      updateViewState: false,
+      refreshUi: false,
+      refreshDiff: false
+    });
+    return;
   }
   scheduleSave({ syncInputs: false, refreshUi: false, refreshDiff: false });
 }
@@ -3180,7 +3558,7 @@ function showSpellcheckMenu({ word, range = null, suggestions = [], misspelled =
     }
 
     selectSpellcheckRange();
-    document.execCommand(action, false, null);
+    execRichTextCommand(action, { document });
     closeSpellcheckMenu();
   });
 
@@ -3293,50 +3671,6 @@ function pageWordCount(page) {
 function formatWordCount(count) {
   const value = Number(count) || 0;
   return `${value.toLocaleString()} ${value === 1 ? "word" : "words"}`;
-}
-
-function sanitizeStyleMarks(styleValue = "") {
-  const style = styleValue.toLowerCase();
-  return {
-    bold: /font-weight\s*:\s*(bold|[6-9]00)/.test(style),
-    italic: /font-style\s*:\s*italic/.test(style),
-    underline: /text-decoration[^;]*underline/.test(style),
-    strike: /text-decoration[^;]*(line-through|strike)/.test(style)
-  };
-}
-
-function wrapSemanticHtml(html, marks) {
-  let output = html;
-  if (marks.strike) output = `<s>${output}</s>`;
-  if (marks.underline) output = `<u>${output}</u>`;
-  if (marks.italic) output = `<em>${output}</em>`;
-  if (marks.bold) output = `<strong>${output}</strong>`;
-  return output;
-}
-
-function sanitizeRichHtml(html) {
-  const template = document.createElement("template");
-  template.innerHTML = String(html || "");
-  const blockTags = new Set(["div", "p", "blockquote", "ul", "ol", "li"]);
-
-  const sanitizeNode = node => {
-    if (node.nodeType === Node.TEXT_NODE) return escapeHtml(node.nodeValue);
-    if (node.nodeType !== Node.ELEMENT_NODE) return "";
-
-    const tag = node.tagName.toLowerCase();
-    if (tag === "br") return "<br>";
-
-    const inner = Array.from(node.childNodes).map(sanitizeNode).join("");
-    if (tag === "b" || tag === "strong") return `<strong>${inner}</strong>`;
-    if (tag === "i" || tag === "em") return `<em>${inner}</em>`;
-    if (tag === "u") return `<u>${inner}</u>`;
-    if (tag === "s" || tag === "strike" || tag === "del") return `<s>${inner}</s>`;
-    if (tag === "span") return wrapSemanticHtml(inner, sanitizeStyleMarks(node.getAttribute("style") || ""));
-    if (blockTags.has(tag)) return `<${tag}>${inner}</${tag}>`;
-    return inner;
-  };
-
-  return Array.from(template.content.childNodes).map(sanitizeNode).join("");
 }
 
 function plainTextFromHtml(html) {
@@ -3730,650 +4064,8 @@ function splitLines(text) {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 }
 
-function isDiffSequenceWordText(text) {
-  return /^[\p{L}\p{N}]+$/u.test(text || "");
-}
-
-function isDiffSequenceWhitespaceText(text) {
-  return /^\s+$/u.test(text || "");
-}
-
-function previousSameWordIndex(parts, index) {
-  for (let current = index - 1; current >= 0; current -= 1) {
-    if (parts[current].type === "same" && isDiffSequenceWordText(parts[current].text)) return current;
-  }
-
-  return -1;
-}
-
-function nextSameWordIndex(parts, index) {
-  for (let current = index + 1; current < parts.length; current += 1) {
-    if (parts[current].type === "same" && isDiffSequenceWordText(parts[current].text)) return current;
-    if (parts[current].type !== "same") return -1;
-  }
-
-  return -1;
-}
-
-function changedWordCounts(parts, start, end) {
-  const counts = { added: 0, removed: 0 };
-
-  for (let index = start; index < end; index += 1) {
-    const part = parts[index];
-    if ((part.type === "added" || part.type === "removed") && isDiffSequenceWordText(part.text)) {
-      counts[part.type] += 1;
-    }
-  }
-
-  return counts;
-}
-
-function shouldCoalesceReplacementSegment(segment) {
-  const counts = changedWordCounts(segment, 0, segment.length);
-  return counts.added >= 2 && counts.removed >= 2 && counts.added + counts.removed <= 12;
-}
-
-function isChangedDiffPart(part) {
-  return part?.type === "added" || part?.type === "removed";
-}
-
-function sameWordCount(parts) {
-  return parts.filter(part => part.type === "same" && isDiffSequenceWordText(part.text)).length;
-}
-
-function wordTokenCount(parts) {
-  return parts.filter(part => isDiffSequenceWordText(part.text)).length;
-}
-
-function coerceDiffPartType(part, type) {
-  return {
-    ...part,
-    type,
-    beforeIndex: type === "removed" ? part.beforeIndex : undefined,
-    afterIndex: type === "added" ? part.afterIndex : undefined
-  };
-}
-
-function coalesceReplacementSegment(segment) {
-  const removed = [];
-  const added = [];
-  const neutral = [];
-  let sawRemoved = false;
-  let sawAdded = false;
-
-  segment.forEach(part => {
-    if (part.type === "removed") {
-      removed.push(part);
-      if (isDiffSequenceWordText(part.text)) sawRemoved = true;
-      return;
-    }
-
-    if (part.type === "added") {
-      added.push(part);
-      if (isDiffSequenceWordText(part.text)) sawAdded = true;
-      return;
-    }
-
-    if (part.type === "same" && isDiffSequenceWhitespaceText(part.text)) {
-      if (sawRemoved) removed.push(coerceDiffPartType(part, "removed"));
-      if (sawAdded) added.push(coerceDiffPartType(part, "added"));
-      return;
-    }
-
-    neutral.push(part);
-  });
-
-  return [...removed, ...added, ...neutral];
-}
-
-function coalesceInterleavedReplacementWindow(segment) {
-  const removed = [];
-  const added = [];
-
-  segment.forEach(part => {
-    if (part.type === "removed") {
-      removed.push(part);
-      return;
-    }
-
-    if (part.type === "added") {
-      added.push(part);
-      return;
-    }
-
-    if (part.type !== "same") return;
-
-    removed.push(coerceDiffPartType(part, "removed"));
-    added.push(coerceDiffPartType(part, "added"));
-  });
-
-  return [...removed, ...added];
-}
-
-function shouldCoalesceInterleavedReplacementWindow(segment) {
-  const counts = changedWordCounts(segment, 0, segment.length);
-  const anchors = sameWordCount(segment);
-  if (counts.added < 3 || counts.removed < 3) return false;
-
-  const words = wordTokenCount(segment);
-  if (words > 18) return false;
-
-  const changedWords = counts.added + counts.removed;
-  if (!anchors) return changedWords / words >= 0.75;
-
-  if (anchors > 5) return false;
-  return changedWords / words >= 0.55;
-}
-
-function changedWordTypes(segment) {
-  return segment
-    .filter(part => isChangedDiffPart(part) && isDiffSequenceWordText(part.text))
-    .map(part => part.type);
-}
-
-function changedWordInfos(segment) {
-  return segment
-    .map((part, index) => ({ part, index }))
-    .filter(({ part }) => isChangedDiffPart(part) && isDiffSequenceWordText(part.text))
-    .map(({ part, index }) => ({ type: part.type, index }));
-}
-
-function changedTypesAreCoalescableAlternation(types) {
-  if (types.length < 6) return false;
-
-  const added = types.filter(type => type === "added").length;
-  const removed = types.length - added;
-  if (added < 3 || removed < 3) return false;
-
-  return types.every((type, index) => index === 0 || type !== types[index - 1]);
-}
-
-function shouldCoalesceAlternatingChangedWords(segment) {
-  return changedTypesAreCoalescableAlternation(changedWordTypes(segment));
-}
-
-function alternatingChangedWordRunBounds(segment) {
-  const infos = changedWordInfos(segment);
-  if (infos.length < 6) return null;
-
-  let best = null;
-  let runStart = 0;
-  const considerRun = end => {
-    const run = infos.slice(runStart, end);
-    const types = run.map(info => info.type);
-    if (!changedTypesAreCoalescableAlternation(types)) return;
-
-    if (!best || run.length > best.wordCount) {
-      best = {
-        start: run[0].index,
-        end: run[run.length - 1].index + 1,
-        wordCount: run.length
-      };
-    }
-  };
-
-  for (let index = 1; index <= infos.length; index += 1) {
-    if (index === infos.length || infos[index].type === infos[index - 1].type) {
-      considerRun(index);
-      runStart = index;
-    }
-  }
-
-  return best;
-}
-
-function coalesceAlternatingChangedWordRun(segment) {
-  const bounds = alternatingChangedWordRunBounds(segment);
-  if (!bounds) return segment;
-
-  return [
-    ...segment.slice(0, bounds.start),
-    ...coalesceInterleavedReplacementWindow(segment.slice(bounds.start, bounds.end)),
-    ...coalesceAlternatingChangedWordRun(segment.slice(bounds.end))
-  ];
-}
-
-function coalesceAlternatingChangedWordSubsegments(segment) {
-  const coalesced = [];
-  let start = 0;
-
-  for (let index = 0; index <= segment.length; index += 1) {
-    const isBoundary = index === segment.length || segment[index].text === "\n";
-    if (!isBoundary) continue;
-
-    coalesced.push(...coalesceAlternatingChangedWordRun(segment.slice(start, index)));
-
-    if (index < segment.length) coalesced.push(segment[index]);
-    start = index + 1;
-  }
-
-  return coalesced;
-}
-
-function coalesceAlternatingChangedWordSegments(parts) {
-  const coalesced = [];
-  let index = 0;
-
-  while (index < parts.length) {
-    if (parts[index].type === "same" && isDiffSequenceWordText(parts[index].text)) {
-      coalesced.push(parts[index]);
-      index += 1;
-      continue;
-    }
-
-    const segmentStart = index;
-    while (
-      index < parts.length &&
-      !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
-    ) {
-      index += 1;
-    }
-
-    coalesced.push(...coalesceAlternatingChangedWordSubsegments(parts.slice(segmentStart, index)));
-  }
-
-  return coalesced;
-}
-
-function coalesceInterleavedReplacementSubsegment(segment) {
-  const firstChanged = segment.findIndex(isChangedDiffPart);
-  if (firstChanged < 0) return segment;
-
-  let lastChanged = -1;
-  for (let index = segment.length - 1; index >= firstChanged; index -= 1) {
-    if (isChangedDiffPart(segment[index])) {
-      lastChanged = index;
-      break;
-    }
-  }
-
-  const replacementWindow = segment.slice(firstChanged, lastChanged + 1);
-  if (!shouldCoalesceInterleavedReplacementWindow(replacementWindow)) return segment;
-
-  return [
-    ...segment.slice(0, firstChanged),
-    ...coalesceInterleavedReplacementWindow(replacementWindow),
-    ...segment.slice(lastChanged + 1)
-  ];
-}
-
-function coalesceInterleavedReplacementSegments(parts) {
-  const coalesced = [];
-  let start = 0;
-
-  for (let index = 0; index <= parts.length; index += 1) {
-    const isBoundary = index === parts.length || parts[index].text === "\n";
-    if (!isBoundary) continue;
-
-    coalesced.push(...coalesceInterleavedReplacementSubsegment(parts.slice(start, index)));
-    if (index < parts.length) coalesced.push(parts[index]);
-    start = index + 1;
-  }
-
-  return coalesced;
-}
-
-function coalesceReplacementSubsegments(segment) {
-  const coalesced = [];
-  let start = 0;
-
-  for (let index = 0; index <= segment.length; index += 1) {
-    const isBoundary = index === segment.length || segment[index].text === "\n";
-    if (!isBoundary) continue;
-
-    const subsegment = segment.slice(start, index);
-    if (shouldCoalesceReplacementSegment(subsegment)) {
-      coalesced.push(...coalesceReplacementSegment(subsegment));
-    } else {
-      coalesced.push(...subsegment);
-    }
-
-    if (index < segment.length) coalesced.push(segment[index]);
-    start = index + 1;
-  }
-
-  return coalesced;
-}
-
-function coalesceReplacementSegments(parts) {
-  const coalesced = [];
-  let index = 0;
-
-  while (index < parts.length) {
-    const part = parts[index];
-
-    if (part.type !== "same" || !isDiffSequenceWordText(part.text)) {
-      const segmentStart = index;
-      while (
-        index < parts.length &&
-        !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
-      ) {
-        index += 1;
-      }
-
-      coalesced.push(...coalesceReplacementSubsegments(parts.slice(segmentStart, index)));
-      continue;
-    }
-
-    coalesced.push(part);
-    index += 1;
-
-    const segmentStart = index;
-    while (
-      index < parts.length &&
-      !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
-    ) {
-      index += 1;
-    }
-
-    const segment = parts.slice(segmentStart, index);
-    coalesced.push(...coalesceReplacementSubsegments(segment));
-  }
-
-  return coalesced;
-}
-
-function diffPartKey(part) {
-  const marks = part?.marks || {};
-  return [
-    part?.text || "",
-    marks.bold ? "b" : "",
-    marks.italic ? "i" : "",
-    marks.underline ? "u" : "",
-    marks.strike ? "s" : ""
-  ].join("|");
-}
-
-function diffChangedTokenRun(before, after) {
-  const rows = Array.from({ length: before.length + 1 }, () => Array(after.length + 1).fill(0));
-
-  for (let i = before.length - 1; i >= 0; i -= 1) {
-    for (let j = after.length - 1; j >= 0; j -= 1) {
-      rows[i][j] = diffPartKey(before[i]) === diffPartKey(after[j])
-        ? rows[i + 1][j + 1] + 1
-        : Math.max(rows[i + 1][j], rows[i][j + 1]);
-    }
-  }
-
-  const result = [];
-  let i = 0;
-  let j = 0;
-
-  while (i < before.length && j < after.length) {
-    if (diffPartKey(before[i]) === diffPartKey(after[j])) {
-      result.push({
-        ...after[j],
-        type: "same",
-        beforeIndex: before[i].beforeIndex,
-        afterIndex: after[j].afterIndex
-      });
-      i += 1;
-      j += 1;
-    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
-      result.push(before[i]);
-      i += 1;
-    } else {
-      result.push(after[j]);
-      j += 1;
-    }
-  }
-
-  while (i < before.length) {
-    result.push(before[i]);
-    i += 1;
-  }
-
-  while (j < after.length) {
-    result.push(after[j]);
-    j += 1;
-  }
-
-  return result;
-}
-
-function sameDiffPartFromChangedPair(removedPart, addedPart) {
-  return {
-    ...addedPart,
-    type: "same",
-    marks: addedPart.marks || removedPart.marks || {},
-    beforeIndex: removedPart.beforeIndex,
-    afterIndex: addedPart.afterIndex
-  };
-}
-
-function changedRunContentCount(parts) {
-  return parts.filter(part => String(part.text || "").trim()).length;
-}
-
-function isMeaningfulCommonChangedRun(parts) {
-  if (!parts.length) return false;
-  const wordCount = parts.filter(part => isDiffSequenceWordText(part.text)).length;
-  return wordCount >= 1;
-}
-
-function commonChangedPrefixLength(removed, added) {
-  let length = 0;
-  while (
-    length < removed.length &&
-    length < added.length &&
-    diffPartKey(removed[length]) === diffPartKey(added[length])
-  ) {
-    length += 1;
-  }
-  return length;
-}
-
-function commonChangedSuffixLength(removed, added, prefixLength) {
-  let length = 0;
-  while (
-    length < removed.length - prefixLength &&
-    length < added.length - prefixLength &&
-    diffPartKey(removed[removed.length - 1 - length]) === diffPartKey(added[added.length - 1 - length])
-  ) {
-    length += 1;
-  }
-  return length;
-}
-
-function restoreCommonChangedAffixes(segment) {
-  const removed = segment.filter(part => part.type === "removed");
-  const added = segment.filter(part => part.type === "added");
-  if (!removed.length || !added.length) return segment;
-
-  let prefixLength = commonChangedPrefixLength(removed, added);
-  if (!isMeaningfulCommonChangedRun(removed.slice(0, prefixLength))) prefixLength = 0;
-
-  let suffixLength = commonChangedSuffixLength(removed, added, prefixLength);
-  if (!isMeaningfulCommonChangedRun(removed.slice(removed.length - suffixLength))) suffixLength = 0;
-
-  if (!prefixLength && !suffixLength) return segment;
-
-  const prefix = removed
-    .slice(0, prefixLength)
-    .map((part, index) => sameDiffPartFromChangedPair(part, added[index]));
-  const suffixRemovedStart = removed.length - suffixLength;
-  const suffixAddedStart = added.length - suffixLength;
-  const suffix = removed
-    .slice(suffixRemovedStart)
-    .map((part, index) => sameDiffPartFromChangedPair(part, added[suffixAddedStart + index]));
-
-  return [
-    ...prefix,
-    ...removed.slice(prefixLength, suffixRemovedStart),
-    ...added.slice(prefixLength, suffixAddedStart),
-    ...suffix
-  ];
-}
-
-function shouldRestoreChangedTokenRun(segment) {
-  const changedParts = segment.filter(part => part.type === "added" || part.type === "removed");
-  if (!changedParts.some(part => part.type === "added")) return false;
-  if (!changedParts.some(part => part.type === "removed")) return false;
-  if (segment.some(part => part.type === "same")) return false;
-  return changedParts.every(part => !isDiffSequenceWordText(part.text));
-}
-
-function restoreIdenticalChangedTokens(parts) {
-  const restored = [];
-  let index = 0;
-
-  while (index < parts.length) {
-    if (parts[index].type === "same") {
-      restored.push(parts[index]);
-      index += 1;
-      continue;
-    }
-
-    const segmentStart = index;
-    while (
-      index < parts.length &&
-      parts[index].type !== "same"
-    ) {
-      index += 1;
-    }
-
-    const segment = parts.slice(segmentStart, index);
-    const affixRestored = restoreCommonChangedAffixes(segment);
-    if (affixRestored !== segment) {
-      restored.push(...affixRestored);
-      continue;
-    }
-
-    if (!shouldRestoreChangedTokenRun(segment)) {
-      restored.push(...segment);
-      continue;
-    }
-
-    restored.push(...diffChangedTokenRun(
-      segment.filter(part => part.type === "removed"),
-      segment.filter(part => part.type === "added")
-    ));
-  }
-
-  return restored;
-}
-
-function shouldAbsorbWeakReplacementAnchor(parts, index) {
-  const part = parts[index];
-  if (part?.type !== "same" || !isDiffSequenceWordText(part.text)) return false;
-
-  const previousIndex = previousSameWordIndex(parts, index);
-  const followingIndex = nextSameWordIndex(parts, index);
-  if (previousIndex < 0 || followingIndex < 0) return false;
-
-  const counts = changedWordCounts(parts, previousIndex + 1, index);
-  return counts.added >= 2 && counts.removed >= 2 && counts.added + counts.removed <= 10;
-}
-
-function cleanupWeakReplacementAnchors(parts) {
-  const absorbIndexes = new Set();
-
-  parts.forEach((part, index) => {
-    if (!shouldAbsorbWeakReplacementAnchor(parts, index)) return;
-    absorbIndexes.add(index);
-
-    for (let current = index + 1; current < parts.length; current += 1) {
-      if (parts[current].type !== "same" || !isDiffSequenceWhitespaceText(parts[current].text)) break;
-      absorbIndexes.add(current);
-    }
-  });
-
-  const absorbedParts = absorbIndexes.size ? parts.map((part, index) => {
-    if (!absorbIndexes.has(index)) return part;
-    return {
-      ...part,
-      type: "added",
-      beforeIndex: undefined
-    };
-  }) : parts;
-
-  return restoreIdenticalChangedTokens(coalesceReplacementSegments(
-    coalesceInterleavedReplacementSegments(
-      coalesceAlternatingChangedWordSegments(absorbedParts)
-    )
-  ));
-}
-
-function diffSequence(before, after) {
-  const rows = Array.from({ length: before.length + 1 }, () => Array(after.length + 1).fill(0));
-
-  for (let i = before.length - 1; i >= 0; i -= 1) {
-    for (let j = after.length - 1; j >= 0; j -= 1) {
-      rows[i][j] = before[i].key === after[j].key
-        ? rows[i + 1][j + 1] + 1
-        : Math.max(rows[i + 1][j], rows[i][j + 1]);
-    }
-  }
-
-  const result = [];
-  let i = 0;
-  let j = 0;
-
-  while (i < before.length && j < after.length) {
-    if (before[i].key === after[j].key) {
-      result.push({
-        type: "same",
-        text: after[j].text,
-        marks: after[j].marks || before[i].marks || {},
-        beforeIndex: before[i].index ?? i,
-        afterIndex: after[j].index ?? j
-      });
-      i += 1;
-      j += 1;
-    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
-      result.push({
-        type: "removed",
-        text: before[i].text,
-        marks: before[i].marks || {},
-        beforeIndex: before[i].index ?? i
-      });
-      i += 1;
-    } else {
-      result.push({
-        type: "added",
-        text: after[j].text,
-        marks: after[j].marks || {},
-        afterIndex: after[j].index ?? j
-      });
-      j += 1;
-    }
-  }
-
-  while (i < before.length) {
-    result.push({
-      type: "removed",
-      text: before[i].text,
-      marks: before[i].marks || {},
-      beforeIndex: before[i].index ?? i
-    });
-    i += 1;
-  }
-
-  while (j < after.length) {
-    result.push({
-      type: "added",
-      text: after[j].text,
-      marks: after[j].marks || {},
-      afterIndex: after[j].index ?? j
-    });
-    j += 1;
-  }
-
-  return cleanupWeakReplacementAnchors(result);
-}
-
 function tokenizeSegment(text, marks = {}) {
-  const normalized = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const matches = normalized.match(/\n|[^\S\n]+|[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu) || [];
-  const semanticKey = marks.whitespace ? "" : `${marks.bold ? "b" : ""}${marks.italic ? "i" : ""}${marks.underline ? "u" : ""}${marks.strike ? "s" : ""}`;
-  return matches.map(token => ({
-    key: /^\s+$/u.test(token)
-      ? token
-      : `${token}|${semanticKey}`,
-    text: token,
-    marks: { ...marks },
-    isWhitespace: /^\s+$/u.test(token)
-  }));
+  return DiffCore.tokenizeText(text, marks);
 }
 
 function semanticTokensFromHtml(html) {
@@ -4451,408 +4143,136 @@ function semanticTokensFromHtml(html) {
   return tokens.map((token, index) => ({ ...token, index }));
 }
 
-const DIFF_COMMON_WORDS = new Set([
-  "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from",
-  "had", "has", "have", "he", "her", "his", "i", "in", "is", "it", "its", "me",
-  "my", "not", "of", "on", "or", "our", "she", "so", "that", "the", "their",
-  "them", "then", "there", "they", "this", "to", "was", "we", "were", "with",
-  "you", "your"
-]);
-
-const DIFF_CLAUSE_STARTERS = new Set([
-  "and", "but", "or", "so", "then", "yet", "though", "although", "because",
-  "while", "when", "where", "who", "which", "that", "one", "two", "some",
-  "couple", "another", "other", "others", "going", "no", "i", "he", "she",
-  "they", "we", "it", "the", "there", "this"
-]);
-
-const DIFF_BOUNDARY_CONJUNCTIONS = new Set([
-  "and", "but", "or", "so", "yet"
-]);
-
-const DIFF_LONG_COMMA_CLAUSE_MIN_TERMS = 4;
-const DIFF_LONG_CONJUNCTION_CLAUSE_MIN_TERMS = 4;
-
-function isDiffWordToken(token) {
-  return /^[\p{L}\p{N}]+$/u.test(token?.text || "");
+function hashDiffText(value) {
+  return DiffCore.hashText(value);
 }
 
-function diffTermForToken(token) {
-  return String(token?.text || "").toLowerCase();
+function diffHtmlSignature(html) {
+  const text = String(html || "");
+  return `${text.length}:${hashDiffText(text)}`;
 }
 
-function comparableDiffTerm(term) {
-  return String(term || "").replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
-}
+function rememberLimitedCache(cache, key, value, limit) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
 
-function diffTermsMatch(left, right) {
-  if (left === right) return true;
-
-  const normalizedLeft = comparableDiffTerm(left);
-  const normalizedRight = comparableDiffTerm(right);
-  return Boolean(
-    normalizedLeft &&
-    normalizedRight &&
-    normalizedLeft === normalizedRight
-  );
-}
-
-function meaningfulTermsForTokens(tokens) {
-  const terms = tokens
-    .filter(isDiffWordToken)
-    .map(diffTermForToken)
-    .filter(term => term.length > 1 && !DIFF_COMMON_WORDS.has(term));
-
-  if (terms.length) return terms;
-
-  return tokens
-    .filter(isDiffWordToken)
-    .map(diffTermForToken)
-    .filter(term => term.length > 1);
-}
-
-function isDiffClauseDashToken(token) {
-  const text = token?.text || "";
-  return text === "\u2014" || text === "\u2013";
-}
-
-function splitDiffBlocks(tokens) {
-  const blocks = [];
-  let current = [];
-  let pendingSentenceBoundary = false;
-  const closingPunctuation = new Set([")", "]", "}", "\"", "'", "”", "’"]);
-
-  const flush = () => {
-    if (!current.length) return;
-    if (current.some(token => String(token.text || "").trim() || token.text === "\n")) {
-      blocks.push(current);
-    }
-    current = [];
-    pendingSentenceBoundary = false;
-  };
-
-  const shouldSplitAfterComma = index => {
-    let nextWord = "";
-    const clauseTokens = [];
-
-    for (let nextIndex = index + 1; nextIndex < tokens.length; nextIndex += 1) {
-      const nextToken = tokens[nextIndex];
-      if (nextToken.text === "\n") return true;
-      if (/[.!?:;]/u.test(nextToken.text || "") || nextToken.text === "," || isDiffClauseDashToken(nextToken)) break;
-      clauseTokens.push(nextToken);
-      if (/^\s+$/u.test(nextToken.text || "")) continue;
-      if (!isDiffWordToken(nextToken)) break;
-      if (!nextWord) nextWord = diffTermForToken(nextToken);
-    }
-
-    return Boolean(
-      nextWord &&
-      (
-        DIFF_CLAUSE_STARTERS.has(nextWord) ||
-        meaningfulTermsForTokens(clauseTokens).length >= DIFF_LONG_COMMA_CLAUSE_MIN_TERMS
-      )
-    );
-  };
-
-  const shouldSplitAfterConjunction = index => {
-    if (!isDiffWordToken(tokens[index])) return false;
-    if (!DIFF_BOUNDARY_CONJUNCTIONS.has(diffTermForToken(tokens[index]))) return false;
-
-    let nextWord = "";
-    const clauseTokens = [];
-
-    for (let nextIndex = index + 1; nextIndex < tokens.length; nextIndex += 1) {
-      const nextToken = tokens[nextIndex];
-      if (nextToken.text === "\n") break;
-      if (/[.!?:;]/u.test(nextToken.text || "") || nextToken.text === "," || isDiffClauseDashToken(nextToken)) break;
-      clauseTokens.push(nextToken);
-      if (/^\s+$/u.test(nextToken.text || "")) continue;
-      if (!isDiffWordToken(nextToken)) break;
-      if (!nextWord) nextWord = diffTermForToken(nextToken);
-    }
-
-    return Boolean(
-      nextWord &&
-      meaningfulTermsForTokens(clauseTokens).length >= DIFF_LONG_CONJUNCTION_CLAUSE_MIN_TERMS
-    );
-  };
-
-  tokens.forEach((token, index) => {
-    const isWhitespace = /^\s+$/u.test(token.text || "");
-    if (token.text === "(" && current.some(currentToken => String(currentToken.text || "").trim())) flush();
-    if (pendingSentenceBoundary && !isWhitespace && !closingPunctuation.has(token.text)) flush();
-
-    current.push(token);
-
-    if (token.text === "\n") {
-      flush();
-    } else if (
-      /[.!?:;]/u.test(token.text || "") ||
-      isDiffClauseDashToken(token) ||
-      (token.text === "," && shouldSplitAfterComma(index)) ||
-      shouldSplitAfterConjunction(index)
-    ) {
-      pendingSentenceBoundary = true;
-    }
-  });
-
-  flush();
-  return blocks;
-}
-
-function blockSimilarity(beforeBlock, afterBlock) {
-  const beforeTerms = meaningfulTermsForTokens(beforeBlock);
-  const afterTerms = meaningfulTermsForTokens(afterBlock);
-  if (!beforeTerms.length || !afterTerms.length) return 0;
-
-  const availableBeforeTerms = [...beforeTerms];
-
-  let shared = 0;
-  afterTerms.forEach(term => {
-    const matchedIndex = availableBeforeTerms.findIndex(beforeTerm => diffTermsMatch(beforeTerm, term));
-    if (matchedIndex < 0) return;
-    shared += 1;
-    availableBeforeTerms.splice(matchedIndex, 1);
-  });
-
-  if (!shared) return 0;
-
-  return (2 * shared) / (beforeTerms.length + afterTerms.length);
-}
-
-function shouldAlignBlocks(beforeBlock, afterBlock) {
-  const beforeTerms = meaningfulTermsForTokens(beforeBlock);
-  const afterTerms = meaningfulTermsForTokens(afterBlock);
-  const shorterLength = Math.min(beforeTerms.length, afterTerms.length);
-  if (!shorterLength) return false;
-
-  const similarity = blockSimilarity(beforeBlock, afterBlock);
-  const threshold = shorterLength <= 2 ? 0.5 : shorterLength <= 3 ? 0.42 : 0.38;
-  return similarity >= threshold;
-}
-
-function alignDiffBlocks(beforeBlocks, afterBlocks) {
-  const rows = Array.from(
-    { length: beforeBlocks.length + 1 },
-    () => Array(afterBlocks.length + 1).fill(0)
-  );
-  const similarities = Array.from(
-    { length: beforeBlocks.length },
-    () => Array(afterBlocks.length).fill(0)
-  );
-
-  for (let i = beforeBlocks.length - 1; i >= 0; i -= 1) {
-    for (let j = afterBlocks.length - 1; j >= 0; j -= 1) {
-      const similarity = shouldAlignBlocks(beforeBlocks[i], afterBlocks[j])
-        ? blockSimilarity(beforeBlocks[i], afterBlocks[j])
-        : 0;
-      similarities[i][j] = similarity;
-      rows[i][j] = Math.max(
-        rows[i + 1][j],
-        rows[i][j + 1],
-        similarity ? similarity + rows[i + 1][j + 1] : 0
-      );
-    }
+  while (cache.size > limit) {
+    cache.delete(cache.keys().next().value);
   }
 
-  const pairs = [];
-  let i = 0;
-  let j = 0;
-  while (i < beforeBlocks.length && j < afterBlocks.length) {
-    const similarity = similarities[i][j];
-    const matchScore = similarity ? similarity + rows[i + 1][j + 1] : -1;
-    if (similarity && matchScore >= rows[i + 1][j] && matchScore >= rows[i][j + 1]) {
-      pairs.push([i, j]);
-      i += 1;
-      j += 1;
-    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
-      i += 1;
-    } else {
-      j += 1;
-    }
-  }
-
-  return pairs;
+  return value;
 }
 
-function flattenDiffBlockRange(blocks, start, end) {
-  return blocks.slice(start, end).flat();
+function cachedDiffBlocks(signature, html) {
+  const cached = diffBlockCache.get(signature);
+  if (!cached || cached.html !== html) return null;
+
+  diffBlockCache.delete(signature);
+  diffBlockCache.set(signature, cached);
+  return cached;
 }
 
-function diffBlockRangeSimilarity(beforeBlocks, afterBlocks, range) {
-  return blockSimilarity(
-    flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd),
-    flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd)
-  );
+function diffBlocksForPage(page) {
+  ensurePageFields(page);
+  const html = page.contentHtml || textToHtml(page.content || "");
+  const signature = diffHtmlSignature(html);
+  const cached = cachedDiffBlocks(signature, html);
+  if (cached) return cached;
+
+  const tokens = semanticTokensFromHtml(html);
+  const blocks = DiffCore.splitDiffBlocks(tokens);
+  return rememberLimitedCache(diffBlockCache, signature, {
+    html,
+    signature,
+    tokens,
+    blocks
+  }, DIFF_BLOCK_CACHE_LIMIT);
 }
 
-function shouldExpandDiffBlockRange(currentSimilarity, candidateSimilarity) {
-  const improvement = candidateSimilarity - currentSimilarity;
-  if (candidateSimilarity >= 0.9 && improvement >= 0.02) return true;
-  if (candidateSimilarity >= 0.68 && improvement >= 0.05) return true;
-  return currentSimilarity < 0.62 && improvement >= 0.1;
-}
-
-function diffBlockHasMeaningfulTerms(block) {
-  return meaningfulTermsForTokens(block).length > 0;
-}
-
-function previousDiffExpansionStart(blocks, start, limit) {
-  let candidateStart = start - 1;
-  while (candidateStart > limit && !diffBlockHasMeaningfulTerms(blocks[candidateStart])) {
-    candidateStart -= 1;
-  }
-  return candidateStart;
-}
-
-function nextDiffExpansionEnd(blocks, end, limit) {
-  let candidateEnd = end + 1;
-  while (candidateEnd < limit && !diffBlockHasMeaningfulTerms(blocks[candidateEnd - 1])) {
-    candidateEnd += 1;
-  }
-  return candidateEnd;
-}
-
-function expandDiffBlockPairs(pairs, beforeBlocks, afterBlocks) {
-  const ranges = pairs.map(([beforeIndex, afterIndex]) => ({
-    beforeStart: beforeIndex,
-    beforeEnd: beforeIndex + 1,
-    afterStart: afterIndex,
-    afterEnd: afterIndex + 1
-  }));
-
-  let changed = true;
-  let guard = beforeBlocks.length + afterBlocks.length;
-
-  while (changed && guard > 0) {
-    changed = false;
-    guard -= 1;
-
-    ranges.forEach((range, index) => {
-      const prevBeforeLimit = index > 0 ? ranges[index - 1].beforeEnd : 0;
-      const prevAfterLimit = index > 0 ? ranges[index - 1].afterEnd : 0;
-      const nextBeforeLimit = index + 1 < ranges.length ? ranges[index + 1].beforeStart : beforeBlocks.length;
-      const nextAfterLimit = index + 1 < ranges.length ? ranges[index + 1].afterStart : afterBlocks.length;
-      const currentSimilarity = diffBlockRangeSimilarity(beforeBlocks, afterBlocks, range);
-      let bestRange = null;
-      let bestSimilarity = currentSimilarity;
-
-      const candidates = [];
-      if (range.beforeStart > prevBeforeLimit) {
-        candidates.push({
-          ...range,
-          beforeStart: previousDiffExpansionStart(beforeBlocks, range.beforeStart, prevBeforeLimit)
-        });
-      }
-      if (range.afterStart > prevAfterLimit) {
-        candidates.push({
-          ...range,
-          afterStart: previousDiffExpansionStart(afterBlocks, range.afterStart, prevAfterLimit)
-        });
-      }
-      if (range.beforeEnd < nextBeforeLimit) {
-        candidates.push({
-          ...range,
-          beforeEnd: nextDiffExpansionEnd(beforeBlocks, range.beforeEnd, nextBeforeLimit)
-        });
-      }
-      if (range.afterEnd < nextAfterLimit) {
-        candidates.push({
-          ...range,
-          afterEnd: nextDiffExpansionEnd(afterBlocks, range.afterEnd, nextAfterLimit)
-        });
-      }
-
-      candidates.forEach(candidate => {
-        const candidateSimilarity = diffBlockRangeSimilarity(beforeBlocks, afterBlocks, candidate);
-        if (
-          candidateSimilarity > bestSimilarity &&
-          shouldExpandDiffBlockRange(currentSimilarity, candidateSimilarity)
-        ) {
-          bestRange = candidate;
-          bestSimilarity = candidateSimilarity;
-        }
-      });
-
-      if (bestRange) {
-        range.beforeStart = bestRange.beforeStart;
-        range.beforeEnd = bestRange.beforeEnd;
-        range.afterStart = bestRange.afterStart;
-        range.afterEnd = bestRange.afterEnd;
-        changed = true;
-      }
-    });
-  }
-
-  return ranges;
-}
-
-function diffUnmatchedBlock(tokens, type) {
-  return tokens.map(token => ({
-    type,
+function sameDiffPartsFromTokens(beforeTokens, afterTokens) {
+  return afterTokens.map((token, index) => ({
+    type: "same",
     text: token.text,
-    marks: token.marks || {},
-    beforeIndex: type === "removed" ? token.index : undefined,
-    afterIndex: type === "added" ? token.index : undefined
+    marks: token.marks || beforeTokens[index]?.marks || {},
+    beforeIndex: beforeTokens[index]?.index ?? index,
+    afterIndex: token.index ?? index
   }));
 }
 
-function diffBlocksHaveSameTokens(beforeBlock, afterBlock) {
-  if (beforeBlock.length !== afterBlock.length) return false;
-  return beforeBlock.every((token, index) => token.key === afterBlock[index].key);
+function diffResultCacheKey(beforeInfo, afterInfo) {
+  return `${beforeInfo.signature}>${afterInfo.signature}`;
 }
 
-function appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeStart, beforeEnd, afterStart, afterEnd) {
-  let beforeIndex = beforeStart;
-  let afterIndex = afterStart;
+function cachedDiffResult(beforeInfo, afterInfo) {
+  const cacheKey = diffResultCacheKey(beforeInfo, afterInfo);
+  const cached = diffResultCache.get(cacheKey);
+  if (!cached || cached.beforeHtml !== beforeInfo.html || cached.afterHtml !== afterInfo.html) return null;
 
-  while (beforeIndex < beforeEnd || afterIndex < afterEnd) {
-    if (
-      beforeIndex < beforeEnd &&
-      afterIndex < afterEnd &&
-      diffBlocksHaveSameTokens(beforeBlocks[beforeIndex], afterBlocks[afterIndex])
-    ) {
-      parts.push(...diffSequence(beforeBlocks[beforeIndex], afterBlocks[afterIndex]));
-      beforeIndex += 1;
-      afterIndex += 1;
-      continue;
-    }
+  diffResultCache.delete(cacheKey);
+  diffResultCache.set(cacheKey, cached);
+  return cached.result;
+}
 
-    if (beforeIndex < beforeEnd) {
-      parts.push(...diffUnmatchedBlock(beforeBlocks[beforeIndex], "removed"));
-      beforeIndex += 1;
-      continue;
-    }
+function rememberDiffResult(beforeInfo, afterInfo, result) {
+  if ((result.parts?.length || 0) > DIFF_RESULT_MAX_CACHE_PARTS) return result;
 
-    parts.push(...diffUnmatchedBlock(afterBlocks[afterIndex], "added"));
-    afterIndex += 1;
+  return rememberLimitedCache(diffResultCache, diffResultCacheKey(beforeInfo, afterInfo), {
+    beforeHtml: beforeInfo.html,
+    afterHtml: afterInfo.html,
+    result
+  }, DIFF_RESULT_CACHE_LIMIT).result;
+}
+
+function completeDiffResult(beforeInfo, afterInfo, parts) {
+  return {
+    parts,
+    hasChanges: beforeInfo.html !== afterInfo.html || parts.some(DiffCore.isChangedDiffPart)
+  };
+}
+
+function diffRichPagesResult(beforePage, afterPage) {
+  const beforeInfo = diffBlocksForPage(beforePage);
+  const afterInfo = diffBlocksForPage(afterPage);
+  const cached = cachedDiffResult(beforeInfo, afterInfo);
+  if (cached) return cached;
+
+  if (beforeInfo.html === afterInfo.html) {
+    return rememberDiffResult(beforeInfo, afterInfo, completeDiffResult(
+      beforeInfo,
+      afterInfo,
+      sameDiffPartsFromTokens(beforeInfo.tokens, afterInfo.tokens)
+    ));
   }
-}
 
-function diffRichPages(beforePage, afterPage) {
-  ensurePageFields(beforePage);
-  ensurePageFields(afterPage);
-  const beforeBlocks = splitDiffBlocks(semanticTokensFromHtml(beforePage.contentHtml));
-  const afterBlocks = splitDiffBlocks(semanticTokensFromHtml(afterPage.contentHtml));
-  const pairs = expandDiffBlockPairs(alignDiffBlocks(beforeBlocks, afterBlocks), beforeBlocks, afterBlocks);
+  const beforeBlocks = beforeInfo.blocks;
+  const afterBlocks = afterInfo.blocks;
+  const pairs = DiffCore.expandDiffBlockPairs(DiffCore.alignDiffBlocks(beforeBlocks, afterBlocks), beforeBlocks, afterBlocks);
   const parts = [];
   let beforeIndex = 0;
   let afterIndex = 0;
 
   pairs.forEach(range => {
-    appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, range.beforeStart, afterIndex, range.afterStart);
+    DiffCore.appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, range.beforeStart, afterIndex, range.afterStart);
 
-    parts.push(...diffSequence(
-      flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd),
-      flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd)
-    ));
+    const beforeTokens = DiffCore.flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd);
+    const afterTokens = DiffCore.flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd);
+
+    parts.push(...DiffCore.diffSequence(beforeTokens, afterTokens));
     beforeIndex = range.beforeEnd;
     afterIndex = range.afterEnd;
   });
 
-  appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, beforeBlocks.length, afterIndex, afterBlocks.length);
+  DiffCore.appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, beforeBlocks.length, afterIndex, afterBlocks.length);
 
-  return restoreIdenticalChangedTokens(parts);
+  return rememberDiffResult(beforeInfo, afterInfo, completeDiffResult(
+    beforeInfo,
+    afterInfo,
+    DiffCore.restoreIdenticalChangedTokens(parts)
+  ));
+}
+
+function diffRichPages(beforePage, afterPage) {
+  return diffRichPagesResult(beforePage, afterPage).parts;
 }
 
 function countMeaningfulChanges(parts) {
@@ -5854,7 +5274,7 @@ function comparePageContentHtml(page) {
     return `<div class="compare-text empty-line">No draft text yet.</div>`;
   }
 
-  const tokens = semanticTokensFromHtml(page.contentHtml)
+  const tokens = diffBlocksForPage(page).tokens
     .map((token, index) => renderComparePageToken(token, index))
     .join("");
   return `<div class="compare-text">${tokens}</div>`;
@@ -5902,7 +5322,25 @@ function baseComparePageHtml(draft, subtitle = "BASELINE") {
   `;
 }
 
-function markedLaterPageHtml(pair, diff = diffRichPages(pair.before, pair.after)) {
+function normalizedDiffResult(diffResult) {
+  return Array.isArray(diffResult)
+    ? { parts: diffResult, hasChanges: diffResult.some(DiffCore.isChangedDiffPart) }
+    : diffResult;
+}
+
+function compareStatsHtml(diffResult) {
+  const stats = diffSegmentStats(diffResult.parts);
+  return `
+    <div class="compare-stats">
+      <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
+      <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
+    </div>
+  `;
+}
+
+function markedLaterPageHtml(pair, diffResult = diffRichPagesResult(pair.before, pair.after)) {
+  const result = normalizedDiffResult(diffResult);
+  const diff = result.parts;
   if (!diff.length) {
     return `<div class="compare-text empty-line">No draft text yet.</div>`;
   }
@@ -5912,8 +5350,7 @@ function markedLaterPageHtml(pair, diff = diffRichPages(pair.before, pair.after)
 }
 
 function markedComparePageHtml(pair) {
-  const diff = diffRichPages(pair.before, pair.after);
-  const stats = diffSegmentStats(diff);
+  const diffResult = diffRichPagesResult(pair.before, pair.after);
 
   return `
     <article class="compare-page later-page" data-compare-page-id="${escapeHtml(pair.after.id)}">
@@ -5925,14 +5362,11 @@ function markedComparePageHtml(pair) {
         </div>
         <div class="meta">
           <div>Created: ${formatDate(pair.after.createdAt)}</div>
-          <div class="compare-stats">
-            <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
-            <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
-          </div>
+          ${compareStatsHtml(diffResult)}
         </div>
       </div>
       <div class="compare-page-body" style="${fontStyle(pair.after.format)}">
-        ${markedLaterPageHtml(pair, diff)}
+        ${markedLaterPageHtml(pair, diffResult)}
       </div>
     </article>
   `;
@@ -5988,7 +5422,7 @@ function versionDiffSideTokenWindow(parts, side) {
   const tokenIndexes = [];
 
   parts.forEach((part, index) => {
-    if (!isChangedDiffPart(part)) return;
+    if (!DiffCore.isChangedDiffPart(part)) return;
     changedIndexes.push(index);
     if (Number.isInteger(part[indexKey])) tokenIndexes.push(part[indexKey]);
   });
@@ -6043,7 +5477,7 @@ function versionWindowsTouchSamePhrase(sharedPage, left, right) {
   if (gap <= 4) return true;
   if (gap > 24) return false;
 
-  const tokens = semanticTokensFromHtml(sharedPage.contentHtml || textToHtml(sharedPage.content || ""));
+  const tokens = diffBlocksForPage(sharedPage).tokens;
   const between = versionTokensBetweenWindows(tokens, left, right);
   return !/[.!?\n]/u.test(between);
 }
@@ -6051,16 +5485,16 @@ function versionWindowsTouchSamePhrase(sharedPage, left, right) {
 function versionTransitionInfo(versions, pageForVersion, beforeIndex) {
   const before = pageForVersion(versions[beforeIndex], beforeIndex);
   const after = pageForVersion(versions[beforeIndex + 1], beforeIndex + 1);
-  const parts = diffRichPages(before, after);
-  if (!parts.some(isChangedDiffPart)) return null;
+  const diffResult = diffRichPagesResult(before, after);
+  if (!diffResult.hasChanges) return null;
 
   return {
     before,
     after,
     beforeIndex,
     afterIndex: beforeIndex + 1,
-    beforeWindow: versionDiffSideTokenWindow(parts, "before"),
-    afterWindow: versionDiffSideTokenWindow(parts, "after")
+    beforeWindow: versionDiffSideTokenWindow(diffResult.parts, "before"),
+    afterWindow: versionDiffSideTokenWindow(diffResult.parts, "after")
   };
 }
 
@@ -6197,8 +5631,7 @@ function versionComparePageHtml(draft, version, index, previousVersion = null, p
     after: page,
     label: `${page.title} compared to ${previousPage.title}`
   };
-  const diff = diffRichPages(previousPage, page);
-  const stats = diffSegmentStats(diff);
+  const diffResult = diffRichPagesResult(previousPage, page);
   const recordedText = formatVersionDate(page.createdAt);
   const fullRecordedText = formatDate(page.createdAt);
 
@@ -6213,10 +5646,7 @@ function versionComparePageHtml(draft, version, index, previousVersion = null, p
         <div class="meta version-page-meta">
           <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
           ${versionCoalescedMetaHtml(options.coalescedVersionCount)}
-          <div class="compare-stats">
-            <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
-            <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
-          </div>
+          ${compareStatsHtml(diffResult)}
         </div>
         <button
           class="version-restore-button"
@@ -6228,7 +5658,7 @@ function versionComparePageHtml(draft, version, index, previousVersion = null, p
         >Restore</button>
       </div>
       <div class="compare-page-body" style="${fontStyle(page.format)}">
-        ${markedLaterPageHtml(pair, diff)}
+        ${markedLaterPageHtml(pair, diffResult)}
       </div>
     </article>
   `;
@@ -6245,8 +5675,7 @@ function projectNotesVersionComparePageHtml(version, index, previousVersion = nu
     after: page,
     label: `${page.title} compared to ${previousPage.title}`
   };
-  const diff = diffRichPages(previousPage, page);
-  const stats = diffSegmentStats(diff);
+  const diffResult = diffRichPagesResult(previousPage, page);
   const recordedText = formatVersionDate(page.createdAt);
   const fullRecordedText = formatDate(page.createdAt);
 
@@ -6261,10 +5690,7 @@ function projectNotesVersionComparePageHtml(version, index, previousVersion = nu
         <div class="meta version-page-meta">
           <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
           ${versionCoalescedMetaHtml(options.coalescedVersionCount)}
-          <div class="compare-stats">
-            <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
-            <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
-          </div>
+          ${compareStatsHtml(diffResult)}
         </div>
         <button
           class="version-restore-button"
@@ -6275,7 +5701,7 @@ function projectNotesVersionComparePageHtml(version, index, previousVersion = nu
         >Restore</button>
       </div>
       <div class="compare-page-body" style="${fontStyle(page.format)}">
-        ${markedLaterPageHtml(pair, diff)}
+        ${markedLaterPageHtml(pair, diffResult)}
       </div>
     </article>
   `;
@@ -6791,7 +6217,7 @@ function render() {
   renderDraftTabs();
   renderEditor();
   renderChangesVisibility();
-  renderDiff();
+  renderDiffSoon();
   syncGlobalFormatControls();
   window.requestAnimationFrame(() => updateCompactTitleLabels());
 }
@@ -6802,20 +6228,47 @@ function syncFromInputs() {
   saveVisibleEditorScrollPositions();
 
   els.pageCanvas.querySelectorAll("[data-title-draft-id]").forEach(input => {
-    const draft = draftById(input.dataset.titleDraftId);
-    if (!draft) return;
-    const nextTitle = input.value || "Untitled draft";
-    if (draft.title !== nextTitle) {
-      draft.title = nextTitle;
-      draft.updatedAt = nowIso();
-    }
-    draft.notes.title = `${draft.title} Notes`;
+    syncDraftTitleInput(input);
   });
 
   els.pageCanvas.querySelectorAll("[data-editor-key]").forEach(editorEl => {
     const page = pageForEditorKey(editorEl.dataset.editorKey);
     if (page) syncRichPage(page, editorEl);
   });
+}
+
+function syncPageFromDom(pageKey) {
+  if (!state || !pageKey) return;
+  syncViewStateFromDom();
+
+  const parsed = parseDraftPageKey(pageKey);
+  if (parsed?.type === "content") {
+    const titleInput = els.pageCanvas.querySelector(`[data-title-draft-id="${cssEscape(parsed.draftId)}"]`);
+    if (titleInput) syncDraftTitleInput(titleInput);
+  }
+
+  const editorEl = editorElementForKey(pageKey);
+  const page = editorEl ? pageForEditorKey(pageKey) : null;
+  if (page && editorEl) syncRichPage(page, editorEl);
+}
+
+function syncViewStateFromDom() {
+  if (!state) return;
+  saveCurrentEditorViewState();
+  saveVisibleEditorScrollPositions();
+}
+
+function syncDetachedUnitFromDom(unitKey) {
+  const parsed = parseDetachedUnitKey(unitKey);
+  if (!parsed) return;
+
+  if (parsed.type === "story") {
+    syncPageFromDom(STORY_KEY);
+    return;
+  }
+
+  syncPageFromDom(draftContentKey(parsed.draftId));
+  syncPageFromDom(draftNotesKey(parsed.draftId));
 }
 
 function scheduleSearchRefresh(delay = 250) {
@@ -6840,10 +6293,35 @@ function scheduleSave(options = {}) {
     renderDraftTabs();
     refreshRenderedPageLabels();
   }
-  if (showChanges && options.refreshDiff !== false) renderDiff();
+  if (showChanges && options.refreshDiff !== false) renderDiffSoon();
   scheduleSearchRefresh();
   setStatus(isSaving ? "Saving..." : "Unsaved changes");
   queueSave(options.saveDelay);
+}
+
+function schedulePageSave(pageKey, options = {}) {
+  if (!state || !pageKey) {
+    scheduleSave(options);
+    return;
+  }
+
+  markStateChanged();
+  saveRetryCount = 0;
+  if (options.updateViewState !== false) {
+    saveCurrentEditorViewState();
+    saveCurrentViewState();
+  }
+  if (options.cacheLinkedState !== false) rememberLinkedProjectState();
+  if (options.refreshUi !== false) {
+    renderDraftTabs();
+    refreshRenderedPageLabels();
+  }
+  if (showChanges && options.refreshDiff !== false) renderDiffSoon();
+  scheduleSearchRefresh();
+  setStatus(isSaving ? "Saving..." : "Unsaved changes");
+  queuePageSave(pageKey, options.saveDelay, {
+    includeVersionHistory: Boolean(options.includeVersionHistory)
+  });
 }
 
 function resetViewStateForProject() {
@@ -6917,6 +6395,27 @@ function handleSaveFailure(failure) {
   }
 
   setStatus(message);
+}
+
+function projectRecoveryStatusText(recovery) {
+  const backupPath = String(recovery?.backupPath || "");
+  const backupName = fileNameFromPath(backupPath) || "a .broken backup";
+  return `Recovered corrupt project.json; broken file backed up as ${backupName}`;
+}
+
+function acknowledgeProjectRecoveryNotice() {
+  fetch("/api/project-recovery/ack", { method: "POST" }).catch(error => {
+    console.warn(error);
+  });
+}
+
+function showProjectRecoveryNotice(recovery) {
+  if (!recovery) return;
+  setStatus(projectRecoveryStatusText(recovery));
+  if (els.saveStatus && recovery.backupPath) {
+    els.saveStatus.title = `Recovered corrupt project.json. Broken file backup: ${recovery.backupPath}`;
+  }
+  acknowledgeProjectRecoveryNotice();
 }
 
 function downloadExportText(fileName) {
@@ -7456,19 +6955,19 @@ function updateSummaryProgressOverlay(progress = {}) {
   if (els.summaryProgressActions) els.summaryProgressActions.hidden = !canShowActions;
   if (els.summaryProgressOpen) {
     els.summaryProgressOpen.hidden = !canOpenReport;
-    els.summaryProgressOpen.disabled = !canOpenReport || !window.draftDiffDesktop?.openPath;
+    els.summaryProgressOpen.disabled = !canOpenReport || !window.draftDiffDesktop?.openGeneratedReport;
   }
   if (els.summaryProgressReveal) {
     els.summaryProgressReveal.hidden = !canOpenReport;
-    els.summaryProgressReveal.disabled = !canOpenReport || !window.draftDiffDesktop?.showItemInFolder;
+    els.summaryProgressReveal.disabled = !canOpenReport || !window.draftDiffDesktop?.showGeneratedReportInFolder;
   }
 }
 
 async function openGeneratedSummaryReport() {
   if (!latestSummaryReportPath) return;
   try {
-    if (!window.draftDiffDesktop?.openPath) throw new Error("Desktop file opener unavailable");
-    await window.draftDiffDesktop.openPath(latestSummaryReportPath);
+    if (!window.draftDiffDesktop?.openGeneratedReport) throw new Error("Desktop file opener unavailable");
+    await window.draftDiffDesktop.openGeneratedReport(latestSummaryReportPath);
     setStatus("Opened version history summary");
   } catch (error) {
     console.error(error);
@@ -7479,8 +6978,8 @@ async function openGeneratedSummaryReport() {
 async function revealGeneratedSummaryReport() {
   if (!latestSummaryReportPath) return;
   try {
-    if (!window.draftDiffDesktop?.showItemInFolder) throw new Error("Desktop folder opener unavailable");
-    await window.draftDiffDesktop.showItemInFolder(latestSummaryReportPath);
+    if (!window.draftDiffDesktop?.showGeneratedReportInFolder) throw new Error("Desktop folder opener unavailable");
+    await window.draftDiffDesktop.showGeneratedReportInFolder(latestSummaryReportPath);
     setStatus("Opened summary folder");
   } catch (error) {
     console.error(error);
@@ -7594,6 +7093,7 @@ async function generateVersionHistorySummary() {
 async function closeApp() {
   closeFileMenu();
   window.clearTimeout(saveTimer);
+  window.clearTimeout(pageSaveTimer);
 
   try {
     const body = prepareClosePayload({ skipSummary: true });
@@ -7626,6 +7126,85 @@ async function closeApp() {
     isClosingApp = false;
     await window.draftDiffDesktop?.showAfterCloseError?.();
     setStatus(readableSaveFailure(error?.message || "Close failed"));
+  }
+}
+
+async function savePendingPagesNow() {
+  if (!state || !pendingPageSaveKeys.size) return false;
+
+  window.clearTimeout(pageSaveTimer);
+  pageSaveTimer = null;
+
+  if (isSaving) {
+    setStatus("Saving...");
+    queuePendingPageSaves(100);
+    return false;
+  }
+
+  const keys = Array.from(pendingPageSaveKeys);
+  const versionHistoryKeys = new Set(pendingPageVersionHistorySaveKeys);
+  pendingPageSaveKeys.clear();
+  pendingPageVersionHistorySaveKeys.clear();
+  const payloads = keys
+    .map(key => pageSavePayload(key, { includeVersionHistory: versionHistoryKeys.has(key) }))
+    .filter(Boolean);
+  if (!payloads.length) return false;
+
+  const requestRevision = stateRevision;
+  isSaving = true;
+  setStatus("Saving...");
+
+  try {
+    let latestPayload = null;
+    for (const requestBody of payloads) {
+      const response = await fetch("/api/page", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        isSaving = false;
+        handleSaveFailure(await responseSaveFailure(response));
+        return false;
+      }
+
+      latestPayload = await response.json();
+    }
+
+    const responseMatchesCurrentState = requestRevision === stateRevision;
+    if (responseMatchesCurrentState && latestPayload?.state) {
+      state = migrateLegacyDefaultFonts(latestPayload.state);
+    }
+
+    isSaving = false;
+    saveRetryCount = 0;
+
+    if (!responseMatchesCurrentState || saveQueued) {
+      const hasFullSaveQueued = saveQueued || Boolean(saveTimer);
+      saveQueued = false;
+      setStatus("Unsaved changes");
+      if (hasFullSaveQueued || !pendingPageSaveKeys.size) {
+        queueSave(0);
+      } else {
+        queuePendingPageSaves(0);
+      }
+      return true;
+    }
+
+    if (pendingPageSaveKeys.size) {
+      setStatus("Unsaved changes");
+      queuePendingPageSaves(0);
+      return true;
+    }
+
+    setStatus(linkedTextPath ? `Saved ${formatDate(state.updatedAt)}` : "Saved companion; no text file linked");
+    return true;
+  } catch (error) {
+    console.error(error);
+    isSaving = false;
+    handleSaveFailure(readableSaveFailure(error?.message));
+    return false;
   }
 }
 
@@ -7679,6 +7258,7 @@ async function saveNow() {
     updateStoragePathsFromPayload(payload);
     isSaving = false;
     saveRetryCount = 0;
+    if (responseMatchesCurrentState) clearPendingPageSaves();
 
     if (!responseMatchesCurrentState || saveQueued) {
       saveQueued = false;
@@ -7727,6 +7307,7 @@ async function loadState() {
     setStatus("Backup folder missing; choose the moved folder");
     window.setTimeout(promptForMissingBackupFolder, 0);
   }
+  showProjectRecoveryNotice(payload.projectRecovery);
 }
 
 function setActiveFromPageKey(pageKey) {
@@ -7736,8 +7317,7 @@ function setActiveFromPageKey(pageKey) {
   if (pageKey === STORY_KEY) {
     activeArea = "story";
     renderDraftTabs();
-    saveCurrentViewState();
-    queueViewStateSave(0);
+    persistViewStateChange(0);
     return;
   }
 
@@ -7745,8 +7325,7 @@ function setActiveFromPageKey(pageKey) {
     selectedDraftId = parsed.draftId;
     activeArea = "draft";
     renderDraftTabs();
-    saveCurrentViewState();
-    queueViewStateSave(0);
+    persistViewStateChange(0);
   }
 }
 
@@ -7819,36 +7398,34 @@ function revealHistoryChange(target) {
 }
 
 function selectDraft(draftId) {
-  syncFromInputs();
+  syncViewStateFromDom();
   selectedDraftId = draftId;
   activeArea = "draft";
   activeEditorKey = draftContentKey(draftId);
   displayPage(activeEditorKey, true);
   render();
-  scheduleSave();
-  queueViewStateSave(0);
+  persistViewStateChange(0);
   focusPageEditor(activeEditorKey, { canvasScrollBehavior: "smooth" });
 }
 
 function selectDraftInChanges(draftId) {
   if (!draftById(draftId)) return;
 
-  syncFromInputs();
+  syncViewStateFromDom();
   selectedDraftId = draftId;
   activeArea = "draft";
   activeEditorKey = draftContentKey(draftId);
   const wasDisplayed = displayedPageKeys.has(activeEditorKey);
   displayPage(activeEditorKey, true);
   render();
-  scheduleSave({ syncInputs: false, refreshUi: false, refreshDiff: false });
-  queueViewStateSave(0);
+  persistViewStateChange(0);
   revealComparePage(draftId, wasDisplayed ? "smooth" : "auto");
 }
 
 function addDraft(copyFromSelected) {
   syncFromInputs();
-  recordUndoSnapshot();
   const draft = createDraft(copyFromSelected ? getSelectedDraft() : null);
+  recordDraftStructureUndoSnapshot([draft.id]);
   state.drafts.push(draft);
   selectedDraftId = draft.id;
   activeArea = "draft";
@@ -7888,13 +7465,13 @@ function applyPageFormat(editorKey, field, value) {
     page.format.lineHeight === nextFormat.lineHeight
   ) return;
 
-  recordUndoSnapshot();
+  recordPageUndoSnapshot(editorKey);
   page.format = nextFormat;
   applyEditorFormat(editorEl, page.format);
   syncToolbarValues(editorKey);
   syncGlobalFormatControls();
   queueDraftVersionCaptureForEditor(editorEl);
-  scheduleSave();
+  schedulePageSave(editorKey);
 }
 
 function applyUniversalFormat(field, value) {
@@ -7924,7 +7501,7 @@ function applyUniversalFormat(field, value) {
     return;
   }
 
-  recordUndoSnapshot();
+  recordProjectFormatUndoSnapshot();
   state.defaultFormat = nextFormat;
   pages.forEach(page => {
     ensurePageFields(page);
@@ -7941,26 +7518,29 @@ function runEditorCommand(editorKey, command) {
   const editorEl = editorElementForKey(editorKey);
   if (!editorEl) return;
   activeEditorKey = editorKey;
-  editorEl.focus();
-  recordUndoSnapshot();
-  document.execCommand(command, false, null);
+  recordPageUndoSnapshot(editorKey);
+  execRichTextCommand(command, { document, editor: editorEl });
   queueDraftVersionCaptureForEditor(editorEl);
-  scheduleSave();
+  const page = pageForEditorKey(editorKey);
+  if (page) syncRichPage(page, editorEl);
+  schedulePageSave(editorKey);
 }
 
 function openDraftVersionHistoryForDraft(draftId) {
   const draft = draftById(draftId);
   if (!draft) return;
 
-  syncFromInputs();
-  if (flushDraftVersionCapture(draft.id)) queueSave();
+  syncPageFromDom(draftContentKey(draft.id));
+  if (flushDraftVersionCapture(draft.id, { markChanged: false })) {
+    scheduleVersionHistoryPageSave(draftContentKey(draft.id), draft.id);
+  }
   versionHistoryDraftId = draft.id;
   showChanges = false;
   activeArea = "draft";
   selectedDraftId = draft.id;
   activeEditorKey = draftContentKey(draft.id);
   displayPage(activeEditorKey, true);
-  saveCurrentViewState();
+  persistViewStateChange(0);
   renderDraftTabs();
   renderChangesVisibility();
   renderDiffSoon("Loading version history");
@@ -7969,14 +7549,16 @@ function openDraftVersionHistoryForDraft(draftId) {
 function openProjectNotesVersionHistory() {
   if (!state?.initialNotes) return;
 
-  syncFromInputs();
-  if (flushProjectNotesVersionCapture()) queueSave();
+  syncPageFromDom(STORY_KEY);
+  if (flushProjectNotesVersionCapture({ markChanged: false })) {
+    scheduleVersionHistoryPageSave(STORY_KEY);
+  }
   versionHistoryDraftId = STORY_KEY;
   showChanges = false;
   activeArea = "story";
   activeEditorKey = STORY_KEY;
   displayPage(STORY_KEY, true);
-  saveCurrentViewState();
+  persistViewStateChange(0);
   renderDraftTabs();
   renderChangesVisibility();
   renderDiffSoon("Loading version history");
@@ -8123,7 +7705,7 @@ function chooseFormatOption(option) {
 }
 
 function toggleNotes(draftId) {
-  syncFromInputs();
+  syncViewStateFromDom();
   if (collapsedNotesIds.has(draftId)) {
     collapsedNotesIds.delete(draftId);
   } else {
@@ -8131,7 +7713,7 @@ function toggleNotes(draftId) {
   }
   ensureDisplaySelection();
   render();
-  scheduleSave();
+  persistViewStateChange(0);
 }
 
 function deleteDraft(draftId) {
@@ -8139,7 +7721,7 @@ function deleteDraft(draftId) {
   const draft = draftById(draftId);
   if (!draft || !canDeleteDraft(draft)) return;
 
-  recordUndoSnapshot();
+  recordDraftStructureUndoSnapshot([draftId]);
   state.drafts = state.drafts.filter(item => item.id !== draftId);
   displayedPageKeys.delete(draftContentKey(draftId));
   collapsedNotesIds.delete(draftId);
@@ -8243,12 +7825,11 @@ els.storyTab.addEventListener("click", event => {
     return;
   }
   if (showChanges) return;
-  syncFromInputs();
+  syncViewStateFromDom();
   activeArea = "story";
   activeEditorKey = STORY_KEY;
   renderDraftTabs();
-  saveCurrentViewState();
-  queueViewStateSave(0);
+  persistViewStateChange(0);
   focusPageEditor(STORY_KEY, { canvasScrollBehavior: "smooth" });
 });
 
@@ -8258,20 +7839,20 @@ els.storyDisplayToggle.addEventListener("change", event => {
     return;
   }
 
-  syncFromInputs();
+  syncViewStateFromDom();
   displayPage(STORY_KEY, event.target.checked);
   render();
-  scheduleSave();
+  persistViewStateChange(0);
 });
 
 els.allDraftsTab.addEventListener("click", event => {
   if (event.target === els.allDraftsToggle) return;
   if (!event.target.closest("[data-all-drafts-toggle]")) return;
   if (versionHistoryDraftId) return;
-  syncFromInputs();
+  syncViewStateFromDom();
   displayAllDrafts(!allDraftsSelected());
   render();
-  scheduleSave();
+  persistViewStateChange(0);
 });
 
 els.allDraftsToggle.addEventListener("change", event => {
@@ -8280,10 +7861,10 @@ els.allDraftsToggle.addEventListener("change", event => {
     return;
   }
 
-  syncFromInputs();
+  syncViewStateFromDom();
   displayAllDrafts(event.target.checked);
   render();
-  scheduleSave();
+  persistViewStateChange(0);
 });
 
 els.draftTabs.addEventListener("click", event => {
@@ -8316,10 +7897,10 @@ els.draftTabs.addEventListener("change", event => {
     return;
   }
 
-  syncFromInputs();
+  syncViewStateFromDom();
   displayPage(draftContentKey(checkbox.dataset.displayDraftId), checkbox.checked);
   render();
-  scheduleSave();
+  persistViewStateChange(0);
 });
 
 els.tabStrip?.addEventListener("scroll", updateTabScrollbar, { passive: true });
@@ -8361,8 +7942,7 @@ els.pageCanvas.addEventListener("focusin", event => {
     activeArea = "draft";
     activeEditorKey = draftContentKey(selectedDraftId);
     renderDraftTabs();
-    saveCurrentViewState();
-    queueViewStateSave(0);
+    persistViewStateChange(0);
   }
 });
 
@@ -8403,19 +7983,22 @@ els.pageCanvas.addEventListener("input", event => {
     window.requestAnimationFrame(() => saveEditorViewState(editorEl));
   }
 
+  const titlePageKey = titleInput ? syncDraftTitleInput(titleInput) : "";
   if (titleInput) window.requestAnimationFrame(() => updateCompactTitleLabels(titleInput.closest(".panel-title-row") || document));
 
-  if (editorEl || titleInput) {
-    scheduleSave(editorEl
-      ? {
-        syncInputs: false,
-        updateViewState: false,
-        cacheLinkedState: false,
-        refreshUi: false,
-        refreshDiff: false
-      }
-      : undefined
-    );
+  if (editorEl) {
+    schedulePageSave(editorEl.dataset.editorKey, {
+      updateViewState: false,
+      cacheLinkedState: false,
+      refreshUi: false,
+      refreshDiff: false
+    });
+  } else if (titleInput) {
+    if (titlePageKey) {
+      schedulePageSave(titlePageKey);
+    } else {
+      scheduleSave();
+    }
   }
 });
 
@@ -8468,13 +8051,18 @@ els.pageCanvas.addEventListener("keydown", event => {
 
   event.preventDefault();
   activeEditorKey = editorEl.dataset.editorKey;
-  recordUndoSnapshot();
-  document.execCommand("insertText", false, "\t");
+  recordPageUndoSnapshot(editorEl.dataset.editorKey);
+  insertPlainText("\t", { document });
   const page = pageForEditorKey(editorEl.dataset.editorKey);
   if (page) syncRichPage(page, editorEl);
   queueDraftVersionCaptureForEditor(editorEl);
   queueDraftNoteStatsRefresh(editorEl, 0);
-  scheduleSave();
+  schedulePageSave(editorEl.dataset.editorKey, {
+    updateViewState: false,
+    cacheLinkedState: false,
+    refreshUi: false,
+    refreshDiff: false
+  });
 });
 
 els.pageCanvas.addEventListener("paste", event => {
@@ -8483,15 +8071,18 @@ els.pageCanvas.addEventListener("paste", event => {
 
   event.preventDefault();
   activeEditorKey = editorEl.dataset.editorKey;
-  recordUndoSnapshot();
-  const html = event.clipboardData.getData("text/html");
-  const text = event.clipboardData.getData("text/plain");
-  document.execCommand("insertHTML", false, html ? sanitizeRichHtml(html) : textToHtml(text));
+  recordPageUndoSnapshot(editorEl.dataset.editorKey);
+  insertClipboardHtml(event.clipboardData, { document, textToHtml });
   const page = pageForEditorKey(editorEl.dataset.editorKey);
   if (page) syncRichPage(page, editorEl);
   queueDraftVersionCaptureForEditor(editorEl);
   queueDraftNoteStatsRefresh(editorEl, 0);
-  scheduleSave();
+  schedulePageSave(editorEl.dataset.editorKey, {
+    updateViewState: false,
+    cacheLinkedState: false,
+    refreshUi: false,
+    refreshDiff: false
+  });
 });
 
 els.pageCanvas.addEventListener("pointerdown", event => {
@@ -8697,7 +8288,7 @@ els.pageCanvas.addEventListener("keydown", event => {
 });
 
 els.compareMode.addEventListener("change", () => {
-  saveCurrentViewState();
+  persistViewStateChange(0);
   renderDiffSoon("Loading changes");
 });
 
@@ -8729,7 +8320,7 @@ els.diffOutput.addEventListener("click", event => {
 });
 
 els.toggleChanges.addEventListener("click", () => {
-  syncFromInputs();
+  syncViewStateFromDom();
   if (versionHistoryDraftId) {
     closeVersionHistory();
     return;
@@ -8737,7 +8328,7 @@ els.toggleChanges.addEventListener("click", () => {
 
   versionHistoryDraftId = null;
   showChanges = !showChanges;
-  saveCurrentViewState();
+  persistViewStateChange(0);
   renderDraftTabs();
   renderChangesVisibility();
   renderDiffSoon();

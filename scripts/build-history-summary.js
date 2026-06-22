@@ -3,7 +3,10 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const vm = require("node:vm");
+const {
+  backupHistoryReport,
+  shouldUseFastHistoryReport
+} = require("../server");
 
 function usage() {
   console.error("Usage: node scripts/build-history-summary.js <version-history.json> <output.md>");
@@ -12,40 +15,6 @@ function usage() {
 
 const [jsonPathArg, outputPathArg] = process.argv.slice(2);
 if (!jsonPathArg || !outputPathArg) usage();
-
-const root = path.resolve(__dirname, "..");
-const serverPath = path.join(root, "server.js");
-const serverCode = `${fs.readFileSync(serverPath, "utf8")}
-
-module.exports.__historySummaryInternals = {
-  backupHistoryReport,
-  shouldUseFastHistoryReport
-};
-`;
-
-const sandboxModule = { exports: {} };
-const sandbox = {
-  require,
-  module: sandboxModule,
-  exports: sandboxModule.exports,
-  __dirname: root,
-  __filename: serverPath,
-  process,
-  console,
-  Buffer,
-  URL,
-  setTimeout,
-  clearTimeout,
-  setInterval,
-  clearInterval
-};
-
-vm.runInNewContext(serverCode, sandbox, { filename: serverPath });
-
-const {
-  backupHistoryReport,
-  shouldUseFastHistoryReport
-} = sandboxModule.exports.__historySummaryInternals;
 
 function readJson(filePath) {
   return JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/u, ""));

@@ -80,23 +80,22 @@ function resolveConfiguredDataDir() {
   return app.isPackaged ? path.join(app.getPath("userData"), "data") : "";
 }
 
-function resolveDesktopPath(value) {
-  const filePath = String(value || "").trim();
-  if (!filePath) throw new Error("Missing file path");
-  return path.resolve(filePath);
+function resolveGeneratedReportPath(value) {
+  const api = loadServerApi();
+  return api.resolveGeneratedReportPath(value);
 }
 
-async function openDesktopPath(value) {
-  const filePath = resolveDesktopPath(value);
-  const error = await shell.openPath(filePath);
+async function openGeneratedReport(value) {
+  const reportPath = resolveGeneratedReportPath(value);
+  const error = await shell.openPath(reportPath);
   if (error) throw new Error(error);
-  return { ok: true, filePath };
+  return { ok: true, reportPath };
 }
 
-function showDesktopItemInFolder(value) {
-  const filePath = resolveDesktopPath(value);
-  shell.showItemInFolder(filePath);
-  return { ok: true, filePath, directoryPath: path.dirname(filePath) };
+function showGeneratedReportInFolder(value) {
+  const reportPath = resolveGeneratedReportPath(value);
+  shell.showItemInFolder(reportPath);
+  return { ok: true, reportPath, directoryPath: path.dirname(reportPath) };
 }
 
 function configureSpellChecker(session) {
@@ -450,8 +449,8 @@ app.whenReady()
       const api = loadServerApi();
       return api.versionHistorySummaryJobProgress(String(jobId || ""));
     });
-    ipcMain.handle("draft-diff:open-path", (_event, filePath) => openDesktopPath(filePath));
-    ipcMain.handle("draft-diff:show-item-in-folder", (_event, filePath) => showDesktopItemInFolder(filePath));
+    ipcMain.handle("draft-diff:open-generated-report", (_event, reportPath) => openGeneratedReport(reportPath));
+    ipcMain.handle("draft-diff:show-generated-report-in-folder", (_event, reportPath) => showGeneratedReportInFolder(reportPath));
     ipcMain.handle("draft-diff:open-text-file", () => {
       const api = loadServerApi();
       return api.openTextFileFromDialog();

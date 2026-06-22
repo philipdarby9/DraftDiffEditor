@@ -1,5 +1,11 @@
 const params = new URLSearchParams(window.location.search);
 const unitKey = params.get("unit") || params.get("key") || "";
+const StateCore = window.DraftDiffStateCore;
+if (!StateCore) throw new Error("DraftDiffStateCore failed to load.");
+const ToolbarCore = window.DraftDiffToolbarCore;
+if (!ToolbarCore) throw new Error("DraftDiffToolbarCore failed to load.");
+const RichTextCore = window.DraftDiffRichTextCore;
+if (!RichTextCore) throw new Error("DraftDiffRichTextCore failed to load.");
 
 const els = {
   kicker: document.querySelector("#panel-kicker"),
@@ -7,80 +13,31 @@ const els = {
   pages: document.querySelector("#panel-pages")
 };
 
-const DEFAULT_FORMAT = {
-  fontFamily: "Consolas",
-  fontSize: "16",
-  lineHeight: "1.62"
-};
-
-const FONT_FAMILY_OPTIONS = [
-  "Consolas",
-  "Segoe UI",
-  "Arial",
-  "Calibri",
-  "Cambria",
-  "Candara",
-  "Constantia",
-  "Corbel",
-  "Georgia",
-  "Garamond",
-  "Book Antiqua",
-  "Palatino Linotype",
-  "Times New Roman",
-  "Courier New",
-  "Lucida Console",
-  "Verdana",
-  "Tahoma",
-  "Trebuchet MS"
-];
-
-const FONT_SIZE_OPTIONS = ["12", "14", "16", "18", "20", "24", "28", "32"];
-const LINE_HEIGHT_OPTIONS = ["1.2", "1.4", "1.62", "1.8", "2"];
+const DEFAULT_FORMAT = StateCore.DEFAULT_FORMAT;
+const FONT_FAMILY_OPTIONS = StateCore.FONT_FAMILY_OPTIONS;
+const FONT_SIZE_OPTIONS = StateCore.FONT_SIZE_OPTIONS;
+const LINE_HEIGHT_OPTIONS = StateCore.LINE_HEIGHT_OPTIONS;
+const escapeHtml = StateCore.escapeHtml;
+const textToHtml = StateCore.textToHtml;
+const wordCountForText = StateCore.wordCountForText;
+const toolbarIcons = ToolbarCore.toolbarIcons;
+const sanitizeRichHtml = RichTextCore.sanitizeRichHtml;
+const execRichTextCommand = RichTextCore.execRichTextCommand;
+const insertClipboardHtml = RichTextCore.insertClipboardHtml;
 const DETACHED_PANEL_CHANNEL = "draftDiff.detachedPanels";
 const WORD_COUNT_REFRESH_DELAY_MS = 350;
 const channel = "BroadcastChannel" in window ? new BroadcastChannel(DETACHED_PANEL_CHANNEL) : null;
-
-const toolbarIcons = {
-  format: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h10"></path><path d="M5.5 3v3M10.5 6.5v3M7.5 10v3"></path></svg>',
-  undo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 5 10l4-4"></path><path d="M5 10h11a4 4 0 1 1 0 8h-1"></path></svg>',
-  redo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 4-4-4-4"></path><path d="M19 10H8a4 4 0 1 0 0 8h1"></path></svg>',
-  bold: '<span class="fr-letter-icon bold" aria-hidden="true">B</span>',
-  italic: '<span class="fr-letter-icon italic" aria-hidden="true">I</span>',
-  underline: '<span class="fr-letter-icon underline" aria-hidden="true">U</span>',
-  strike: '<span class="fr-letter-icon strike" aria-hidden="true">S</span>',
-  unorderedList: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11"></path><path d="M9 12h11"></path><path d="M9 18h11"></path><path d="M5 6v.01"></path><path d="M5 12v.01"></path><path d="M5 18v.01"></path></svg>',
-  orderedList: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6h9"></path><path d="M11 12h9"></path><path d="M12 18h8"></path><path d="M4 6h1v4"></path><path d="M4 10h2"></path><path d="M6 18H4c0-1.2 2-2.1 2-3.2 0-.7-.5-1.2-1.2-1.2-.5 0-.9.2-1.2.6"></path></svg>',
-  outdent: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6H9"></path><path d="M20 12h-7"></path><path d="M20 18H9"></path><path d="m8 8-4 4 4 4"></path></svg>',
-  indent: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6H9"></path><path d="M20 12h-7"></path><path d="M20 18H9"></path><path d="m4 8 4 4-4 4"></path></svg>',
-  alignLeft: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M4 12h10"></path><path d="M4 18h14"></path></svg>',
-  alignCenter: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M8 12h8"></path><path d="M6 18h12"></path></svg>',
-  alignRight: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M10 12h10"></path><path d="M6 18h14"></path></svg>',
-  clear: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 12.3h7.4"></path><path d="m5.3 8.8 3.9-4.2 2.2 2.1-3.9 4.2H5.3z"></path><path d="M4 13.1 12.5 3"></path></svg>',
-  history: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M8 3.2a4.8 4.8 0 1 1-4.3 2.7"></path><path d="M3.2 3.6v2.7h2.7"></path><path d="M8 5.2v3.1l2.1 1.2"></path></svg>'
-};
 
 let unit = null;
 let saveTimer = null;
 let isSaving = false;
 let saveQueued = false;
+let dirtyPageKeys = new Set();
 let detachedNotesStatsTimer = null;
-
-function escapeHtml(value) {
-  return String(value ?? "")
-    .replaceAll("&", "&amp;")
-    .replaceAll("<", "&lt;")
-    .replaceAll(">", "&gt;")
-    .replaceAll('"', "&quot;")
-    .replaceAll("'", "&#039;");
-}
 
 function closestElement(target, selector) {
   const element = target instanceof Element ? target : target?.parentElement;
   return element?.closest?.(selector) || null;
-}
-
-function textToHtml(value) {
-  return escapeHtml(value).replace(/\n/g, "<br>");
 }
 
 function formatDate(iso) {
@@ -99,13 +56,8 @@ function shortDraftTitleFromTitle(title) {
 
 function plainTextFromHtml(html) {
   const template = document.createElement("template");
-  template.innerHTML = String(html || "");
+  template.innerHTML = sanitizeRichHtml(html);
   return template.content.textContent.replace(/\u00a0/g, " ").trimEnd();
-}
-
-function wordCountForText(text) {
-  const matches = String(text || "").match(/[\p{L}\p{N}]+(?:[\u0027\u2019/-][\p{L}\p{N}]+)*|\*+/gu);
-  return matches ? matches.length : 0;
 }
 
 function pageWordCount(page) {
@@ -362,11 +314,7 @@ function editorPlainText(editorEl) {
 }
 
 function normalizeFormat(format = {}) {
-  return {
-    fontFamily: FONT_FAMILY_OPTIONS.includes(format.fontFamily) ? format.fontFamily : DEFAULT_FORMAT.fontFamily,
-    fontSize: FONT_SIZE_OPTIONS.includes(String(format.fontSize)) ? String(format.fontSize) : DEFAULT_FORMAT.fontSize,
-    lineHeight: LINE_HEIGHT_OPTIONS.includes(String(format.lineHeight)) ? String(format.lineHeight) : DEFAULT_FORMAT.lineHeight
-  };
+  return StateCore.normalizeFormat(format);
 }
 
 function parseDetachedUnitKey(key) {
@@ -715,7 +663,7 @@ function chooseFormatOption(option) {
   syncPickerValue(picker, option.dataset.formatOption);
   applyEditorFormat(editorEl, pageFormatFromSection(section));
   closeFormatPickers();
-  queueSave();
+  queueSave(350, section.dataset.pageKey || "");
 }
 
 function renderUnit(nextUnit) {
@@ -765,39 +713,78 @@ function pagePayload(pageKey) {
   };
 }
 
-function unitPayload() {
+function pageKeyForEventTarget(target) {
+  return closestElement(target, "[data-page-key]")?.dataset.pageKey || "";
+}
+
+function markDirtyPage(pageKey) {
+  if (pageKey) dirtyPageKeys.add(pageKey);
+}
+
+function pageKeysForPayload(pageKeys = null) {
+  if (Array.isArray(pageKeys) && pageKeys.length) {
+    return Array.from(new Set(pageKeys.filter(Boolean)));
+  }
+  if (dirtyPageKeys.size) return Array.from(dirtyPageKeys);
+  return Array.from(els.pages.querySelectorAll("[data-page-key]"))
+    .map(section => section.dataset.pageKey)
+    .filter(Boolean);
+}
+
+function unitPayload(pageKeys = null) {
+  const keyFilter = Array.isArray(pageKeys) && pageKeys.length
+    ? new Set(pageKeys)
+    : null;
   return {
     key: unitKey,
     pages: Array.from(els.pages.querySelectorAll("[data-page-key]"))
+      .filter(section => !keyFilter || keyFilter.has(section.dataset.pageKey))
       .map(section => pagePayload(section.dataset.pageKey))
       .filter(Boolean)
   };
 }
 
-async function saveNow() {
+async function saveNow(pageKeys = null) {
   if (!unit) return;
+  const explicitPageKeys = Array.isArray(pageKeys)
+    ? pageKeys.filter(Boolean)
+    : (pageKeys ? [pageKeys] : null);
   if (isSaving) {
+    if (explicitPageKeys?.length) explicitPageKeys.forEach(markDirtyPage);
     saveQueued = true;
     return;
   }
 
   window.clearTimeout(saveTimer);
-  const nextUnit = unitPayload();
+  const keysToSave = pageKeysForPayload(explicitPageKeys);
+  const nextUnit = unitPayload(keysToSave);
+  if (!nextUnit.pages.length) return;
   postToMain({ type: "unit:update", unit: nextUnit });
   isSaving = true;
   setStatus("Saving...");
 
   try {
-    const response = await fetch("/api/unit", {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(nextUnit)
-    });
-    if (!response.ok) throw new Error("Save failed");
+    for (const page of nextUnit.pages) {
+      const response = await fetch("/api/page", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          key: page.key,
+          page: page.page
+        })
+      });
+      if (!response.ok) throw new Error("Save failed");
+    }
+
     isSaving = false;
     setStatus("Saved");
+    if (!saveQueued) {
+      keysToSave.forEach(key => dirtyPageKeys.delete(key));
+    }
     if (saveQueued) {
       saveQueued = false;
+      queueSave(0);
+    } else if (dirtyPageKeys.size) {
       queueSave(0);
     }
   } catch (error) {
@@ -807,11 +794,12 @@ async function saveNow() {
   }
 }
 
-function queueSave(delay = 350) {
+function queueSave(delay = 350, pageKey = "") {
+  markDirtyPage(pageKey);
   setStatus("Unsaved changes");
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(saveNow, delay);
-  postToMain({ type: "unit:update", unit: unitPayload() });
+  postToMain({ type: "unit:update", unit: unitPayload(pageKeysForPayload()) });
 }
 
 async function loadUnit() {
@@ -843,6 +831,7 @@ channel?.addEventListener("message", event => {
 });
 
 els.pages.addEventListener("input", event => {
+  const pageKey = pageKeyForEventTarget(event.target);
   const titleInput = closestElement(event.target, "[data-page-title]");
   if (titleInput && unit) {
     unit.title = titleInput.value || "Untitled draft";
@@ -851,7 +840,7 @@ els.pages.addEventListener("input", event => {
   if (closestElement(event.target, "[data-editor-key]")?.closest(".draft-detached-page")) {
     queueDetachedNotesStatsRefresh(new Date().toISOString());
   }
-  queueSave();
+  queueSave(350, pageKey);
 });
 
 els.pages.addEventListener("change", event => {
@@ -860,7 +849,7 @@ els.pages.addEventListener("change", event => {
   const section = control.closest("[data-page-key]");
   const editorEl = section?.querySelector("[data-editor-key]");
   if (editorEl) applyEditorFormat(editorEl, pagePayload(section.dataset.pageKey).page.format);
-  queueSave();
+  queueSave(350, section?.dataset.pageKey || "");
 });
 
 els.pages.addEventListener("mousedown", event => {
@@ -872,11 +861,9 @@ els.pages.addEventListener("paste", event => {
   if (!editorEl) return;
 
   event.preventDefault();
-  const html = event.clipboardData.getData("text/html");
-  const text = event.clipboardData.getData("text/plain");
-  document.execCommand("insertHTML", false, html || textToHtml(text));
+  insertClipboardHtml(event.clipboardData, { document, textToHtml });
   if (editorEl.closest(".draft-detached-page")) queueDetachedNotesStatsRefresh(new Date().toISOString(), 0);
-  queueSave();
+  queueSave(350, pageKeyForEventTarget(editorEl));
 });
 
 els.pages.addEventListener("click", event => {
@@ -917,9 +904,8 @@ els.pages.addEventListener("click", event => {
   const section = button.closest("[data-page-key]");
   const editorEl = section?.querySelector("[data-editor-key]");
   if (!editorEl) return;
-  editorEl.focus();
-  document.execCommand(button.dataset.command, false, null);
-  queueSave();
+  execRichTextCommand(button.dataset.command, { document, editor: editorEl });
+  queueSave(350, section.dataset.pageKey || "");
 });
 
 document.addEventListener("keydown", event => {
@@ -950,9 +936,15 @@ window.addEventListener("resize", () => {
 });
 
 window.addEventListener("beforeunload", () => {
-  if (unit) {
-    const body = JSON.stringify(unitPayload());
-    navigator.sendBeacon("/api/unit", new Blob([body], { type: "application/json" }));
+  if (unit && (saveTimer || dirtyPageKeys.size || isSaving)) {
+    const payload = unitPayload(pageKeysForPayload());
+    payload.pages.forEach(page => {
+      const body = JSON.stringify({
+        key: page.key,
+        page: page.page
+      });
+      navigator.sendBeacon("/api/page", new Blob([body], { type: "application/json" }));
+    });
   }
   postToMain({ type: "unit:closed" });
 });

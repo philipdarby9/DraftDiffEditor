@@ -5,6 +5,8 @@ const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { URL } = require("node:url");
 const { Worker } = require("node:worker_threads");
+const DiffCore = require("./public/diff-core");
+const StateCore = require("./public/state-core");
 
 const ROOT = __dirname;
 const PUBLIC_DIR = path.join(ROOT, "public");
@@ -13,6 +15,9 @@ const STATE_FILE = path.join(DATA_DIR, "project.json");
 const EXPORT_FILE = path.join(DATA_DIR, "draft-history.txt");
 const TEXT_FILE_LINK_FILE = path.join(DATA_DIR, "text-file-link.json");
 const TEXT_FILE_STATES_FILE = path.join(DATA_DIR, "text-file-states.json");
+const PROJECT_RECOVERY_FILE = path.join(DATA_DIR, "project-recovery.json");
+const PERSISTENCE_TRANSACTION_DIR = path.join(DATA_DIR, ".save-transaction");
+const PERSISTENCE_TRANSACTION_MANIFEST = path.join(PERSISTENCE_TRANSACTION_DIR, "manifest.json");
 const VERSION_HISTORY_FOLDER_FILE = path.join(DATA_DIR, "version-history-folder.json");
 const BACKUP_FOLDER_FILE = path.join(DATA_DIR, "backup-folder.json");
 const VERSION_HISTORY_FILE_SUFFIX = ".version-history.json";
@@ -20,18 +25,15 @@ const BACKUP_HISTORY_REPORT_SUFFIX = ".version-history.md";
 const CUT_HISTORY_REPORT_SUFFIX = ".per-draft-cut-history.html";
 const FULL_VERSION_HISTORY_REPORT_SUFFIX = ".version-history-summary.html";
 const PORT = Number(process.env.PORT || 4173);
+const HOST = process.env.DRAFT_DIFF_HOST || process.env.HOST || "127.0.0.1";
+const ALLOW_REMOTE_API = process.env.DRAFT_DIFF_ALLOW_REMOTE === "1";
 const STORY_KEY = "story";
-const PROJECT_NOTES_TITLE = "Project notes";
-const FORMAT_DEFAULT_VERSION = 2;
-const VIEW_STATE_VERSION = 2;
-const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
-const MIN_PAGE_PANE_PERCENT = 12;
+const PROJECT_NOTES_TITLE = StateCore.PROJECT_NOTES_TITLE;
+const FORMAT_DEFAULT_VERSION = StateCore.FORMAT_DEFAULT_VERSION;
+const VIEW_STATE_VERSION = StateCore.VIEW_STATE_VERSION;
+const LEGACY_DEFAULT_FONT_FAMILY = StateCore.LEGACY_DEFAULT_FONT_FAMILY;
+const MIN_PAGE_PANE_PERCENT = StateCore.MIN_PAGE_PANE_PERCENT;
 const SERVER_BUILD = "server-promote-newer-history-2026-06-07";
-const CUT_HISTORY_DETAILED_MAX_VERSIONS = 24;
-const CUT_HISTORY_DETAILED_MAX_PAIR_CHARS = 50_000;
-const CUT_HISTORY_FINAL_DIFF_MAX_PAIR_CHARS = 10_000;
-const FULL_SUMMARY_DRAFT_DIFF_MAX_PAIR_CHARS = 120_000;
-const VERSION_SUMMARY_CHANGE_DIFF_MAX_PAIR_CHARS = 60_000;
 const AUTO_EXIT_ON_IDLE = process.env.DRAFT_DIFF_AUTO_EXIT === "1";
 const CLIENT_IDLE_EXIT_MS = 5 * 60_000;
 const STARTUP_IDLE_EXIT_MS = 120_000;
@@ -57,6 +59,7 @@ let processExitRequested = false;
 const cutHistoryJobs = new Map();
 const cutHistoryIdleWaiters = new Set();
 const versionSummaryJobs = new Map();
+const versionHistoryPathCache = new Map();
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -83,35 +86,7 @@ function asText(value) {
   return typeof value === "string" ? value : "";
 }
 
-const DEFAULT_FORMAT = {
-  fontFamily: "Consolas",
-  fontSize: "16",
-  lineHeight: "1.62"
-};
-
-const allowedFontFamilies = new Set([
-  "Consolas",
-  "Segoe UI",
-  "Arial",
-  "Calibri",
-  "Cambria",
-  "Candara",
-  "Constantia",
-  "Corbel",
-  "Georgia",
-  "Garamond",
-  "Book Antiqua",
-  "Palatino Linotype",
-  "Times New Roman",
-  "Courier New",
-  "Lucida Console",
-  "Verdana",
-  "Tahoma",
-  "Trebuchet MS"
-]);
-
-const allowedFontSizes = new Set(["12", "14", "16", "18", "20", "24", "28", "32"]);
-const allowedLineHeights = new Set(["1.2", "1.4", "1.62", "1.8", "2"]);
+const DEFAULT_FORMAT = StateCore.DEFAULT_FORMAT;
 
 function escapeHtml(value) {
   return asText(value)
@@ -123,11 +98,11 @@ function escapeHtml(value) {
 }
 
 function textToHtml(value) {
-  return escapeHtml(value).replace(/\n/g, "<br>");
+  return StateCore.textToHtml(value);
 }
 
 function hasParagraphHtml(value) {
-  return /<\s*p(?:\s|>|\/)/i.test(asText(value));
+  return StateCore.hasParagraphHtml(value);
 }
 
 function decodeHtmlText(value) {
@@ -141,409 +116,51 @@ function decodeHtmlText(value) {
 }
 
 function htmlToText(value) {
-  const source = asText(value);
-  const blockTags = new Set(["div", "p", "li", "blockquote", "h1", "h2", "h3", "h4", "h5", "h6", "ul", "ol"]);
-  const paragraphTags = new Set(["p", "blockquote"]);
-  let output = "";
-  let lastIndex = 0;
-
-  const ensureTrailingNewlines = count => {
-    if (!output) return;
-    const trailing = output.match(/\n*$/u)?.[0].length || 0;
-    if (trailing < count) output += "\n".repeat(count - trailing);
-  };
-
-  const appendDecodedSegment = (segment, hasAdjacentTag) => {
-    let text = decodeHtmlText(segment);
-    if (hasAdjacentTag && text.includes("\n")) {
-      if (!text.trim()) return;
-      text = text
-        .replace(/^[ \t]*\n[ \t]*/u, "")
-        .replace(/[ \t]*\n[ \t]*$/u, "");
-    }
-
-    output += text;
-  };
-
-  source.replace(/<[^>]*>/g, (tagText, offset) => {
-    appendDecodedSegment(source.slice(lastIndex, offset), true);
-    const tagMatch = /^<\s*\/?\s*([a-z0-9]+)/i.exec(tagText);
-    const tagName = tagMatch?.[1]?.toLowerCase() || "";
-    const isClosingTag = /^<\s*\//.test(tagText);
-
-    if (tagName === "br") {
-      output += "\n";
-    } else if (paragraphTags.has(tagName)) {
-      ensureTrailingNewlines(isClosingTag ? 2 : 1);
-    } else if (blockTags.has(tagName)) {
-      ensureTrailingNewlines(1);
-    }
-
-    lastIndex = offset + tagText.length;
-    return tagText;
-  });
-
-  appendDecodedSegment(source.slice(lastIndex), lastIndex > 0);
-  return output.trimEnd();
+  return StateCore.htmlToText(value);
 }
 
 function lineBreakCount(value) {
-  return (asText(value).match(/\n/g) || []).length;
+  return StateCore.lineBreakCount(value);
 }
 
 function normalizeFormat(format) {
-  const fontFamily = allowedFontFamilies.has(format?.fontFamily)
-    ? format.fontFamily
-    : DEFAULT_FORMAT.fontFamily;
-  const fontSize = allowedFontSizes.has(String(format?.fontSize))
-    ? String(format.fontSize)
-    : DEFAULT_FORMAT.fontSize;
-  const lineHeight = allowedLineHeights.has(String(format?.lineHeight))
-    ? String(format.lineHeight)
-    : DEFAULT_FORMAT.lineHeight;
-  return { fontFamily, fontSize, lineHeight };
+  return StateCore.normalizeFormat(format);
 }
 
 function upgradeLegacyDefaultFormat(format, shouldUpgrade) {
-  const normalized = normalizeFormat(format);
-  return shouldUpgrade && normalized.fontFamily === LEGACY_DEFAULT_FONT_FAMILY
-    ? { ...normalized, fontFamily: DEFAULT_FORMAT.fontFamily }
-    : normalized;
+  return StateCore.upgradeLegacyDefaultFormat(format, shouldUpgrade);
 }
 
 function currentDefaultFormat(state) {
-  return normalizeFormat(state?.defaultFormat || DEFAULT_FORMAT);
+  return StateCore.currentDefaultFormat(state);
 }
 
 function normalizePage(page, fallback, options = {}) {
-  const providedContentHtml = asText(page?.contentHtml);
-  const providedContent = asText(page?.content);
-  const htmlContent = providedContentHtml ? htmlToText(providedContentHtml) : "";
-  const shouldPreservePlainTextLines = providedContent &&
-    !hasParagraphHtml(providedContentHtml) &&
-    lineBreakCount(providedContent) > lineBreakCount(htmlContent);
-  const content = shouldPreservePlainTextLines ? providedContent : htmlContent || providedContent;
-  return {
-    id: page?.id || fallback.id,
-    title: page?.title || fallback.title,
-    createdAt: page?.createdAt || fallback.createdAt,
-    updatedAt: page?.updatedAt || fallback.updatedAt || page?.createdAt || fallback.createdAt,
-    content,
-    contentHtml: shouldPreservePlainTextLines ? textToHtml(content) : providedContentHtml || textToHtml(content),
-    format: upgradeLegacyDefaultFormat(
-      { ...normalizeFormat(options.defaultFormat || DEFAULT_FORMAT), ...(page?.format || {}) },
-      options.upgradeLegacyDefaultFont
-    )
-  };
+  return StateCore.normalizePage(page, fallback, options);
 }
 
 function pageVersionSnapshot(page, fallbackTitle, timestamp = nowIso()) {
-  return {
-    id: id("version"),
-    createdAt: timestamp,
-    title: page.title || fallbackTitle,
-    content: page.content,
-    contentHtml: page.contentHtml,
-    format: normalizeFormat(page.format)
-  };
+  return StateCore.pageVersionSnapshot(page, fallbackTitle, timestamp);
 }
 
 function versionHasMeaningfulContent(version) {
-  return Boolean((asText(version?.content) || htmlToText(version?.contentHtml || "")).trim());
+  return StateCore.versionHasMeaningfulContent(version);
 }
 
 function normalizePageVersionHistory(history, page, fallbackTitle) {
-  const normalized = (Array.isArray(history) ? history : [])
-    .filter(entry => entry && typeof entry === "object")
-    .map((entry, index) => {
-      const contentHtml = asText(entry.contentHtml) || textToHtml(asText(entry.content) || page.content);
-      const content = asText(entry.content) || htmlToText(contentHtml);
-      return {
-        id: asText(entry.id) || id("version"),
-        createdAt: asText(entry.createdAt) || page.updatedAt || page.createdAt || nowIso(),
-        title: asText(entry.title) || page.title || fallbackTitle,
-        content,
-        contentHtml,
-        format: normalizeFormat({ ...page.format, ...(entry.format || {}) })
-      };
-    });
-
-  while (normalized.length && !versionHasMeaningfulContent(normalized[0])) {
-    normalized.shift();
-  }
-
-  if (!normalized.length) {
-    const current = pageVersionSnapshot(page, fallbackTitle, page.updatedAt || nowIso());
-    if (versionHasMeaningfulContent(current)) normalized.push(current);
-  }
-
-  return sortVersionHistoryByCreatedAt(normalized);
+  return StateCore.normalizePageVersionHistory(history, page, fallbackTitle);
 }
 
 function normalizeDraftVersionHistory(history, draft) {
   return normalizePageVersionHistory(history, draft, draft?.title || "Untitled draft");
 }
 
-function normalizeIndexArray(values, maxLength) {
-  return [...new Set((Array.isArray(values) ? values : [])
-    .map(value => Number(value))
-    .filter(value => Number.isInteger(value) && value >= 0 && value < maxLength))]
-    .sort((a, b) => a - b);
-}
-
-function normalizeIdArray(values, validIds) {
-  return [...new Set((Array.isArray(values) ? values : [])
-    .map(value => asText(value))
-    .filter(value => validIds.has(value)))];
-}
-
-function normalizeNotesPanePercents(values, maxLength) {
-  const normalized = {};
-  if (!values || typeof values !== "object" || Array.isArray(values)) return normalized;
-
-  Object.entries(values).forEach(([index, value]) => {
-    const numericIndex = Number(index);
-    const numericValue = Number(value);
-    if (
-      Number.isInteger(numericIndex) &&
-      numericIndex >= 0 &&
-      numericIndex < maxLength &&
-      Number.isFinite(numericValue)
-    ) {
-      normalized[numericIndex] = Math.min(90, Math.max(10, numericValue));
-    }
-  });
-  return normalized;
-}
-
-function normalizePagePanePercents(values, drafts) {
-  const normalized = {};
-  if (!values || typeof values !== "object" || Array.isArray(values)) return normalized;
-
-  const validKeys = new Set([
-    "story",
-    ...drafts.map(draft => `draft:${draft.id}:content`)
-  ]);
-  Object.entries(values).forEach(([key, value]) => {
-    const numericValue = Number(value);
-    if (validKeys.has(key) && Number.isFinite(numericValue)) {
-      normalized[key] = Math.min(1000, Math.max(MIN_PAGE_PANE_PERCENT, numericValue));
-    }
-  });
-  return normalized;
-}
-
-function draftIndexById(drafts, draftId) {
-  return drafts.findIndex(draft => draft.id === draftId);
-}
-
-function draftRefFromViewState(drafts, draftId, draftIndex) {
-  const byIdIndex = draftIndexById(drafts, asText(draftId));
-  const byIndex = Number(draftIndex);
-  const normalizedIndex = byIdIndex >= 0
-    ? byIdIndex
-    : Number.isInteger(byIndex) && byIndex >= 0 && byIndex < drafts.length
-      ? byIndex
-      : 0;
-  return {
-    draft: drafts[normalizedIndex] || null,
-    index: normalizedIndex
-  };
-}
-
-function normalizeEditorSelection(selection) {
-  if (!selection || typeof selection !== "object" || Array.isArray(selection)) return null;
-
-  const normalized = {};
-  ["startOffset", "endOffset", "startTextOffset", "endTextOffset", "scrollTop", "scrollLeft"].forEach(field => {
-    const value = Number(selection[field]);
-    if (Number.isFinite(value)) normalized[field] = Math.max(0, value);
-  });
-
-  ["startPath", "endPath"].forEach(field => {
-    if (!Array.isArray(selection[field])) return;
-    normalized[field] = selection[field]
-      .map(value => Number(value))
-      .filter(value => Number.isInteger(value) && value >= 0);
-  });
-
-  return Object.keys(normalized).length ? normalized : null;
-}
-
-function validEditorKeys(drafts) {
-  return new Set([
-    "story",
-    ...drafts.flatMap(draft => [
-      `draft:${draft.id}:content`,
-      `draft:${draft.id}:notes`
-    ])
-  ]);
-}
-
-function normalizeEditorSelections(selections, drafts) {
-  const normalized = {};
-  if (!selections || typeof selections !== "object" || Array.isArray(selections)) return normalized;
-
-  const keys = validEditorKeys(drafts);
-  Object.entries(selections).forEach(([key, selection]) => {
-    if (!keys.has(key)) return;
-    const normalizedSelection = normalizeEditorSelection(selection);
-    if (normalizedSelection) normalized[key] = normalizedSelection;
-  });
-  return normalized;
-}
-
-function normalizeViewState(viewState, drafts) {
-  if (!viewState || typeof viewState !== "object" || Array.isArray(viewState)) return null;
-
-  const validDraftIds = new Set(drafts.map(draft => draft.id));
-  const displayedDraftIndexes = normalizeIndexArray(viewState.displayedDraftIndexes, drafts.length);
-  const displayedDraftIds = normalizeIdArray(viewState.displayedDraftIds, validDraftIds);
-  displayedDraftIndexes.forEach(index => {
-    const draftId = drafts[index]?.id;
-    if (draftId && !displayedDraftIds.includes(draftId)) displayedDraftIds.push(draftId);
-  });
-
-  const collapsedNotesIndexes = normalizeIndexArray(viewState.collapsedNotesIndexes, drafts.length);
-  const collapsedNotesIds = normalizeIdArray(viewState.collapsedNotesIds, validDraftIds);
-  collapsedNotesIndexes.forEach(index => {
-    const draftId = drafts[index]?.id;
-    if (draftId && !collapsedNotesIds.includes(draftId)) collapsedNotesIds.push(draftId);
-  });
-
-  const selectedRef = draftRefFromViewState(drafts, viewState.selectedDraftId, viewState.selectedDraftIndex);
-  const activeRef = draftRefFromViewState(
-    drafts,
-    viewState.activeDraftId || viewState.selectedDraftId,
-    viewState.activeDraftIndex ?? viewState.selectedDraftIndex
-  );
-  const activeArea = viewState.activeArea === "draft" && activeRef.draft ? "draft" : "story";
-  const activePageType = activeArea === "story" ? "story" : viewState.activePageType === "notes" ? "notes" : "content";
-  const activeEditorKey = activeArea === "story"
-    ? "story"
-    : `draft:${activeRef.draft.id}:${activePageType === "notes" ? "notes" : "content"}`;
-  const pagesOnScreen = Math.min(4, Math.max(1, Number(viewState.pagesOnScreen) || 2));
-
-  return {
-    version: VIEW_STATE_VERSION,
-    updatedAt: viewState.updatedAt || nowIso(),
-    hasStoredDisplaySelection: Boolean(viewState.hasStoredDisplaySelection),
-    displayedStory: Boolean(viewState.displayedStory),
-    displayedDraftIndexes,
-    displayedDraftIds,
-    collapsedNotesIndexes,
-    collapsedNotesIds,
-    notesPanePercents: normalizeNotesPanePercents(viewState.notesPanePercents, drafts.length),
-    pagePanePercents: normalizePagePanePercents(viewState.pagePanePercents, drafts),
-    pagesOnScreen,
-    selectedDraftId: selectedRef.draft?.id || null,
-    selectedDraftIndex: selectedRef.index,
-    activeDraftId: activeRef.draft?.id || null,
-    activeDraftIndex: activeRef.index,
-    activePageType,
-    activeEditorKey,
-    editorSelections: normalizeEditorSelections(viewState.editorSelections, drafts),
-    activeArea,
-    showChanges: Boolean(viewState.showChanges),
-    compareMode: viewState.compareMode === "consecutive" ? "consecutive" : "first"
-  };
-}
-
-function createDraft(index, content = "") {
-  const createdAt = nowIso();
-  return {
-    id: id("draft"),
-    title: `Draft ${index}`,
-    createdAt,
-    updatedAt: createdAt,
-    content,
-    contentHtml: textToHtml(content),
-    format: { ...DEFAULT_FORMAT },
-    notes: {
-      id: id("notes"),
-      title: `Draft ${index} Notes`,
-      createdAt,
-      updatedAt: createdAt,
-      content: "",
-      contentHtml: "",
-      format: { ...DEFAULT_FORMAT }
-    }
-  };
-}
-
 function defaultState() {
-  const createdAt = nowIso();
-  return {
-    version: 1,
-    formatDefaultVersion: FORMAT_DEFAULT_VERSION,
-    defaultFormat: { ...DEFAULT_FORMAT },
-    createdAt,
-    updatedAt: createdAt,
-    initialNotes: {
-      id: "initial-notes",
-      title: PROJECT_NOTES_TITLE,
-      createdAt,
-      updatedAt: createdAt,
-      content: "",
-      contentHtml: "",
-      format: { ...DEFAULT_FORMAT }
-    },
-    drafts: [createDraft(1)]
-  };
+  return StateCore.defaultState();
 }
 
 function normalizeState(input, options = {}) {
-  const fallback = defaultState();
-  const raw = input && typeof input === "object" ? input : fallback;
-  const createdAt = raw.createdAt || fallback.createdAt;
-  const drafts = Array.isArray(raw.drafts) && raw.drafts.length ? raw.drafts : fallback.drafts;
-  const upgradeLegacyDefaultFont = raw.formatDefaultVersion !== FORMAT_DEFAULT_VERSION;
-  const defaultFormat = upgradeLegacyDefaultFormat(currentDefaultFormat(raw), upgradeLegacyDefaultFont);
-  const normalizedDrafts = drafts.map((draft, index) => {
-    const draftNumber = index + 1;
-    const draftCreatedAt = draft?.createdAt || nowIso();
-    const normalizedDraft = normalizePage(draft, {
-      id: draft?.id || id("draft"),
-      title: draft?.title || `Draft ${draftNumber}`,
-      createdAt: draftCreatedAt,
-      updatedAt: draft?.updatedAt || draftCreatedAt,
-      content: ""
-    }, { upgradeLegacyDefaultFont, defaultFormat });
-    const normalized = {
-      ...normalizedDraft,
-      notes: normalizePage(draft?.notes, {
-        id: draft?.notes?.id || id("notes"),
-        title: draft?.notes?.title || `Draft ${draftNumber} Notes`,
-        createdAt: draft?.notes?.createdAt || draftCreatedAt,
-        updatedAt: draft?.notes?.updatedAt || draft?.notes?.createdAt || draftCreatedAt,
-        content: ""
-      }, { upgradeLegacyDefaultFont, defaultFormat })
-    };
-    normalized.versionHistory = normalizeDraftVersionHistory(draft?.versionHistory, normalized);
-    return normalized;
-  });
-
-  const initialNotes = normalizePage(raw.initialNotes, {
-    id: raw.initialNotes?.id || "initial-notes",
-    title: raw.initialNotes?.title || PROJECT_NOTES_TITLE,
-    createdAt: raw.initialNotes?.createdAt || createdAt,
-    updatedAt: raw.initialNotes?.updatedAt || raw.initialNotes?.createdAt || createdAt,
-    content: ""
-  }, { upgradeLegacyDefaultFont, defaultFormat });
-  initialNotes.versionHistory = normalizePageVersionHistory(raw.initialNotes?.versionHistory, initialNotes, PROJECT_NOTES_TITLE);
-
-  const normalized = {
-    version: 1,
-    formatDefaultVersion: FORMAT_DEFAULT_VERSION,
-    defaultFormat,
-    createdAt,
-    updatedAt: options.touch ? nowIso() : raw.updatedAt || createdAt,
-    initialNotes,
-    drafts: normalizedDrafts
-  };
-  const viewState = normalizeViewState(raw.viewState, normalizedDrafts);
-  if (viewState) normalized.viewState = viewState;
-  return normalized;
+  return StateCore.normalizeState(input, options);
 }
 
 function formatDate(iso) {
@@ -556,54 +173,11 @@ function formatDate(iso) {
 }
 
 function wordCountForText(text) {
-  const matches = asText(text).match(/[\p{L}\p{N}]+(?:[\u0027\u2019/-][\p{L}\p{N}]+)*|\*+/gu);
-  return matches ? matches.length : 0;
-}
-
-function pageBlock(title, createdAt, content, metadata = {}) {
-  const body = asText(content).trimEnd();
-  const lines = [
-    title,
-    `Created: ${formatDate(createdAt)}`
-  ];
-  if (metadata.updatedAt) lines.push(`Last edited: ${formatDate(metadata.updatedAt)}`);
-  if (Number.isFinite(metadata.wordCount)) {
-    lines.push(`Word count: ${Number(metadata.wordCount).toLocaleString("en-GB")}`);
-  }
-  lines.push("", body || "[No text yet]");
-  return lines.join("\n");
-}
-
-function draftBlockMetadata(draft) {
-  return {
-    updatedAt: draft.updatedAt || draft.createdAt,
-    wordCount: wordCountForText(draft.content)
-  };
-}
-
-function projectNotesBlockMetadata(state) {
-  return {
-    updatedAt: state.initialNotes.updatedAt || state.initialNotes.createdAt
-  };
+  return StateCore.wordCountForText(text);
 }
 
 function formatExport(state) {
-  const pages = [
-    pageBlock(
-      PROJECT_NOTES_TITLE,
-      state.initialNotes.createdAt,
-      state.initialNotes.content,
-      projectNotesBlockMetadata(state)
-    )
-  ];
-
-  state.drafts.forEach((draft, index) => {
-    const title = draft.title || `Draft ${index + 1}`;
-    pages.push(pageBlock(title, draft.createdAt, draft.content, draftBlockMetadata(draft)));
-    pages.push(pageBlock(`${title} Notes`, draft.notes.createdAt, draft.notes.content));
-  });
-
-  return `${pages.join("\n\n---\n\n")}\n`;
+  return StateCore.formatExport(state);
 }
 
 function ensureDataDir() {
@@ -672,10 +246,9 @@ function writeVersionHistoryFolderPath(folderPath) {
 
   const resolvedPath = path.resolve(folderPath);
   fs.mkdirSync(resolvedPath, { recursive: true });
-  fs.writeFileSync(
+  writeAtomicText(
     VERSION_HISTORY_FOLDER_FILE,
-    `${JSON.stringify({ folderPath: resolvedPath, updatedAt: nowIso() }, null, 2)}\n`,
-    "utf8"
+    `${JSON.stringify({ folderPath: resolvedPath, updatedAt: nowIso() }, null, 2)}\n`
   );
   return resolvedPath;
 }
@@ -711,6 +284,22 @@ function sameHistoryPath(left, right) {
   return process.platform === "win32"
     ? leftPath.toLowerCase() === rightPath.toLowerCase()
     : leftPath === rightPath;
+}
+
+function pathIsInsideFolder(filePath, folderPath) {
+  if (!filePath || !folderPath) return false;
+  const relative = path.relative(path.resolve(folderPath), path.resolve(filePath));
+  return relative === "" || (Boolean(relative) && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function versionHistoryCacheKey(rootFolderPath, source) {
+  const sourcePath = source.filePath ? path.resolve(source.filePath) : "";
+  const normalizedSourcePath = process.platform === "win32" ? sourcePath.toLowerCase() : sourcePath;
+  return JSON.stringify([
+    path.resolve(rootFolderPath),
+    normalizedSourcePath,
+    normalizedHistoryName(source.fileName)
+  ]);
 }
 
 function safeHistoryBaseName(sourceName) {
@@ -760,6 +349,39 @@ function historySummaryBackupFolderPath() {
   return folderPath ? path.join(folderPath, "version history summaries") : null;
 }
 
+function resolveGeneratedReportPath(value) {
+  const requestedPath = asText(value).trim();
+  if (!requestedPath) throw new Error("Missing report path");
+
+  const reportPath = path.resolve(requestedPath);
+  const summaryFolderPath = historySummaryBackupFolderPath();
+  if (!summaryFolderPath) {
+    throw new BackupFolderMissingError(readVersionHistoryFolderPath() || "No backup folder selected");
+  }
+  if (!pathIsInsideFolder(reportPath, summaryFolderPath)) {
+    throw new Error("Report path is outside the version history summaries folder.");
+  }
+
+  const reportName = path.basename(reportPath);
+  if (
+    !reportName.endsWith(CUT_HISTORY_REPORT_SUFFIX) &&
+    !reportName.endsWith(FULL_VERSION_HISTORY_REPORT_SUFFIX)
+  ) {
+    throw new Error("Report path is not an allowed generated report.");
+  }
+
+  let stats;
+  try {
+    stats = fs.statSync(reportPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") throw new Error("Report file does not exist.");
+    throw error;
+  }
+  if (!stats.isFile()) throw new Error("Report path is not a file.");
+
+  return reportPath;
+}
+
 function expectedVersionHistoryFilePath(options = {}) {
   const folderPath = versionHistoryJsonFolderPath({
     requireExistingRoot: Boolean(options.requireExistingRoot)
@@ -784,6 +406,25 @@ function versionHistoryPayloadMatchesSource(payload, source) {
   return normalizedHistoryName(payload.sourceFileName) === normalizedHistoryName(source.fileName);
 }
 
+function rememberVersionHistoryFilePath(rootFolderPath, source, filePath) {
+  if (!rootFolderPath || !source || !filePath) return;
+  versionHistoryPathCache.set(versionHistoryCacheKey(rootFolderPath, source), path.resolve(filePath));
+}
+
+function cachedVersionHistoryFilePath(rootFolderPath, source) {
+  if (!rootFolderPath || !source) return null;
+  const cacheKey = versionHistoryCacheKey(rootFolderPath, source);
+  const cachedPath = versionHistoryPathCache.get(cacheKey);
+  if (!cachedPath) return null;
+
+  if (fs.existsSync(cachedPath) && versionHistoryPayloadMatchesSource(parseVersionHistoryFile(cachedPath), source)) {
+    return cachedPath;
+  }
+
+  versionHistoryPathCache.delete(cacheKey);
+  return null;
+}
+
 function findVersionHistoryFilePath(options = {}) {
   const rootFolderPath = existingVersionHistoryFolderPath();
   const jsonFolderPath = versionHistoryJsonFolderPath();
@@ -791,7 +432,13 @@ function findVersionHistoryFilePath(options = {}) {
 
   const source = historySourceInfo(options);
   const expectedPath = expectedVersionHistoryFilePath(source);
-  if (expectedPath && fs.existsSync(expectedPath)) return expectedPath;
+  if (expectedPath && fs.existsSync(expectedPath)) {
+    rememberVersionHistoryFilePath(rootFolderPath, source, expectedPath);
+    return expectedPath;
+  }
+
+  const cachedPath = cachedVersionHistoryFilePath(rootFolderPath, source);
+  if (cachedPath) return cachedPath;
 
   const searchFolders = [...new Set([
     jsonFolderPath,
@@ -805,7 +452,10 @@ function findVersionHistoryFilePath(options = {}) {
         if (!entry.isFile() || !entry.name.endsWith(VERSION_HISTORY_FILE_SUFFIX)) continue;
         const filePath = path.join(folderPath, entry.name);
         const payload = parseVersionHistoryFile(filePath);
-        if (versionHistoryPayloadMatchesSource(payload, source)) return filePath;
+        if (versionHistoryPayloadMatchesSource(payload, source)) {
+          rememberVersionHistoryFilePath(rootFolderPath, source, filePath);
+          return filePath;
+        }
       }
     } catch {
       // Missing folders are expected until the first save after folder selection.
@@ -816,86 +466,35 @@ function findVersionHistoryFilePath(options = {}) {
 }
 
 function versionHistorySignature(version) {
-  return JSON.stringify({
-    title: asText(version?.title),
-    content: asText(version?.content),
-    contentHtml: asText(version?.contentHtml),
-    format: normalizeFormat(version?.format || {})
-  });
+  return StateCore.pageVersionSignature(version);
 }
 
 function versionHistoryTime(version) {
-  const time = Date.parse(version?.createdAt || "");
-  return Number.isNaN(time) ? null : time;
+  return StateCore.versionHistoryTime(version);
 }
 
 function sortVersionHistoryByCreatedAt(history) {
-  return (Array.isArray(history) ? history : []).slice().sort((left, right) => {
-    const leftTime = versionHistoryTime(left);
-    const rightTime = versionHistoryTime(right);
-    if (leftTime === null || rightTime === null) return 0;
-    return leftTime - rightTime;
-  });
+  return StateCore.sortVersionHistoryByCreatedAt(history);
 }
 
 function latestVersionHistoryEntry(history) {
-  let latest = null;
-  let latestTime = -Infinity;
-  (Array.isArray(history) ? history : []).forEach(version => {
-    const time = versionHistoryTime(version);
-    if (time === null || time < latestTime) return;
-    latest = version;
-    latestTime = time;
-  });
-  return latest;
+  return StateCore.latestVersionHistoryEntry(history);
 }
 
 function applyVersionHistoryEntryToPage(page, version, fallbackTitle) {
-  if (!page || !version) return;
-
-  const contentHtml = asText(version.contentHtml) || textToHtml(asText(version.content));
-  const content = asText(version.content) || htmlToText(contentHtml);
-  page.title = asText(version.title) || page.title || fallbackTitle;
-  page.content = content;
-  page.contentHtml = contentHtml;
-  page.format = normalizeFormat(version.format || page.format || {});
-  page.updatedAt = asText(version.createdAt) || page.updatedAt || page.createdAt || nowIso();
+  return StateCore.applyVersionHistoryEntryToPage(page, version, fallbackTitle);
 }
 
 function currentPageHistorySnapshot(page, fallbackTitle) {
-  return pageVersionSnapshot(page, fallbackTitle, page.updatedAt || page.createdAt || nowIso());
+  return StateCore.currentPageHistorySnapshot(page, fallbackTitle);
 }
 
 function addCurrentPageToHistoryIfMissing(history, page, fallbackTitle) {
-  const current = currentPageHistorySnapshot(page, fallbackTitle);
-  if (!versionHasMeaningfulContent(current)) return history;
-
-  const currentSignature = versionHistorySignature(current);
-  if (history.some(version => versionHistorySignature(version) === currentSignature)) return history;
-  return sortVersionHistoryByCreatedAt([...history, current]);
+  return StateCore.addCurrentPageToHistoryIfMissing(history, page, fallbackTitle);
 }
 
 function promotePageToNewestHistoryVersion(page, fallbackTitle) {
-  if (!page) return false;
-
-  let history = normalizePageVersionHistory(page.versionHistory, page, fallbackTitle);
-  const latest = latestVersionHistoryEntry(history);
-  const latestTime = versionHistoryTime(latest);
-  const currentTime = versionHistoryTime({ createdAt: page.updatedAt || page.createdAt });
-  if (!latest || latestTime === null || (currentTime !== null && latestTime <= currentTime)) {
-    page.versionHistory = history;
-    return false;
-  }
-
-  const currentSignature = versionHistorySignature(currentPageHistorySnapshot(page, fallbackTitle));
-  const latestSignature = versionHistorySignature(latest);
-  if (currentSignature !== latestSignature) {
-    history = addCurrentPageToHistoryIfMissing(history, page, fallbackTitle);
-  }
-
-  applyVersionHistoryEntryToPage(page, latest, fallbackTitle);
-  page.versionHistory = history;
-  return true;
+  return StateCore.promotePageToNewestHistoryVersion(page, fallbackTitle);
 }
 
 function mergePageVersionHistories(existingHistory, incomingHistory, page, fallbackTitle) {
@@ -1023,29 +622,32 @@ function versionHistoryPayloadFromState(state, options = {}) {
 }
 
 function stateWithoutVersionHistory(state) {
-  const copy = JSON.parse(JSON.stringify(state));
-  if (copy.initialNotes) delete copy.initialNotes.versionHistory;
-  copy.drafts?.forEach(draft => {
-    delete draft.versionHistory;
-  });
-  return copy;
+  return StateCore.stateWithoutVersionHistory(state);
 }
 
 function persistVersionHistory(state, options = {}) {
-  const folderPath = versionHistoryJsonFolderPath({ requireExistingRoot: true });
+  const write = versionHistoryTransactionWrite(state, options);
+  if (!write) return null;
+  writeTransactionalTextFiles([write], options);
+  return write.filePath;
+}
+
+function versionHistoryTransactionWrite(state, options = {}) {
+  const rootFolderPath = requireVersionHistoryFolderPath();
+  const folderPath = rootFolderPath ? path.join(rootFolderPath, "json") : null;
   if (!folderPath) return null;
 
   fs.mkdirSync(folderPath, { recursive: true });
   const filePath = expectedVersionHistoryFilePath({ ...options, requireExistingRoot: true });
+  const source = historySourceInfo(options);
   const stateToWrite = options.mergeExisting === false
     ? state
     : applyExternalVersionHistory(state, options).state;
-  fs.writeFileSync(
+  return {
     filePath,
-    `${JSON.stringify(versionHistoryPayloadFromState(stateToWrite, options), null, 2)}\n`,
-    "utf8"
-  );
-  return filePath;
+    content: `${JSON.stringify(versionHistoryPayloadFromState(stateToWrite, options), null, 2)}\n`,
+    onCommit: () => rememberVersionHistoryFilePath(rootFolderPath, source, filePath)
+  };
 }
 
 function textForHistoryVersion(version) {
@@ -1148,1003 +750,12 @@ function contextAfterChange(source, end) {
   return truncateContext(context, "after");
 }
 
-function isDiffSequenceWordText(text) {
-  return /^[\p{L}\p{N}]+$/u.test(text || "");
-}
-
-function isDiffSequenceWhitespaceText(text) {
-  return /^\s+$/u.test(text || "");
-}
-
-function previousSameWordIndex(parts, index) {
-  for (let current = index - 1; current >= 0; current -= 1) {
-    if (parts[current].type === "same" && isDiffSequenceWordText(parts[current].text)) return current;
-  }
-  return -1;
-}
-
-function nextSameWordIndex(parts, index) {
-  for (let current = index + 1; current < parts.length; current += 1) {
-    if (parts[current].type === "same" && isDiffSequenceWordText(parts[current].text)) return current;
-    if (parts[current].type !== "same") return -1;
-  }
-  return -1;
-}
-
-function changedWordCounts(parts, start, end) {
-  const counts = { added: 0, removed: 0 };
-  for (let index = start; index < end; index += 1) {
-    const part = parts[index];
-    if ((part.type === "added" || part.type === "removed") && isDiffSequenceWordText(part.text)) {
-      counts[part.type] += 1;
-    }
-  }
-  return counts;
-}
-
-function shouldCoalesceReplacementSegment(segment) {
-  const counts = changedWordCounts(segment, 0, segment.length);
-  return counts.added >= 2 && counts.removed >= 2 && counts.added + counts.removed <= 12;
-}
-
-function isChangedDiffPart(part) {
-  return part?.type === "added" || part?.type === "removed";
-}
-
-function sameWordCount(parts) {
-  return parts.filter(part => part.type === "same" && isDiffSequenceWordText(part.text)).length;
-}
-
-function wordTokenCount(parts) {
-  return parts.filter(part => isDiffSequenceWordText(part.text)).length;
-}
-
-function coerceDiffPartType(part, type) {
-  return {
-    ...part,
-    type,
-    beforeIndex: type === "removed" ? part.beforeIndex : undefined,
-    afterIndex: type === "added" ? part.afterIndex : undefined
-  };
-}
-
-function coalesceReplacementSegment(segment) {
-  const removed = [];
-  const added = [];
-  const neutral = [];
-  let sawRemoved = false;
-  let sawAdded = false;
-
-  segment.forEach(part => {
-    if (part.type === "removed") {
-      removed.push(part);
-      if (isDiffSequenceWordText(part.text)) sawRemoved = true;
-      return;
-    }
-    if (part.type === "added") {
-      added.push(part);
-      if (isDiffSequenceWordText(part.text)) sawAdded = true;
-      return;
-    }
-    if (part.type === "same" && isDiffSequenceWhitespaceText(part.text)) {
-      if (sawRemoved) removed.push(coerceDiffPartType(part, "removed"));
-      if (sawAdded) added.push(coerceDiffPartType(part, "added"));
-      return;
-    }
-    neutral.push(part);
-  });
-
-  return [...removed, ...added, ...neutral];
-}
-
-function coalesceInterleavedReplacementWindow(segment) {
-  const removed = [];
-  const added = [];
-
-  segment.forEach(part => {
-    if (part.type === "removed") {
-      removed.push(part);
-      return;
-    }
-    if (part.type === "added") {
-      added.push(part);
-      return;
-    }
-    if (part.type !== "same") return;
-    removed.push(coerceDiffPartType(part, "removed"));
-    added.push(coerceDiffPartType(part, "added"));
-  });
-
-  return [...removed, ...added];
-}
-
-function shouldCoalesceInterleavedReplacementWindow(segment) {
-  const counts = changedWordCounts(segment, 0, segment.length);
-  const anchors = sameWordCount(segment);
-  if (counts.added < 3 || counts.removed < 3) return false;
-
-  const words = wordTokenCount(segment);
-  if (words > 18) return false;
-
-  const changedWords = counts.added + counts.removed;
-  if (!anchors) return changedWords / words >= 0.75;
-  if (anchors > 5) return false;
-  return changedWords / words >= 0.55;
-}
-
-function changedWordTypes(segment) {
-  return segment
-    .filter(part => isChangedDiffPart(part) && isDiffSequenceWordText(part.text))
-    .map(part => part.type);
-}
-
-function changedWordInfos(segment) {
-  return segment
-    .map((part, index) => ({ part, index }))
-    .filter(({ part }) => isChangedDiffPart(part) && isDiffSequenceWordText(part.text))
-    .map(({ part, index }) => ({ type: part.type, index }));
-}
-
-function changedTypesAreCoalescableAlternation(types) {
-  if (types.length < 6) return false;
-
-  const added = types.filter(type => type === "added").length;
-  const removed = types.length - added;
-  if (added < 3 || removed < 3) return false;
-  return types.every((type, index) => index === 0 || type !== types[index - 1]);
-}
-
-function alternatingChangedWordRunBounds(segment) {
-  const infos = changedWordInfos(segment);
-  if (infos.length < 6) return null;
-
-  let best = null;
-  let runStart = 0;
-  const considerRun = end => {
-    const run = infos.slice(runStart, end);
-    const types = run.map(info => info.type);
-    if (!changedTypesAreCoalescableAlternation(types)) return;
-    if (!best || run.length > best.wordCount) {
-      best = {
-        start: run[0].index,
-        end: run[run.length - 1].index + 1,
-        wordCount: run.length
-      };
-    }
-  };
-
-  for (let index = 1; index <= infos.length; index += 1) {
-    if (index === infos.length || infos[index].type === infos[index - 1].type) {
-      considerRun(index);
-      runStart = index;
-    }
-  }
-
-  return best;
-}
-
-function coalesceAlternatingChangedWordRun(segment) {
-  const bounds = alternatingChangedWordRunBounds(segment);
-  if (!bounds) return segment;
-  return [
-    ...segment.slice(0, bounds.start),
-    ...coalesceInterleavedReplacementWindow(segment.slice(bounds.start, bounds.end)),
-    ...coalesceAlternatingChangedWordRun(segment.slice(bounds.end))
-  ];
-}
-
-function coalesceAlternatingChangedWordSubsegments(segment) {
-  const coalesced = [];
-  let start = 0;
-
-  for (let index = 0; index <= segment.length; index += 1) {
-    const isBoundary = index === segment.length || segment[index].text === "\n";
-    if (!isBoundary) continue;
-    coalesced.push(...coalesceAlternatingChangedWordRun(segment.slice(start, index)));
-    if (index < segment.length) coalesced.push(segment[index]);
-    start = index + 1;
-  }
-
-  return coalesced;
-}
-
-function coalesceAlternatingChangedWordSegments(parts) {
-  const coalesced = [];
-  let index = 0;
-
-  while (index < parts.length) {
-    if (parts[index].type === "same" && isDiffSequenceWordText(parts[index].text)) {
-      coalesced.push(parts[index]);
-      index += 1;
-      continue;
-    }
-
-    const segmentStart = index;
-    while (
-      index < parts.length &&
-      !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
-    ) {
-      index += 1;
-    }
-    coalesced.push(...coalesceAlternatingChangedWordSubsegments(parts.slice(segmentStart, index)));
-  }
-
-  return coalesced;
-}
-
-function coalesceInterleavedReplacementSubsegment(segment) {
-  const firstChanged = segment.findIndex(isChangedDiffPart);
-  if (firstChanged < 0) return segment;
-
-  let lastChanged = -1;
-  for (let index = segment.length - 1; index >= firstChanged; index -= 1) {
-    if (isChangedDiffPart(segment[index])) {
-      lastChanged = index;
-      break;
-    }
-  }
-
-  const replacementWindow = segment.slice(firstChanged, lastChanged + 1);
-  if (!shouldCoalesceInterleavedReplacementWindow(replacementWindow)) return segment;
-
-  return [
-    ...segment.slice(0, firstChanged),
-    ...coalesceInterleavedReplacementWindow(replacementWindow),
-    ...segment.slice(lastChanged + 1)
-  ];
-}
-
-function coalesceInterleavedReplacementSegments(parts) {
-  const coalesced = [];
-  let start = 0;
-
-  for (let index = 0; index <= parts.length; index += 1) {
-    const isBoundary = index === parts.length || parts[index].text === "\n";
-    if (!isBoundary) continue;
-    coalesced.push(...coalesceInterleavedReplacementSubsegment(parts.slice(start, index)));
-    if (index < parts.length) coalesced.push(parts[index]);
-    start = index + 1;
-  }
-
-  return coalesced;
-}
-
-function coalesceReplacementSubsegments(segment) {
-  const coalesced = [];
-  let start = 0;
-
-  for (let index = 0; index <= segment.length; index += 1) {
-    const isBoundary = index === segment.length || segment[index].text === "\n";
-    if (!isBoundary) continue;
-
-    const subsegment = segment.slice(start, index);
-    if (shouldCoalesceReplacementSegment(subsegment)) {
-      coalesced.push(...coalesceReplacementSegment(subsegment));
-    } else {
-      coalesced.push(...subsegment);
-    }
-
-    if (index < segment.length) coalesced.push(segment[index]);
-    start = index + 1;
-  }
-
-  return coalesced;
-}
-
-function coalesceReplacementSegments(parts) {
-  const coalesced = [];
-  let index = 0;
-
-  while (index < parts.length) {
-    const part = parts[index];
-    if (part.type !== "same" || !isDiffSequenceWordText(part.text)) {
-      const segmentStart = index;
-      while (
-        index < parts.length &&
-        !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
-      ) {
-        index += 1;
-      }
-      coalesced.push(...coalesceReplacementSubsegments(parts.slice(segmentStart, index)));
-      continue;
-    }
-
-    coalesced.push(part);
-    index += 1;
-
-    const segmentStart = index;
-    while (
-      index < parts.length &&
-      !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
-    ) {
-      index += 1;
-    }
-    coalesced.push(...coalesceReplacementSubsegments(parts.slice(segmentStart, index)));
-  }
-
-  return coalesced;
-}
-
-function diffPartKey(part) {
-  const marks = part?.marks || {};
-  return [
-    part?.text || "",
-    marks.bold ? "b" : "",
-    marks.italic ? "i" : "",
-    marks.underline ? "u" : "",
-    marks.strike ? "s" : ""
-  ].join("|");
-}
-
-function diffChangedTokenRun(before, after) {
-  const rows = Array.from({ length: before.length + 1 }, () => Array(after.length + 1).fill(0));
-
-  for (let i = before.length - 1; i >= 0; i -= 1) {
-    for (let j = after.length - 1; j >= 0; j -= 1) {
-      rows[i][j] = diffPartKey(before[i]) === diffPartKey(after[j])
-        ? rows[i + 1][j + 1] + 1
-        : Math.max(rows[i + 1][j], rows[i][j + 1]);
-    }
-  }
-
-  const result = [];
-  let i = 0;
-  let j = 0;
-
-  while (i < before.length && j < after.length) {
-    if (diffPartKey(before[i]) === diffPartKey(after[j])) {
-      result.push({
-        ...after[j],
-        type: "same",
-        beforeIndex: before[i].beforeIndex,
-        beforeStart: before[i].beforeStart,
-        beforeEnd: before[i].beforeEnd,
-        afterIndex: after[j].afterIndex
-      });
-      i += 1;
-      j += 1;
-    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
-      result.push(before[i]);
-      i += 1;
-    } else {
-      result.push(after[j]);
-      j += 1;
-    }
-  }
-
-  while (i < before.length) {
-    result.push(before[i]);
-    i += 1;
-  }
-  while (j < after.length) {
-    result.push(after[j]);
-    j += 1;
-  }
-
-  return result;
-}
-
-function sameDiffPartFromChangedPair(removedPart, addedPart) {
-  return {
-    ...addedPart,
-    type: "same",
-    marks: addedPart.marks || removedPart.marks || {},
-    beforeIndex: removedPart.beforeIndex,
-    beforeStart: removedPart.beforeStart,
-    beforeEnd: removedPart.beforeEnd,
-    afterIndex: addedPart.afterIndex
-  };
-}
-
-function isMeaningfulCommonChangedRun(parts) {
-  if (!parts.length) return false;
-  return parts.filter(part => isDiffSequenceWordText(part.text)).length >= 1;
-}
-
-function commonChangedPrefixLength(removed, added) {
-  let length = 0;
-  while (
-    length < removed.length &&
-    length < added.length &&
-    diffPartKey(removed[length]) === diffPartKey(added[length])
-  ) {
-    length += 1;
-  }
-  return length;
-}
-
-function commonChangedSuffixLength(removed, added, prefixLength) {
-  let length = 0;
-  while (
-    length < removed.length - prefixLength &&
-    length < added.length - prefixLength &&
-    diffPartKey(removed[removed.length - 1 - length]) === diffPartKey(added[added.length - 1 - length])
-  ) {
-    length += 1;
-  }
-  return length;
-}
-
-function restoreCommonChangedAffixes(segment) {
-  const removed = segment.filter(part => part.type === "removed");
-  const added = segment.filter(part => part.type === "added");
-  if (!removed.length || !added.length) return segment;
-
-  let prefixLength = commonChangedPrefixLength(removed, added);
-  if (!isMeaningfulCommonChangedRun(removed.slice(0, prefixLength))) prefixLength = 0;
-
-  let suffixLength = commonChangedSuffixLength(removed, added, prefixLength);
-  if (!isMeaningfulCommonChangedRun(removed.slice(removed.length - suffixLength))) suffixLength = 0;
-  if (!prefixLength && !suffixLength) return segment;
-
-  const prefix = removed
-    .slice(0, prefixLength)
-    .map((part, index) => sameDiffPartFromChangedPair(part, added[index]));
-  const suffixRemovedStart = removed.length - suffixLength;
-  const suffixAddedStart = added.length - suffixLength;
-  const suffix = removed
-    .slice(suffixRemovedStart)
-    .map((part, index) => sameDiffPartFromChangedPair(part, added[suffixAddedStart + index]));
-
-  return [
-    ...prefix,
-    ...removed.slice(prefixLength, suffixRemovedStart),
-    ...added.slice(prefixLength, suffixAddedStart),
-    ...suffix
-  ];
-}
-
-function shouldRestoreChangedTokenRun(segment) {
-  const changedParts = segment.filter(part => part.type === "added" || part.type === "removed");
-  if (!changedParts.some(part => part.type === "added")) return false;
-  if (!changedParts.some(part => part.type === "removed")) return false;
-  if (segment.some(part => part.type === "same")) return false;
-  return changedParts.every(part => !isDiffSequenceWordText(part.text));
-}
-
-function restoreIdenticalChangedTokens(parts) {
-  const restored = [];
-  let index = 0;
-
-  while (index < parts.length) {
-    if (parts[index].type === "same") {
-      restored.push(parts[index]);
-      index += 1;
-      continue;
-    }
-
-    const segmentStart = index;
-    while (index < parts.length && parts[index].type !== "same") {
-      index += 1;
-    }
-
-    const segment = parts.slice(segmentStart, index);
-    const affixRestored = restoreCommonChangedAffixes(segment);
-    if (affixRestored !== segment) {
-      restored.push(...affixRestored);
-      continue;
-    }
-    if (!shouldRestoreChangedTokenRun(segment)) {
-      restored.push(...segment);
-      continue;
-    }
-    restored.push(...diffChangedTokenRun(
-      segment.filter(part => part.type === "removed"),
-      segment.filter(part => part.type === "added")
-    ));
-  }
-
-  return restored;
-}
-
-function shouldAbsorbWeakReplacementAnchor(parts, index) {
-  const part = parts[index];
-  if (part?.type !== "same" || !isDiffSequenceWordText(part.text)) return false;
-
-  const previousIndex = previousSameWordIndex(parts, index);
-  const followingIndex = nextSameWordIndex(parts, index);
-  if (previousIndex < 0 || followingIndex < 0) return false;
-
-  const counts = changedWordCounts(parts, previousIndex + 1, index);
-  return counts.added >= 2 && counts.removed >= 2 && counts.added + counts.removed <= 10;
-}
-
-function cleanupWeakReplacementAnchors(parts) {
-  const absorbIndexes = new Set();
-
-  parts.forEach((part, index) => {
-    if (!shouldAbsorbWeakReplacementAnchor(parts, index)) return;
-    absorbIndexes.add(index);
-    for (let current = index + 1; current < parts.length; current += 1) {
-      if (parts[current].type !== "same" || !isDiffSequenceWhitespaceText(parts[current].text)) break;
-      absorbIndexes.add(current);
-    }
-  });
-
-  const absorbedParts = absorbIndexes.size ? parts.map((part, index) => {
-    if (!absorbIndexes.has(index)) return part;
-    return {
-      ...part,
-      type: "added",
-      beforeIndex: undefined
-    };
-  }) : parts;
-
-  return restoreIdenticalChangedTokens(coalesceReplacementSegments(
-    coalesceInterleavedReplacementSegments(
-      coalesceAlternatingChangedWordSegments(absorbedParts)
-    )
-  ));
-}
-
-function diffSequence(before, after) {
-  const rows = Array.from({ length: before.length + 1 }, () => Array(after.length + 1).fill(0));
-
-  for (let i = before.length - 1; i >= 0; i -= 1) {
-    for (let j = after.length - 1; j >= 0; j -= 1) {
-      rows[i][j] = before[i].key === after[j].key
-        ? rows[i + 1][j + 1] + 1
-        : Math.max(rows[i + 1][j], rows[i][j + 1]);
-    }
-  }
-
-  const result = [];
-  let i = 0;
-  let j = 0;
-
-  while (i < before.length && j < after.length) {
-    if (before[i].key === after[j].key) {
-      result.push({
-        type: "same",
-        text: after[j].text,
-        marks: after[j].marks || before[i].marks || {},
-        beforeIndex: before[i].index ?? i,
-        beforeStart: before[i].start,
-        beforeEnd: before[i].end,
-        afterIndex: after[j].index ?? j,
-        afterStart: after[j].start,
-        afterEnd: after[j].end
-      });
-      i += 1;
-      j += 1;
-    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
-      result.push({
-        type: "removed",
-        text: before[i].text,
-        marks: before[i].marks || {},
-        beforeIndex: before[i].index ?? i,
-        beforeStart: before[i].start,
-        beforeEnd: before[i].end
-      });
-      i += 1;
-    } else {
-      result.push({
-        type: "added",
-        text: after[j].text,
-        marks: after[j].marks || {},
-        afterIndex: after[j].index ?? j,
-        afterStart: after[j].start,
-        afterEnd: after[j].end
-      });
-      j += 1;
-    }
-  }
-
-  while (i < before.length) {
-    result.push({
-      type: "removed",
-      text: before[i].text,
-      marks: before[i].marks || {},
-      beforeIndex: before[i].index ?? i,
-      beforeStart: before[i].start,
-      beforeEnd: before[i].end
-    });
-    i += 1;
-  }
-  while (j < after.length) {
-    result.push({
-      type: "added",
-      text: after[j].text,
-      marks: after[j].marks || {},
-      afterIndex: after[j].index ?? j,
-      afterStart: after[j].start,
-      afterEnd: after[j].end
-    });
-    j += 1;
-  }
-
-  return cleanupWeakReplacementAnchors(result);
-}
-
 function normalizeDiffSource(text) {
-  return asText(text).replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-}
-
-function tokenizeSegment(text, marks = {}) {
-  const normalized = normalizeDiffSource(text);
-  const tokenRegex = /\n|[^\S\n]+|[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu;
-  const semanticKey = marks.whitespace ? "" : `${marks.bold ? "b" : ""}${marks.italic ? "i" : ""}${marks.underline ? "u" : ""}${marks.strike ? "s" : ""}`;
-  const tokens = [];
-  let match = tokenRegex.exec(normalized);
-
-  while (match) {
-    const token = match[0];
-    tokens.push({
-      key: /^\s+$/u.test(token) ? token : `${token}|${semanticKey}`,
-      text: token,
-      marks: { ...marks },
-      isWhitespace: /^\s+$/u.test(token),
-      start: match.index,
-      end: match.index + token.length
-    });
-    match = tokenRegex.exec(normalized);
-  }
-
-  return tokens.map((token, index) => ({ ...token, index }));
-}
-
-const DIFF_COMMON_WORDS = new Set([
-  "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from",
-  "had", "has", "have", "he", "her", "his", "i", "in", "is", "it", "its", "me",
-  "my", "not", "of", "on", "or", "our", "she", "so", "that", "the", "their",
-  "them", "then", "there", "they", "this", "to", "was", "we", "were", "with",
-  "you", "your"
-]);
-
-const DIFF_CLAUSE_STARTERS = new Set([
-  "and", "but", "or", "so", "then", "yet", "though", "although", "because",
-  "while", "when", "where", "who", "which", "that", "one", "two", "some",
-  "couple", "another", "other", "others", "going", "no", "i", "he", "she",
-  "they", "we", "it", "the", "there", "this"
-]);
-
-const DIFF_BOUNDARY_CONJUNCTIONS = new Set(["and", "but", "or", "so", "yet"]);
-const DIFF_LONG_COMMA_CLAUSE_MIN_TERMS = 4;
-const DIFF_LONG_CONJUNCTION_CLAUSE_MIN_TERMS = 4;
-
-function isDiffWordToken(token) {
-  return /^[\p{L}\p{N}]+$/u.test(token?.text || "");
-}
-
-function diffTermForToken(token) {
-  return String(token?.text || "").toLowerCase();
-}
-
-function comparableDiffTerm(term) {
-  return String(term || "").replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
-}
-
-function diffTermsMatch(left, right) {
-  if (left === right) return true;
-
-  const normalizedLeft = comparableDiffTerm(left);
-  const normalizedRight = comparableDiffTerm(right);
-  return Boolean(normalizedLeft && normalizedRight && normalizedLeft === normalizedRight);
-}
-
-function meaningfulTermsForTokens(tokens) {
-  const terms = tokens
-    .filter(isDiffWordToken)
-    .map(diffTermForToken)
-    .filter(term => term.length > 1 && !DIFF_COMMON_WORDS.has(term));
-  if (terms.length) return terms;
-  return tokens
-    .filter(isDiffWordToken)
-    .map(diffTermForToken)
-    .filter(term => term.length > 1);
-}
-
-function isDiffClauseDashToken(token) {
-  const text = token?.text || "";
-  return text === "\u2014" || text === "\u2013";
-}
-
-function splitDiffBlocks(tokens) {
-  const blocks = [];
-  let current = [];
-  let pendingSentenceBoundary = false;
-  const closingPunctuation = new Set([")", "]", "}", "\"", "'", "\u201d", "\u2019"]);
-
-  const flush = () => {
-    if (!current.length) return;
-    if (current.some(token => String(token.text || "").trim() || token.text === "\n")) {
-      blocks.push(current);
-    }
-    current = [];
-    pendingSentenceBoundary = false;
-  };
-
-  const shouldSplitAfterComma = index => {
-    let nextWord = "";
-    const clauseTokens = [];
-    for (let nextIndex = index + 1; nextIndex < tokens.length; nextIndex += 1) {
-      const nextToken = tokens[nextIndex];
-      if (nextToken.text === "\n") return true;
-      if (/[.!?:;]/u.test(nextToken.text || "") || nextToken.text === "," || isDiffClauseDashToken(nextToken)) break;
-      clauseTokens.push(nextToken);
-      if (/^\s+$/u.test(nextToken.text || "")) continue;
-      if (!isDiffWordToken(nextToken)) break;
-      if (!nextWord) nextWord = diffTermForToken(nextToken);
-    }
-    return Boolean(
-      nextWord &&
-      (
-        DIFF_CLAUSE_STARTERS.has(nextWord) ||
-        meaningfulTermsForTokens(clauseTokens).length >= DIFF_LONG_COMMA_CLAUSE_MIN_TERMS
-      )
-    );
-  };
-
-  const shouldSplitAfterConjunction = index => {
-    if (!isDiffWordToken(tokens[index])) return false;
-    if (!DIFF_BOUNDARY_CONJUNCTIONS.has(diffTermForToken(tokens[index]))) return false;
-
-    let nextWord = "";
-    const clauseTokens = [];
-    for (let nextIndex = index + 1; nextIndex < tokens.length; nextIndex += 1) {
-      const nextToken = tokens[nextIndex];
-      if (nextToken.text === "\n") break;
-      if (/[.!?:;]/u.test(nextToken.text || "") || nextToken.text === "," || isDiffClauseDashToken(nextToken)) break;
-      clauseTokens.push(nextToken);
-      if (/^\s+$/u.test(nextToken.text || "")) continue;
-      if (!isDiffWordToken(nextToken)) break;
-      if (!nextWord) nextWord = diffTermForToken(nextToken);
-    }
-    return Boolean(
-      nextWord &&
-      meaningfulTermsForTokens(clauseTokens).length >= DIFF_LONG_CONJUNCTION_CLAUSE_MIN_TERMS
-    );
-  };
-
-  tokens.forEach((token, index) => {
-    const isWhitespace = /^\s+$/u.test(token.text || "");
-    if (token.text === "(" && current.some(currentToken => String(currentToken.text || "").trim())) flush();
-    if (pendingSentenceBoundary && !isWhitespace && !closingPunctuation.has(token.text)) flush();
-
-    current.push(token);
-    if (token.text === "\n") {
-      flush();
-    } else if (
-      /[.!?:;]/u.test(token.text || "") ||
-      isDiffClauseDashToken(token) ||
-      (token.text === "," && shouldSplitAfterComma(index)) ||
-      shouldSplitAfterConjunction(index)
-    ) {
-      pendingSentenceBoundary = true;
-    }
-  });
-
-  flush();
-  return blocks;
-}
-
-function blockSimilarity(beforeBlock, afterBlock) {
-  const beforeTerms = meaningfulTermsForTokens(beforeBlock);
-  const afterTerms = meaningfulTermsForTokens(afterBlock);
-  if (!beforeTerms.length || !afterTerms.length) return 0;
-
-  const availableBeforeTerms = [...beforeTerms];
-  let shared = 0;
-  afterTerms.forEach(term => {
-    const matchedIndex = availableBeforeTerms.findIndex(beforeTerm => diffTermsMatch(beforeTerm, term));
-    if (matchedIndex < 0) return;
-    shared += 1;
-    availableBeforeTerms.splice(matchedIndex, 1);
-  });
-  if (!shared) return 0;
-  return (2 * shared) / (beforeTerms.length + afterTerms.length);
-}
-
-function shouldAlignBlocks(beforeBlock, afterBlock) {
-  const beforeTerms = meaningfulTermsForTokens(beforeBlock);
-  const afterTerms = meaningfulTermsForTokens(afterBlock);
-  const shorterLength = Math.min(beforeTerms.length, afterTerms.length);
-  if (!shorterLength) return false;
-
-  const similarity = blockSimilarity(beforeBlock, afterBlock);
-  const threshold = shorterLength <= 2 ? 0.5 : shorterLength <= 3 ? 0.42 : 0.38;
-  return similarity >= threshold;
-}
-
-function alignDiffBlocks(beforeBlocks, afterBlocks) {
-  const rows = Array.from({ length: beforeBlocks.length + 1 }, () => Array(afterBlocks.length + 1).fill(0));
-  const similarities = Array.from({ length: beforeBlocks.length }, () => Array(afterBlocks.length).fill(0));
-
-  for (let i = beforeBlocks.length - 1; i >= 0; i -= 1) {
-    for (let j = afterBlocks.length - 1; j >= 0; j -= 1) {
-      const similarity = shouldAlignBlocks(beforeBlocks[i], afterBlocks[j])
-        ? blockSimilarity(beforeBlocks[i], afterBlocks[j])
-        : 0;
-      similarities[i][j] = similarity;
-      rows[i][j] = Math.max(
-        rows[i + 1][j],
-        rows[i][j + 1],
-        similarity ? similarity + rows[i + 1][j + 1] : 0
-      );
-    }
-  }
-
-  const pairs = [];
-  let i = 0;
-  let j = 0;
-  while (i < beforeBlocks.length && j < afterBlocks.length) {
-    const similarity = similarities[i][j];
-    const matchScore = similarity ? similarity + rows[i + 1][j + 1] : -1;
-    if (similarity && matchScore >= rows[i + 1][j] && matchScore >= rows[i][j + 1]) {
-      pairs.push([i, j]);
-      i += 1;
-      j += 1;
-    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
-      i += 1;
-    } else {
-      j += 1;
-    }
-  }
-  return pairs;
-}
-
-function flattenDiffBlockRange(blocks, start, end) {
-  return blocks.slice(start, end).flat();
-}
-
-function diffBlockRangeSimilarity(beforeBlocks, afterBlocks, range) {
-  return blockSimilarity(
-    flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd),
-    flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd)
-  );
-}
-
-function shouldExpandDiffBlockRange(currentSimilarity, candidateSimilarity) {
-  const improvement = candidateSimilarity - currentSimilarity;
-  if (candidateSimilarity >= 0.9 && improvement >= 0.02) return true;
-  if (candidateSimilarity >= 0.68 && improvement >= 0.05) return true;
-  return currentSimilarity < 0.62 && improvement >= 0.1;
-}
-
-function diffBlockHasMeaningfulTerms(block) {
-  return meaningfulTermsForTokens(block).length > 0;
-}
-
-function previousDiffExpansionStart(blocks, start, limit) {
-  let candidateStart = start - 1;
-  while (candidateStart > limit && !diffBlockHasMeaningfulTerms(blocks[candidateStart])) {
-    candidateStart -= 1;
-  }
-  return candidateStart;
-}
-
-function nextDiffExpansionEnd(blocks, end, limit) {
-  let candidateEnd = end + 1;
-  while (candidateEnd < limit && !diffBlockHasMeaningfulTerms(blocks[candidateEnd - 1])) {
-    candidateEnd += 1;
-  }
-  return candidateEnd;
-}
-
-function expandDiffBlockPairs(pairs, beforeBlocks, afterBlocks) {
-  const ranges = pairs.map(([beforeIndex, afterIndex]) => ({
-    beforeStart: beforeIndex,
-    beforeEnd: beforeIndex + 1,
-    afterStart: afterIndex,
-    afterEnd: afterIndex + 1
-  }));
-  let changed = true;
-  let guard = beforeBlocks.length + afterBlocks.length;
-
-  while (changed && guard > 0) {
-    changed = false;
-    guard -= 1;
-    ranges.forEach((range, index) => {
-      const prevBeforeLimit = index > 0 ? ranges[index - 1].beforeEnd : 0;
-      const prevAfterLimit = index > 0 ? ranges[index - 1].afterEnd : 0;
-      const nextBeforeLimit = index + 1 < ranges.length ? ranges[index + 1].beforeStart : beforeBlocks.length;
-      const nextAfterLimit = index + 1 < ranges.length ? ranges[index + 1].afterStart : afterBlocks.length;
-      const currentSimilarity = diffBlockRangeSimilarity(beforeBlocks, afterBlocks, range);
-      let bestRange = null;
-      let bestSimilarity = currentSimilarity;
-      const candidates = [];
-
-      if (range.beforeStart > prevBeforeLimit) {
-        candidates.push({ ...range, beforeStart: previousDiffExpansionStart(beforeBlocks, range.beforeStart, prevBeforeLimit) });
-      }
-      if (range.afterStart > prevAfterLimit) {
-        candidates.push({ ...range, afterStart: previousDiffExpansionStart(afterBlocks, range.afterStart, prevAfterLimit) });
-      }
-      if (range.beforeEnd < nextBeforeLimit) {
-        candidates.push({ ...range, beforeEnd: nextDiffExpansionEnd(beforeBlocks, range.beforeEnd, nextBeforeLimit) });
-      }
-      if (range.afterEnd < nextAfterLimit) {
-        candidates.push({ ...range, afterEnd: nextDiffExpansionEnd(afterBlocks, range.afterEnd, nextAfterLimit) });
-      }
-
-      candidates.forEach(candidate => {
-        const candidateSimilarity = diffBlockRangeSimilarity(beforeBlocks, afterBlocks, candidate);
-        if (
-          candidateSimilarity > bestSimilarity &&
-          shouldExpandDiffBlockRange(currentSimilarity, candidateSimilarity)
-        ) {
-          bestRange = candidate;
-          bestSimilarity = candidateSimilarity;
-        }
-      });
-
-      if (bestRange) {
-        range.beforeStart = bestRange.beforeStart;
-        range.beforeEnd = bestRange.beforeEnd;
-        range.afterStart = bestRange.afterStart;
-        range.afterEnd = bestRange.afterEnd;
-        changed = true;
-      }
-    });
-  }
-
-  return ranges;
-}
-
-function diffUnmatchedBlock(tokens, type) {
-  return tokens.map(token => ({
-    type,
-    text: token.text,
-    marks: token.marks || {},
-    beforeIndex: type === "removed" ? token.index : undefined,
-    beforeStart: type === "removed" ? token.start : undefined,
-    beforeEnd: type === "removed" ? token.end : undefined,
-    afterIndex: type === "added" ? token.index : undefined,
-    afterStart: type === "added" ? token.start : undefined,
-    afterEnd: type === "added" ? token.end : undefined
-  }));
-}
-
-function diffBlocksHaveSameTokens(beforeBlock, afterBlock) {
-  if (beforeBlock.length !== afterBlock.length) return false;
-  return beforeBlock.every((token, index) => token.key === afterBlock[index].key);
-}
-
-function appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeStart, beforeEnd, afterStart, afterEnd) {
-  let beforeIndex = beforeStart;
-  let afterIndex = afterStart;
-
-  while (beforeIndex < beforeEnd || afterIndex < afterEnd) {
-    if (
-      beforeIndex < beforeEnd &&
-      afterIndex < afterEnd &&
-      diffBlocksHaveSameTokens(beforeBlocks[beforeIndex], afterBlocks[afterIndex])
-    ) {
-      parts.push(...diffSequence(beforeBlocks[beforeIndex], afterBlocks[afterIndex]));
-      beforeIndex += 1;
-      afterIndex += 1;
-      continue;
-    }
-    if (beforeIndex < beforeEnd) {
-      parts.push(...diffUnmatchedBlock(beforeBlocks[beforeIndex], "removed"));
-      beforeIndex += 1;
-      continue;
-    }
-    parts.push(...diffUnmatchedBlock(afterBlocks[afterIndex], "added"));
-    afterIndex += 1;
-  }
+  return DiffCore.normalizeDiffSource(text);
 }
 
 function diffReportTexts(beforeText, afterText) {
-  const beforeBlocks = splitDiffBlocks(tokenizeSegment(beforeText));
-  const afterBlocks = splitDiffBlocks(tokenizeSegment(afterText));
-  const pairs = expandDiffBlockPairs(alignDiffBlocks(beforeBlocks, afterBlocks), beforeBlocks, afterBlocks);
-  const parts = [];
-  let beforeIndex = 0;
-  let afterIndex = 0;
-
-  pairs.forEach(range => {
-    appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, range.beforeStart, afterIndex, range.afterStart);
-    parts.push(...diffSequence(
-      flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd),
-      flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd)
-    ));
-    beforeIndex = range.beforeEnd;
-    afterIndex = range.afterEnd;
-  });
-
-  appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, beforeBlocks.length, afterIndex, afterBlocks.length);
-  return restoreIdenticalChangedTokens(parts);
+  return DiffCore.diffText(beforeText, afterText);
 }
 
 function diffPartRange(part, type) {
@@ -2471,7 +1082,7 @@ function diffChangedSideWindow(parts, side) {
   const ranges = [];
 
   parts.forEach((part, index) => {
-    if (!isChangedDiffPart(part)) return;
+    if (!DiffCore.isChangedDiffPart(part)) return;
     changedIndexes.push(index);
     const range = diffSideRangeFromPart(part, side);
     if (range) ranges.push(range);
@@ -2512,7 +1123,7 @@ function diffChangedSideWindow(parts, side) {
 
 function diffTransitionInfo(before, after, beforeIndex) {
   const parts = diffReportTexts(before.content, after.content);
-  if (!parts.some(isChangedDiffPart)) return null;
+  if (!parts.some(DiffCore.isChangedDiffPart)) return null;
 
   return {
     before,
@@ -2621,48 +1232,6 @@ function coalescedCutHistoryTransitions(versions) {
   return transitions;
 }
 
-function cutHistoryPairLimitReason(before, after, limit) {
-  const beforeLength = asText(before?.content || before?.currentText).length;
-  const afterLength = asText(after?.content || after?.currentText).length;
-  const combinedLength = beforeLength + afterLength;
-  if (combinedLength <= limit) return "";
-  return `combined version text is ${combinedLength.toLocaleString("en-GB")} characters, above the ${limit.toLocaleString("en-GB")} character detailed-diff limit`;
-}
-
-function detailedCutHistoryLimitReason(versions) {
-  if (versions.length > CUT_HISTORY_DETAILED_MAX_VERSIONS) {
-    return `${versions.length.toLocaleString("en-GB")} versions, above the ${CUT_HISTORY_DETAILED_MAX_VERSIONS.toLocaleString("en-GB")} version detailed-diff limit`;
-  }
-
-  for (let index = 0; index < versions.length - 1; index += 1) {
-    const reason = cutHistoryPairLimitReason(
-      versions[index],
-      versions[index + 1],
-      CUT_HISTORY_DETAILED_MAX_PAIR_CHARS
-    );
-    if (reason) return `version ${index + 1} to ${index + 2} ${reason}`;
-  }
-
-  return "";
-}
-
-function detailedCutHistoryAnalysis(versions) {
-  const skippedReason = detailedCutHistoryLimitReason(versions);
-  if (skippedReason) {
-    return {
-      transitions: [],
-      skippedReason,
-      skippedTransitionCount: Math.max(versions.length - 1, 0)
-    };
-  }
-
-  return {
-    transitions: coalescedCutHistoryTransitions(versions),
-    skippedReason: "",
-    skippedTransitionCount: 0
-  };
-}
-
 function cutHistoryVersionsForDraft(draft, index) {
   const fallbackTitle = draft?.title || `Draft ${index + 1}`;
   return historyWithCurrentVersion(draft, fallbackTitle).map(version => ({
@@ -2675,8 +1244,7 @@ function analyseDraftCutHistory(draft, index) {
   const title = draft?.title || `Draft ${index + 1}`;
   const versions = cutHistoryVersionsForDraft(draft, index);
   const currentText = versions.length ? versions[versions.length - 1].content : normalizeDiffSource(draft?.content || "");
-  const analysis = detailedCutHistoryAnalysis(versions);
-  const transitions = analysis.transitions;
+  const transitions = coalescedCutHistoryTransitions(versions);
 
   const cutEntries = transitions.reduce((sum, transition) => sum + transition.cuts.length, 0);
   const cutWords = transitions.reduce(
@@ -2692,9 +1260,6 @@ function analyseDraftCutHistory(draft, index) {
     historyCount: normalizePageVersionHistory(draft?.versionHistory, draft, title).length,
     versions,
     transitions,
-    detailSkipped: Boolean(analysis.skippedReason),
-    skippedReason: analysis.skippedReason,
-    skippedTransitionCount: analysis.skippedTransitionCount,
     cutEntries,
     cutWords
   };
@@ -2716,8 +1281,8 @@ function finalDraftDiffAnchorId(index) {
 
 function finalDraftDiffWordStats(parts) {
   return parts.reduce((stats, part) => {
-    if (part.type === "added" && isDiffSequenceWordText(part.text)) stats.addedWords += 1;
-    if (part.type === "removed" && isDiffSequenceWordText(part.text)) stats.removedWords += 1;
+    if (part.type === "added" && DiffCore.isDiffSequenceWordText(part.text)) stats.addedWords += 1;
+    if (part.type === "removed" && DiffCore.isDiffSequenceWordText(part.text)) stats.removedWords += 1;
     return stats;
   }, { addedWords: 0, removedWords: 0 });
 }
@@ -2727,21 +1292,6 @@ function finalDraftDiffsForDrafts(drafts) {
   for (let index = 0; index < drafts.length - 1; index += 1) {
     const left = drafts[index];
     const right = drafts[index + 1];
-    const skippedReason = cutHistoryPairLimitReason(left, right, CUT_HISTORY_FINAL_DIFF_MAX_PAIR_CHARS);
-    if (skippedReason) {
-      comparisons.push({
-        addedWords: 0,
-        removedWords: 0,
-        anchorId: finalDraftDiffAnchorId(index),
-        changed: false,
-        skippedReason,
-        left,
-        right,
-        parts: []
-      });
-      continue;
-    }
-
     const parts = diffReportTexts(left.currentText, right.currentText);
     const stats = finalDraftDiffWordStats(parts);
     comparisons.push({
@@ -2782,14 +1332,12 @@ function compactFinalDraftDiffParts(parts) {
 }
 
 function finalDraftDiffMetaText(change) {
-  if (change.skippedReason) return `Detailed final comparison skipped: ${change.skippedReason}.`;
   return change.changed
     ? `${change.addedWords.toLocaleString("en-GB")} added ${change.addedWords === 1 ? "word" : "words"}; ${change.removedWords.toLocaleString("en-GB")} removed ${change.removedWords === 1 ? "word" : "words"}.`
     : "No final-draft text changes detected.";
 }
 
 function finalDraftDiffBodyHtml(change) {
-  if (change.skippedReason) return `<p>Detailed final comparison skipped to keep this report fast. ${escapeHtml(change.skippedReason)}.</p>`;
   return change.changed
     ? `<div class="final-draft-diff-text">${compactFinalDraftDiffParts(change.parts).map(renderFinalDraftDiffPart).join("")}</div>`
     : "<p>No final-draft text changes detected between these drafts.</p>";
@@ -2817,6 +1365,14 @@ function versionWordCount(version) {
 
 function versionHeadingLabel(index, total) {
   return index === total - 1 ? `Version ${index + 1} / current` : `Version ${index + 1}`;
+}
+
+function versionBaselineHtml(version) {
+  const text = escapeHtml(textForHistoryVersion(version));
+  const body = text
+    ? `<div class="version-change-diff">${text}</div>`
+    : "<p>No text in this version.</p>";
+  return `<div class="version-change"><h4>First saved version</h4><p class="meta">Baseline text; no changes to compare.</p>${body}</div>`;
 }
 
 function fullVersionSummaryReportPath(options = {}) {
@@ -2902,16 +1458,6 @@ function versionSummaryPages(state) {
 function fullSummaryDraftChangeHtml(left, right, index) {
   const anchor = `draft-change-${index + 1}-${index + 2}`;
   const title = `${left.title} to ${right.title}`;
-  const skippedReason = cutHistoryPairLimitReason(left, right, FULL_SUMMARY_DRAFT_DIFF_MAX_PAIR_CHARS);
-
-  if (skippedReason) {
-    return {
-      anchor,
-      title,
-      html: `<article id="${escapeHtml(anchor)}" class="draft-change"><h3>${escapeHtml(title)}</h3><p class="meta">Detailed comparison skipped: ${escapeHtml(skippedReason)}.</p></article>`
-    };
-  }
-
   const parts = diffReportTexts(left.currentText, right.currentText);
   const stats = finalDraftDiffWordStats(parts);
   const changed = parts.some(part => part.type === "added" || part.type === "removed");
@@ -2931,21 +1477,11 @@ function fullSummaryDraftChangeHtml(left, right, index) {
 
 function versionChangeDiffHtml(previousVersion, version) {
   if (!previousVersion) {
-    return '<div class="version-change"><p class="meta">First saved version; no previous version to compare.</p></div>';
+    return versionBaselineHtml(version);
   }
 
   const beforeText = textForHistoryVersion(previousVersion);
   const afterText = textForHistoryVersion(version);
-  const skippedReason = cutHistoryPairLimitReason(
-    { content: beforeText },
-    { content: afterText },
-    VERSION_SUMMARY_CHANGE_DIFF_MAX_PAIR_CHARS
-  );
-
-  if (skippedReason) {
-    return `<div class="version-change"><h4>Changes from previous version</h4><p class="meta">Detailed comparison skipped: ${escapeHtml(skippedReason)}.</p></div>`;
-  }
-
   const parts = diffReportTexts(beforeText, afterText);
   const stats = finalDraftDiffWordStats(parts);
   const changed = parts.some(part => part.type === "added" || part.type === "removed");
@@ -3131,7 +1667,109 @@ function updateVersionSummaryJob(job, patch = {}) {
   Object.assign(job, patch, { updatedAt: nowIso() });
 }
 
-async function runVersionSummaryJob(job, body) {
+function scheduleVersionSummaryJobCleanup(job) {
+  if (job.cleanupTimer) return;
+  job.cleanupTimer = setTimeout(() => {
+    versionSummaryJobs.delete(job.id);
+  }, 60 * 60_000);
+  job.cleanupTimer.unref?.();
+}
+
+function completeVersionSummaryJob(job, patch = {}) {
+  updateVersionSummaryJob(job, patch);
+  scheduleVersionSummaryJobCleanup(job);
+}
+
+function versionSummaryWorkerSource() {
+  return `
+    const { parentPort, workerData } = require("node:worker_threads");
+    Promise.resolve()
+      .then(() => {
+        const server = require(workerData.serverPath);
+        return server.writeFullVersionHistorySummaryReport(
+          workerData.state,
+          workerData.options,
+          progress => parentPort.postMessage({ type: "progress", progress })
+        );
+      })
+      .then(result => parentPort.postMessage({ type: "complete", result }))
+      .catch(error => {
+        parentPort.postMessage({
+          type: "error",
+          error: error && error.stack ? error.stack : String(error)
+        });
+      });
+  `;
+}
+
+function startVersionSummaryWorker(job, state, options = {}, backup = null) {
+  const worker = new Worker(versionSummaryWorkerSource(), {
+    eval: true,
+    workerData: {
+      serverPath: __filename,
+      state,
+      options
+    }
+  });
+  job.worker = worker;
+
+  worker.on("message", message => {
+    if (message?.type === "progress") {
+      const progress = message.progress || {};
+      updateVersionSummaryJob(job, {
+        status: "running",
+        step: progress.step || job.step,
+        completed: Number.isFinite(progress.completed) ? progress.completed : job.completed,
+        total: Number.isFinite(progress.total) ? progress.total : job.total
+      });
+      return;
+    }
+
+    if (message?.type === "complete") {
+      completeVersionSummaryJob(job, {
+        status: "complete",
+        step: "Complete",
+        completed: job.total || 1,
+        result: {
+          ...(message.result || {}),
+          backup: backup || null
+        }
+      });
+      return;
+    }
+
+    if (message?.type === "error") {
+      completeVersionSummaryJob(job, {
+        status: "failed",
+        step: "Failed",
+        error: message.error || "Summary worker failed"
+      });
+    }
+  });
+
+  worker.on("error", error => {
+    completeVersionSummaryJob(job, {
+      status: "failed",
+      step: "Failed",
+      error: error?.stack || error?.message || String(error)
+    });
+  });
+
+  worker.on("exit", code => {
+    if (code && job.status !== "failed" && job.status !== "complete") {
+      completeVersionSummaryJob(job, {
+        status: "failed",
+        step: "Failed",
+        error: `Summary worker exited with code ${code}.`
+      });
+      return;
+    }
+
+    if (job.status === "complete" || job.status === "failed") scheduleVersionSummaryJobCleanup(job);
+  });
+}
+
+function runVersionSummaryJob(job, body) {
   try {
     updateVersionSummaryJob(job, {
       status: "running",
@@ -3156,34 +1794,21 @@ async function runVersionSummaryJob(job, body) {
       fileName: payload.fileName
     }).state;
 
-    const result = await writeFullVersionHistorySummaryReport(
+    startVersionSummaryWorker(
+      job,
       summaryState,
       {
         filePath: payload.filePath,
         fileName: payload.fileName
       },
-      progress => updateVersionSummaryJob(job, progress)
+      backup || null
     );
-
-    updateVersionSummaryJob(job, {
-      status: "complete",
-      step: "Complete",
-      completed: job.total || 1,
-      result: {
-        ...result,
-        backup: backup || null
-      }
-    });
   } catch (error) {
-    updateVersionSummaryJob(job, {
+    completeVersionSummaryJob(job, {
       status: "failed",
       step: "Failed",
       error: error?.message || String(error)
     });
-  } finally {
-    setTimeout(() => {
-      versionSummaryJobs.delete(job.id);
-    }, 60 * 60_000).unref?.();
   }
 }
 
@@ -3226,25 +1851,18 @@ function backupCutHistoryReport(state, options = {}) {
   const totalVersions = drafts.reduce((sum, draft) => sum + draft.versions.length, 0);
   const totalCutEntries = drafts.reduce((sum, draft) => sum + draft.cutEntries, 0);
   const totalCutWords = drafts.reduce((sum, draft) => sum + draft.cutWords, 0);
-  const skippedDraftDetails = drafts.filter(draft => draft.detailSkipped).length;
-  const skippedFinalDiffs = finalDraftDiffs.filter(diff => diff.skippedReason).length;
   const rows = drafts.map(draft => {
     const savedHistory = draft.historyCount
       ? `${draft.historyCount.toLocaleString("en-GB")} saved`
       : "current only";
-    const cutEntriesText = draft.detailSkipped ? "Skipped" : draft.cutEntries.toLocaleString("en-GB");
-    const cutWordsText = draft.detailSkipped ? "Skipped" : draft.cutWords.toLocaleString("en-GB");
-    const detailTitle = draft.detailSkipped ? ` title="${escapeHtml(draft.skippedReason)}"` : "";
-    return `<tr><td><a href="#${escapeHtml(draft.anchorId)}">${escapeHtml(draft.title)}</a></td><td>${draft.versions.length.toLocaleString("en-GB")}</td><td>${draft.currentWords.toLocaleString("en-GB")}</td><td${detailTitle}>${cutEntriesText}</td><td${detailTitle}>${cutWordsText}</td><td>${escapeHtml(savedHistory)}</td></tr>`;
+    return `<tr><td><a href="#${escapeHtml(draft.anchorId)}">${escapeHtml(draft.title)}</a></td><td>${draft.versions.length.toLocaleString("en-GB")}</td><td>${draft.currentWords.toLocaleString("en-GB")}</td><td>${draft.cutEntries.toLocaleString("en-GB")}</td><td>${draft.cutWords.toLocaleString("en-GB")}</td><td>${escapeHtml(savedHistory)}</td></tr>`;
   }).join("\n");
   const contents = drafts
     .map(draft => `<a href="#${escapeHtml(draft.anchorId)}">${escapeHtml(draft.title)}</a>`);
   const contentsHtml = contents
     .join("");
   const sections = drafts.map((draft, index) => {
-    const transitions = draft.detailSkipped
-      ? `<p>Detailed cut analysis skipped to keep this report fast: ${escapeHtml(draft.skippedReason)}.</p>`
-      : draft.transitions.length
+    const transitions = draft.transitions.length
       ? draft.transitions.map(transition => {
         const cuts = transition.cuts.map((cut, index) => {
           const context = cut.context
@@ -3256,8 +1874,7 @@ function backupCutHistoryReport(state, options = {}) {
       }).join("\n")
       : "<p>No cuts detected for this draft.</p>";
 
-    const versionLabel = draft.detailSkipped ? "saved/current versions listed" : "saved/current versions checked";
-    return `<section id="${escapeHtml(draft.anchorId)}"><h2>${escapeHtml(draft.title)}</h2><p class="meta">${draft.versions.length.toLocaleString("en-GB")} ${versionLabel}. ${draft.cutEntries.toLocaleString("en-GB")} cut entries, ${draft.cutWords.toLocaleString("en-GB")} cut words.</p>${draftFinalComparisonHtml(draft, finalDraftDiffs[index - 1] || null)}${transitions}</section>`;
+    return `<section id="${escapeHtml(draft.anchorId)}"><h2>${escapeHtml(draft.title)}</h2><p class="meta">${draft.versions.length.toLocaleString("en-GB")} saved/current versions checked. ${draft.cutEntries.toLocaleString("en-GB")} cut entries, ${draft.cutWords.toLocaleString("en-GB")} cut words.</p>${draftFinalComparisonHtml(draft, finalDraftDiffs[index - 1] || null)}${transitions}</section>`;
   }).join("\n");
 
   return `<!doctype html>
@@ -3306,7 +1923,6 @@ blockquote{background:#fff;border-left:4px solid #777;margin:6px 0 14px;padding:
 <main>
 <h1>${escapeHtml(sourceName)}: per-draft cut history</h1>
 <p class="meta">Generated ${escapeHtml(formatDate(nowIso()))}. Source JSON: ${escapeHtml(jsonPath)}. Live current text: ${escapeHtml(liveTextPath)}.</p>
-${skippedDraftDetails || skippedFinalDiffs ? `<p class="meta">Fast summary mode skipped detailed cut analysis for ${skippedDraftDetails.toLocaleString("en-GB")} draft${skippedDraftDetails === 1 ? "" : "s"} and detailed final comparison for ${skippedFinalDiffs.toLocaleString("en-GB")} pair${skippedFinalDiffs === 1 ? "" : "s"} because the full diff would take too long.</p>` : ""}
 <p>This report is grouped by the ${drafts.length.toLocaleString("en-GB")} drafts in the live current text file. Each draft section shows the final changes from the previous draft to that draft, then coalesces adjacent autosave snapshots that touch the same local word or phrase and records passages, plus smaller within-line cuts, that disappear across that change run. It is based on saved version-history snapshots, so unsaved keystrokes between snapshots cannot be recovered.</p>
 <div class="summary"><div class="stat"><strong>${drafts.length.toLocaleString("en-GB")}</strong> current drafts</div><div class="stat"><strong>${finalDraftDiffs.length.toLocaleString("en-GB")}</strong> final comparisons</div><div class="stat"><strong>${totalVersions.toLocaleString("en-GB")}</strong> versions listed</div><div class="stat"><strong>${totalCutEntries.toLocaleString("en-GB")}</strong> cut entries found</div><div class="stat"><strong>${totalCutWords.toLocaleString("en-GB")}</strong> cut words found</div></div>
 <nav class="contents" aria-label="Draft contents">${contentsHtml}</nav>
@@ -3484,8 +2100,29 @@ function readCutHistoryMetadata(historyReportPath) {
   }
 }
 
+function isOneDrivePath(filePath) {
+  if (process.platform !== "win32") return false;
+
+  const resolvedPath = path.resolve(filePath).toLowerCase();
+  const roots = [
+    process.env.OneDrive,
+    process.env.OneDriveCommercial,
+    process.env.OneDriveConsumer
+  ]
+    .filter(Boolean)
+    .map(root => path.resolve(root).toLowerCase());
+
+  return roots.some(root => resolvedPath === root || resolvedPath.startsWith(`${root}${path.sep}`));
+}
+
 function writeAtomicText(filePath, content, options = {}) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
+
+  if (isOneDrivePath(filePath) || (options.temporaryFolderPath && isOneDrivePath(options.temporaryFolderPath))) {
+    fs.writeFileSync(filePath, content, "utf8");
+    return;
+  }
+
   const temporaryFolderPath = options.temporaryFolderPath
     ? path.resolve(options.temporaryFolderPath)
     : path.dirname(filePath);
@@ -3505,6 +2142,173 @@ function writeAtomicText(filePath, content, options = {}) {
     if (error.code !== "EEXIST") throw error;
     fs.rmSync(filePath, { force: true });
     fs.renameSync(tmpPath, filePath);
+  }
+}
+
+let recoveringPersistenceTransaction = false;
+
+function readPersistenceTransactionManifest() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(PERSISTENCE_TRANSACTION_MANIFEST, "utf8").replace(/^\uFEFF/u, ""));
+    return parsed && typeof parsed === "object" && Array.isArray(parsed.writes) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function removePersistenceTransactionJournal() {
+  try {
+    fs.rmSync(PERSISTENCE_TRANSACTION_DIR, { recursive: true, force: true });
+  } catch {}
+}
+
+function rollbackPersistenceTransaction(manifest) {
+  const writes = Array.isArray(manifest?.writes) ? manifest.writes : [];
+  const errors = [];
+
+  writes.slice().reverse().forEach(entry => {
+    const filePath = asText(entry?.filePath);
+    if (!filePath) return;
+
+    try {
+      if (entry.existed) {
+        if (!entry.backupPath) throw new Error("Missing transaction backup path.");
+        const backupText = fs.readFileSync(entry.backupPath, "utf8");
+        writeAtomicText(filePath, backupText, { temporaryFolderPath: PERSISTENCE_TRANSACTION_DIR });
+      } else {
+        fs.rmSync(filePath, { force: true });
+      }
+    } catch (error) {
+      errors.push({ filePath, error });
+    }
+  });
+
+  if (errors.length) {
+    const error = new Error(`Persistence transaction rollback failed for ${errors.length} file${errors.length === 1 ? "" : "s"}.`);
+    error.code = "PERSISTENCE_ROLLBACK_FAILED";
+    error.rollbackErrors = errors;
+    throw error;
+  }
+}
+
+function recoverPersistenceTransaction() {
+  ensureDataDir();
+  if (recoveringPersistenceTransaction) return;
+
+  const manifest = readPersistenceTransactionManifest();
+  if (!manifest) {
+    if (fs.existsSync(PERSISTENCE_TRANSACTION_DIR)) removePersistenceTransactionJournal();
+    return;
+  }
+
+  recoveringPersistenceTransaction = true;
+  try {
+    rollbackPersistenceTransaction(manifest);
+    removePersistenceTransactionJournal();
+  } finally {
+    recoveringPersistenceTransaction = false;
+  }
+}
+
+function normalizeTransactionWrites(writes = []) {
+  const byPath = new Map();
+
+  writes.filter(Boolean).forEach(write => {
+    if (!write.filePath) return;
+    const filePath = path.resolve(write.filePath);
+    const content = String(write.content ?? "");
+    const existing = byPath.get(filePath);
+
+    if (existing) {
+      if (existing.content !== content) {
+        throw new Error(`Conflicting transaction writes for ${filePath}`);
+      }
+      if (typeof write.onCommit === "function") existing.onCommit.push(write.onCommit);
+      return;
+    }
+
+    byPath.set(filePath, {
+      filePath,
+      content,
+      temporaryFolderPath: write.temporaryFolderPath,
+      onCommit: typeof write.onCommit === "function" ? [write.onCommit] : []
+    });
+  });
+
+  return Array.from(byPath.values());
+}
+
+function preparePersistenceTransactionJournal(writes) {
+  removePersistenceTransactionJournal();
+  fs.mkdirSync(PERSISTENCE_TRANSACTION_DIR, { recursive: true });
+
+  const manifest = {
+    version: 1,
+    createdAt: nowIso(),
+    writes: writes.map((write, index) => {
+      const existed = fs.existsSync(write.filePath);
+      const backupPath = existed
+        ? path.join(PERSISTENCE_TRANSACTION_DIR, `before-${index}.txt`)
+        : "";
+      if (existed) fs.copyFileSync(write.filePath, backupPath);
+      return {
+        filePath: write.filePath,
+        existed,
+        backupPath
+      };
+    })
+  };
+
+  writeAtomicText(PERSISTENCE_TRANSACTION_MANIFEST, `${JSON.stringify(manifest, null, 2)}\n`, {
+    temporaryFolderPath: PERSISTENCE_TRANSACTION_DIR
+  });
+  return manifest;
+}
+
+function shouldFailTransactionWrite(write, options = {}) {
+  const failPath = asText(options.testFailWritePath);
+  return Boolean(failPath && path.resolve(failPath) === path.resolve(write.filePath));
+}
+
+function transactionWriteFailure(write) {
+  const error = new Error(`Injected transaction write failure for ${write.filePath}`);
+  error.code = "ETEST_TRANSACTION_WRITE";
+  error.filePath = write.filePath;
+  return error;
+}
+
+function writeTransactionalTextFiles(writes = [], options = {}) {
+  const normalizedWrites = normalizeTransactionWrites(writes);
+  if (!normalizedWrites.length) return;
+
+  recoverPersistenceTransaction();
+  const manifest = preparePersistenceTransactionJournal(normalizedWrites);
+
+  try {
+    for (const write of normalizedWrites) {
+      if (shouldFailTransactionWrite(write, options)) throw transactionWriteFailure(write);
+      try {
+        writeAtomicText(write.filePath, write.content, {
+          temporaryFolderPath: write.temporaryFolderPath
+        });
+      } catch (error) {
+        error.filePath = error.filePath || write.filePath;
+        throw error;
+      }
+    }
+
+    normalizedWrites.forEach(write => {
+      write.onCommit.forEach(callback => callback());
+    });
+    removePersistenceTransactionJournal();
+  } catch (error) {
+    try {
+      rollbackPersistenceTransaction(manifest);
+      removePersistenceTransactionJournal();
+    } catch (rollbackError) {
+      error.rollbackError = rollbackError;
+    }
+    throw error;
   }
 }
 
@@ -3679,7 +2483,7 @@ function backupProjectFiles(state, options = {}) {
   );
   const versionHistoryPath = findVersionHistoryFilePath(options) || "";
 
-  fs.writeFileSync(textFilePath, formatExport(normalized), "utf8");
+  writeAtomicText(textFilePath, formatExport(normalized));
   const historyReport = (() => {
     if (options.skipSummary) return null;
     if (!versionHistoryPath) return null;
@@ -3815,7 +2619,7 @@ function writeTextFileLink(filePath) {
   }
 
   const resolvedPath = path.resolve(filePath);
-  fs.writeFileSync(TEXT_FILE_LINK_FILE, `${JSON.stringify({ filePath: resolvedPath }, null, 2)}\n`, "utf8");
+  writeAtomicText(TEXT_FILE_LINK_FILE, `${JSON.stringify({ filePath: resolvedPath }, null, 2)}\n`);
   return resolvedPath;
 }
 
@@ -3837,7 +2641,7 @@ function readTextFileStates() {
 
 function writeTextFileStates(states) {
   ensureDataDir();
-  fs.writeFileSync(TEXT_FILE_STATES_FILE, `${JSON.stringify(states, null, 2)}\n`, "utf8");
+  writeAtomicText(TEXT_FILE_STATES_FILE, `${JSON.stringify(states, null, 2)}\n`);
 }
 
 function readTextFileState(filePath) {
@@ -3890,7 +2694,13 @@ function isRecentTextFile(filePath) {
 }
 
 function writeTextFileState(filePath, state, options = {}) {
-  if (!filePath || !state) return;
+  const write = textFileStateTransactionWrite(filePath, state);
+  if (!write) return;
+  writeTransactionalTextFiles([write], options);
+}
+
+function textFileStateTransactionWrite(filePath, state) {
+  if (!filePath || !state) return null;
 
   const resolvedPath = path.resolve(filePath);
   const normalized = normalizeState(state);
@@ -3900,77 +2710,160 @@ function writeTextFileState(filePath, state, options = {}) {
     updatedAt: nowIso(),
     state: stateForStorage(normalized)
   };
-  writeTextFileStates(states);
+  return {
+    filePath: TEXT_FILE_STATES_FILE,
+    content: `${JSON.stringify(states, null, 2)}\n`
+  };
 }
 
 function writeProjectStateOnly(state, options = {}) {
   ensureDataDir();
+  recoverPersistenceTransaction();
   const normalized = normalizeState(state, { touch: Boolean(options.touch) });
-  fs.writeFileSync(STATE_FILE, `${JSON.stringify(stateForStorage(normalized), null, 2)}\n`, "utf8");
+  const writes = [
+    {
+      filePath: STATE_FILE,
+      content: `${JSON.stringify(stateForStorage(normalized), null, 2)}\n`
+    }
+  ];
 
   const linkedTextPath = readTextFileLink();
   if (linkedTextPath) {
-    try {
-      writeTextFileState(linkedTextPath, normalized);
-    } catch {}
+    const cacheWrite = textFileStateTransactionWrite(linkedTextPath, normalized);
+    if (cacheWrite) writes.push(cacheWrite);
   }
 
+  writeTransactionalTextFiles(writes, options);
   return normalized;
 }
 
 function writeAll(state, options = {}) {
   ensureDataDir();
+  recoverPersistenceTransaction();
   const normalized = normalizeState(state, { touch: true });
   const exportText = formatExport(normalized);
   const linkedTextPath = readTextFileLink();
-  fs.writeFileSync(STATE_FILE, `${JSON.stringify(stateForStorage(normalized, {
-    embedVersionHistory: Boolean(options.embedVersionHistory)
-  }), null, 2)}\n`, "utf8");
-  fs.writeFileSync(EXPORT_FILE, exportText, "utf8");
+  const coreWrites = [
+    {
+      filePath: STATE_FILE,
+      content: `${JSON.stringify(stateForStorage(normalized, {
+        embedVersionHistory: Boolean(options.embedVersionHistory)
+      }), null, 2)}\n`
+    },
+    {
+      filePath: EXPORT_FILE,
+      content: exportText
+    }
+  ];
+  const linkedWrites = [];
 
   if (linkedTextPath) {
-    try {
-      fs.writeFileSync(linkedTextPath, exportText, "utf8");
-      writeTextFileState(linkedTextPath, normalized);
-    } catch (error) {
-      if (options.allowLinkedTextFileFailure) {
-        console.error(`Linked text file write skipped during close: ${linkedTextPath} (${error.code || error.message})`);
-        return normalized;
-      }
-      throw new Error(`Linked text file write failed: ${linkedTextPath} (${error.code || error.message})`);
-    }
+    linkedWrites.push({
+      filePath: linkedTextPath,
+      content: exportText
+    });
+    const cacheWrite = textFileStateTransactionWrite(linkedTextPath, normalized);
+    if (cacheWrite) linkedWrites.push(cacheWrite);
   }
+
+  const versionHistoryWrites = [];
 
   if (!options.skipVersionHistory) {
     try {
-      persistVersionHistory(normalized, {
+      const versionHistoryWrite = versionHistoryTransactionWrite(normalized, {
         filePath: options.filePath || linkedTextPath || (options.fileName ? "" : EXPORT_FILE),
         fileName: options.fileName
       });
+      if (versionHistoryWrite) versionHistoryWrites.push(versionHistoryWrite);
     } catch (error) {
       if (!options.allowMissingVersionHistoryFolder || !isBackupFolderMissingError(error)) throw error;
     }
   }
 
+  const allWrites = [...coreWrites, ...linkedWrites, ...versionHistoryWrites];
+  try {
+    writeTransactionalTextFiles(allWrites, options);
+  } catch (error) {
+    const failedPath = error.filePath ? path.resolve(error.filePath) : "";
+    const linkedFailurePaths = new Set([
+      linkedTextPath ? path.resolve(linkedTextPath) : "",
+      path.resolve(TEXT_FILE_STATES_FILE)
+    ].filter(Boolean));
+    if (!options.allowLinkedTextFileFailure || !linkedFailurePaths.has(failedPath)) {
+      if (linkedTextPath && failedPath === path.resolve(linkedTextPath)) {
+        throw new Error(`Linked text file write failed: ${linkedTextPath} (${error.code || error.message})`);
+      }
+      throw error;
+    }
+
+    console.error(`Linked text file write skipped during close: ${linkedTextPath} (${error.code || error.message})`);
+    writeTransactionalTextFiles([...coreWrites, ...versionHistoryWrites], options);
+  }
+
   return normalized;
+}
+
+function projectRecoveryNotice(error, backupPath) {
+  return {
+    type: "corrupt-project-json",
+    statePath: STATE_FILE,
+    backupPath,
+    recoveredAt: nowIso(),
+    error: error?.message || String(error || "Project JSON could not be read.")
+  };
+}
+
+function writeProjectRecoveryNotice(notice) {
+  try {
+    ensureDataDir();
+    writeAtomicText(PROJECT_RECOVERY_FILE, `${JSON.stringify(notice, null, 2)}\n`);
+  } catch (error) {
+    console.error(error);
+  }
+}
+
+function readProjectRecoveryNotice() {
+  try {
+    const parsed = JSON.parse(fs.readFileSync(PROJECT_RECOVERY_FILE, "utf8").replace(/^\uFEFF/, ""));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+function clearProjectRecoveryNotice() {
+  try {
+    fs.rmSync(PROJECT_RECOVERY_FILE, { force: true });
+  } catch {}
+}
+
+function recoverCorruptProjectState(error) {
+  const backup = `${STATE_FILE}.broken-${Date.now()}`;
+  fs.copyFileSync(STATE_FILE, backup);
+  writeProjectRecoveryNotice(projectRecoveryNotice(error, backup));
+  return writeAll(defaultState());
 }
 
 function readState() {
   ensureDataDir();
+  recoverPersistenceTransaction();
   if (!fs.existsSync(STATE_FILE)) {
     return writeAll(defaultState());
   }
 
+  let parsed;
   try {
-    const parsed = JSON.parse(fs.readFileSync(STATE_FILE, "utf8").replace(/^\uFEFF/, ""));
-    const normalized = applyExternalVersionHistory(parsed, { filePath: readTextFileLink() || EXPORT_FILE }).state;
-    fs.writeFileSync(EXPORT_FILE, formatExport(normalized), "utf8");
-    return normalized;
+    parsed = JSON.parse(fs.readFileSync(STATE_FILE, "utf8").replace(/^\uFEFF/, ""));
   } catch (error) {
-    const backup = `${STATE_FILE}.broken-${Date.now()}`;
-    fs.copyFileSync(STATE_FILE, backup);
-    return writeAll(defaultState());
+    return recoverCorruptProjectState(error);
   }
+
+  const normalized = applyExternalVersionHistory(parsed, { filePath: readTextFileLink() || EXPORT_FILE }).state;
+  writeTransactionalTextFiles([{
+    filePath: EXPORT_FILE,
+    content: formatExport(normalized)
+  }]);
+  return normalized;
 }
 
 function sendJson(res, statusCode, payload) {
@@ -3980,6 +2873,43 @@ function sendJson(res, statusCode, payload) {
     "content-length": Buffer.byteLength(body)
   });
   res.end(body);
+}
+
+function hostNameFromHeader(value) {
+  const text = asText(value).trim();
+  if (!text) return "";
+
+  try {
+    return new URL(`http://${text}`).hostname.replace(/^\[|\]$/g, "").toLowerCase();
+  } catch {
+    return text.replace(/:\d+$/u, "").replace(/^\[|\]$/g, "").toLowerCase();
+  }
+}
+
+function isLoopbackHost(value) {
+  const host = hostNameFromHeader(value).replace(/\.$/u, "");
+  return host === "localhost" || host === "127.0.0.1" || host === "::1";
+}
+
+function requestHostAllowed(req) {
+  if (ALLOW_REMOTE_API) return true;
+  return isLoopbackHost(req.headers.host);
+}
+
+function requestOriginAllowed(req) {
+  if (ALLOW_REMOTE_API) return true;
+  const origin = asText(req.headers.origin).trim();
+  if (!origin) return true;
+
+  try {
+    return isLoopbackHost(new URL(origin).host);
+  } catch {
+    return false;
+  }
+}
+
+function apiRequestAllowed(req) {
+  return requestHostAllowed(req) && requestOriginAllowed(req);
 }
 
 function markClientActive() {
@@ -4044,7 +2974,10 @@ function readBody(req) {
 function safeStaticPath(pathname) {
   const decodedPath = decodeURIComponent(pathname === "/" ? "/index.html" : pathname);
   const filePath = path.normalize(path.join(PUBLIC_DIR, decodedPath));
-  return filePath.startsWith(PUBLIC_DIR) ? filePath : null;
+  const relativePath = path.relative(PUBLIC_DIR, filePath);
+  return relativePath && !relativePath.startsWith("..") && !path.isAbsolute(relativePath)
+    ? filePath
+    : null;
 }
 
 function currentTextFilePath() {
@@ -4245,6 +3178,14 @@ function applyPagePayload(state, key, payload) {
   }
 
   page.updatedAt = nowIso();
+  if (Array.isArray(payload.versionHistory)) {
+    page.versionHistory = mergePageVersionHistories(
+      page.versionHistory,
+      payload.versionHistory,
+      page,
+      parsed.type === "story" ? PROJECT_NOTES_TITLE : page.title || "Untitled draft"
+    );
+  }
   return true;
 }
 
@@ -4513,8 +3454,16 @@ async function handleApi(req, res, pathname) {
     const state = readState();
     sendJson(res, 200, {
       state,
+      projectRecovery: readProjectRecoveryNotice(),
       ...statePathPayload()
     });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/project-recovery/ack") {
+    markClientActive();
+    clearProjectRecoveryNotice();
+    sendJson(res, 200, { ok: true });
     return;
   }
 
@@ -4842,6 +3791,10 @@ function createHttpServer() {
       const { pathname } = new URL(req.url, `http://${req.headers.host || "localhost"}`);
 
       if (pathname.startsWith("/api/")) {
+        if (!apiRequestAllowed(req)) {
+          sendJson(res, 403, { error: "Forbidden" });
+          return;
+        }
         await handleApi(req, res, pathname);
         return;
       }
@@ -4879,7 +3832,7 @@ function flushOnExit() {
 
 function startServer(options = {}) {
   const port = Number(options.port ?? PORT);
-  const host = options.host;
+  const host = options.host ?? HOST;
   const server = createHttpServer();
   const serverStartedAt = Date.now();
   lastClientSeenAt = 0;
@@ -4947,7 +3900,7 @@ process.on("SIGINT", closeServerAndExit);
 process.on("SIGTERM", closeServerAndExit);
 
 if (require.main === module) {
-  startServer({ port: PORT })
+  startServer({ port: PORT, host: HOST })
     .then(({ url }) => {
       console.log(`Draft Diff Editor running at ${url}`);
       console.log(`Companion text file: ${EXPORT_FILE}`);
@@ -4962,7 +3915,9 @@ module.exports = {
   DATA_DIR,
   EXPORT_FILE,
   SERVER_BUILD,
+  backupHistoryReport,
   flushOnExit,
+  shouldUseFastHistoryReport,
   startServer,
   stopServer,
   waitForCutHistoryJobs,
@@ -4970,11 +3925,23 @@ module.exports = {
   startVersionHistorySummaryJobFromRequestBody,
   versionHistorySummaryJobProgress,
   writeFullVersionHistorySummaryReport,
+  resolveGeneratedReportPath,
   openTextFileFromDialog,
   recentTextFilesPayload,
   openRecentTextFileFromRequestBody,
   writeBackupFromRequestBody,
   saveStateFromRequestBody,
   writeStateFromRequestBody,
-  writeCutHistoryReportFromFiles
+  writeCutHistoryReportFromFiles,
+  __test: {
+    STATE_FILE,
+    EXPORT_FILE,
+    TEXT_FILE_STATES_FILE,
+    PERSISTENCE_TRANSACTION_DIR,
+    readState,
+    recoverPersistenceTransaction,
+    writeAll,
+    writeTextFileLink,
+    writeVersionHistoryFolderPath
+  }
 };

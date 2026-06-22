@@ -8,6 +8,13 @@
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js",
+    "test:diff": "node scripts/test-diff-core.js",
+    "test:state": "node scripts/test-state-core.js",
+    "test:rich-text": "node scripts/test-rich-text-core.js",
+    "test:app-save": "node scripts/test-app-save-paths.js",
+    "test:server": "node scripts/test-server-page-unit.js && node scripts/test-persistence-transaction.js",
+    "test:desktop": "node scripts/test-desktop-api.js",
+    "test:detached": "node scripts/test-detached-panel-save-path.js",
     "desktop": "electron .",
     "desktop:dev": "electron .",
     "package:win": "electron-builder --win --x64",

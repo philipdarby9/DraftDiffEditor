@@ -1,0 +1,4 @@
+interface:
+  display_name: "Draft Diff Audit"
+  short_description: "Audit this app for refactors and efficiency"
+  default_prompt: "Use $draft-diff-audit to audit Draft Diff Editor and write an evidence-backed AUDIT_REPORT.md focused on refactoring, efficiency, and local data safety."

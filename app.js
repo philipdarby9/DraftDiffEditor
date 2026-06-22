@@ -1,3 +1,12 @@
+const DiffCore = window.DraftDiffCore;
+if (!DiffCore) throw new Error("DraftDiffCore failed to load.");
+const StateCore = window.DraftDiffStateCore;
+if (!StateCore) throw new Error("DraftDiffStateCore failed to load.");
+const ToolbarCore = window.DraftDiffToolbarCore;
+if (!ToolbarCore) throw new Error("DraftDiffToolbarCore failed to load.");
+const RichTextCore = window.DraftDiffRichTextCore;
+if (!RichTextCore) throw new Error("DraftDiffRichTextCore failed to load.");
+
 const els = {
   saveStatus: document.querySelector("#save-status"),
   projectTitle: document.querySelector("#project-title"),
@@ -6,11 +15,18 @@ const els = {
   viewMenu: document.querySelector("#view-menu"),
   fileNew: document.querySelector("#file-new"),
   fileOpen: document.querySelector("#file-open"),
+  fileOpenRecent: document.querySelector("#file-open-recent"),
+  fileOpenRecentButton: document.querySelector("#file-open-recent-button"),
+  fileOpenRecentMenu: document.querySelector("#file-open-recent-menu"),
   fileOpenLocation: document.querySelector("#file-open-location"),
   fileSaveAs: document.querySelector("#file-save-as"),
+  fileVersionHistoryFolder: document.querySelector("#file-version-history-folder"),
+  fileActivateBackup: document.querySelector("#file-activate-backup"),
+  fileGenerateHistorySummary: document.querySelector("#file-generate-history-summary"),
   fileClose: document.querySelector("#file-close"),
   editUndo: document.querySelector("#edit-undo"),
   editRedo: document.querySelector("#edit-redo"),
+  editSearch: document.querySelector("#edit-search"),
   editGlobalFont: document.querySelector("#edit-global-font"),
   editGlobalFontSize: document.querySelector("#edit-global-font-size"),
   viewEnablePanelDrag: document.querySelector("#view-enable-panel-drag"),
@@ -35,11 +51,29 @@ const els = {
   compareSubtitle: document.querySelector("#compare-subtitle"),
   diffOutput: document.querySelector("#diff-output"),
   editorSurface: document.querySelector("#editor-surface"),
-  changesPanel: document.querySelector("#changes-panel")
+  changesPanel: document.querySelector("#changes-panel"),
+  searchPopover: document.querySelector("#search-popover"),
+  searchInput: document.querySelector("#search-input"),
+  searchScopeToggle: document.querySelector("#search-scope-toggle"),
+  searchScopeLabel: document.querySelector("#search-scope-label"),
+  searchScopeMenu: document.querySelector("#search-scope-menu"),
+  searchPrev: document.querySelector("#search-prev"),
+  searchNext: document.querySelector("#search-next"),
+  searchClose: document.querySelector("#search-close"),
+  searchSummary: document.querySelector("#search-summary"),
+  summaryProgressOverlay: document.querySelector("#summary-progress-overlay"),
+  summaryProgressStep: document.querySelector("#summary-progress-step"),
+  summaryProgressBar: document.querySelector("#summary-progress-bar"),
+  summaryProgressMeta: document.querySelector("#summary-progress-meta"),
+  summaryProgressPath: document.querySelector("#summary-progress-path"),
+  summaryProgressActions: document.querySelector("#summary-progress-actions"),
+  summaryProgressOpen: document.querySelector("#summary-progress-open"),
+  summaryProgressReveal: document.querySelector("#summary-progress-reveal"),
+  summaryProgressClose: document.querySelector("#summary-progress-close")
 };
 
-const STORY_KEY = "story";
-const PROJECT_NOTES_TITLE = "Project notes";
+const STORY_KEY = StateCore.STORY_KEY;
+const PROJECT_NOTES_TITLE = StateCore.PROJECT_NOTES_TITLE;
 const DISPLAY_STORAGE_KEY = "draftDiff.displayedPageKeys";
 const NOTES_COLLAPSED_STORAGE_KEY = "draftDiff.collapsedNotesIds";
 const NOTES_SIZE_STORAGE_KEY = "draftDiff.notesPanePercents";
@@ -47,34 +81,66 @@ const PAGES_ON_SCREEN_STORAGE_KEY = "draftDiff.pagesOnScreen";
 const FILE_VIEW_STATES_STORAGE_KEY = "draftDiff.fileViewStates";
 const PROJECT_STATE_CACHE_STORAGE_KEY = "draftDiff.projectStatesByPath";
 const DEFAULT_PAGES_ON_SCREEN = 2;
-const VIEW_STATE_VERSION = 2;
+const VIEW_STATE_VERSION = StateCore.VIEW_STATE_VERSION;
 const HISTORY_LIMIT = 100;
+const MIN_PAGE_PANE_PERCENT = StateCore.MIN_PAGE_PANE_PERCENT;
 const MAX_SAVE_RETRIES = 3;
-const FORMAT_DEFAULT_VERSION = 2;
-const LEGACY_DEFAULT_FONT_FAMILY = "Segoe UI";
+const AUTOSAVE_DELAY_MS = 2000;
+const WORD_COUNT_REFRESH_DELAY_MS = 350;
+const UNDO_TYPING_GROUP_WINDOW_MS = 1200;
+const UNDO_TYPING_GROUP_MAX_MS = 5000;
+const DRAFT_VERSION_CAPTURE_DELAY_MS = 2500;
+const FORMAT_DEFAULT_VERSION = StateCore.FORMAT_DEFAULT_VERSION;
+const LEGACY_DEFAULT_FONT_FAMILY = StateCore.LEGACY_DEFAULT_FONT_FAMILY;
+const DIFF_PROGRESS_FRAME_DELAY_MS = 0;
+const DIFF_BLOCK_CACHE_LIMIT = 160;
+const DIFF_RESULT_CACHE_LIMIT = 80;
+const DIFF_RESULT_MAX_CACHE_PARTS = 20000;
 
 let state = null;
 let selectedDraftId = null;
 let activeArea = "draft";
 let saveTimer = null;
+let pageSaveTimer = null;
 let isSaving = false;
 let showChanges = false;
 let exportPath = "";
 let activeEditorKey = STORY_KEY;
 let projectFileName = "draft-history.txt";
 let linkedTextPath = "";
+let versionHistoryFolderPath = "";
+let versionHistoryPath = "";
+let backupFolderPath = "";
+let backupFolderMissing = false;
+let isPromptingForBackupFolder = false;
 let stateRevision = 0;
 let saveQueued = false;
+let pendingPageSaveKeys = new Set();
+let pendingPageVersionHistorySaveKeys = new Set();
 let saveRetryCount = 0;
 let isClosingApp = false;
+let summaryProgressTimer = null;
+let latestSummaryReportPath = "";
+let viewStateSaveTimer = null;
+let isSavingViewState = false;
+let viewStateSaveQueued = false;
+let typingUndoGroup = null;
+let draftNoteStatsTimers = new Map();
+let draftVersionTimers = new Map();
+let notesHeadingDensityFrame = null;
+let notesHeadingResizeObserver = null;
+let draftHeadingDensityFrame = null;
+let draftHeadingResizeObserver = null;
 
 let fileViewStates = readStoredFileViewStates();
 let displayedPageKeys = new Set();
 let hasStoredDisplaySelection = false;
 let collapsedNotesIds = new Set();
 let notesPanePercents = {};
+let pagePanePercents = {};
 let pagesOnScreen = DEFAULT_PAGES_ON_SCREEN;
 let resizingDraftId = null;
+let pageDividerDrag = null;
 let compareHighlightTimer = null;
 let editorSelections = {};
 let undoStack = [];
@@ -85,41 +151,43 @@ let detachedUnitKeys = new Set();
 let detachedPanelWindows = new Map();
 let tabScrollbarDrag = null;
 let fallbackZoomFactor = 1;
+let recentSubmenuTracking = false;
+let diffRenderToken = 0;
+const diffBlockCache = new Map();
+const diffResultCache = new Map();
+const diffMeaningfulTermsCache = new WeakMap();
+let versionHistoryDraftId = null;
+let searchRefreshTimer = null;
+let spellcheckMenu = null;
+let spellcheckRange = null;
+let ignoredSpellcheckWords = new Set();
+let searchState = {
+  open: false,
+  query: "",
+  selectedKeys: new Set(),
+  activeIndexes: {},
+  activeKey: null,
+  lastSignature: "",
+  shouldScrollToFirst: false,
+  results: new Map()
+};
 
 const DETACHED_PANEL_CHANNEL = "draftDiff.detachedPanels";
+const SEARCH_MATCH_HIGHLIGHT = "draft-diff-search-match";
+const SEARCH_ACTIVE_HIGHLIGHT = "draft-diff-search-active";
 const detachedPanelChannel = "BroadcastChannel" in window
   ? new BroadcastChannel(DETACHED_PANEL_CHANNEL)
   : null;
 
-const DEFAULT_FORMAT = {
-  fontFamily: "Consolas",
-  fontSize: "16",
-  lineHeight: "1.62"
-};
-
-const FONT_FAMILY_OPTIONS = [
-  "Consolas",
-  "Segoe UI",
-  "Arial",
-  "Calibri",
-  "Cambria",
-  "Candara",
-  "Constantia",
-  "Corbel",
-  "Georgia",
-  "Garamond",
-  "Book Antiqua",
-  "Palatino Linotype",
-  "Times New Roman",
-  "Courier New",
-  "Lucida Console",
-  "Verdana",
-  "Tahoma",
-  "Trebuchet MS"
-];
-
-const FONT_SIZE_OPTIONS = ["12", "14", "16", "18", "20", "24", "28", "32"];
-const LINE_HEIGHT_OPTIONS = ["1.2", "1.4", "1.62", "1.8", "2"];
+const DEFAULT_FORMAT = StateCore.DEFAULT_FORMAT;
+const FONT_FAMILY_OPTIONS = StateCore.FONT_FAMILY_OPTIONS;
+const FONT_SIZE_OPTIONS = StateCore.FONT_SIZE_OPTIONS;
+const LINE_HEIGHT_OPTIONS = StateCore.LINE_HEIGHT_OPTIONS;
+const toolbarIcons = ToolbarCore.toolbarIcons;
+const sanitizeRichHtml = RichTextCore.sanitizeRichHtml;
+const execRichTextCommand = RichTextCore.execRichTextCommand;
+const insertClipboardHtml = RichTextCore.insertClipboardHtml;
+const insertPlainText = RichTextCore.insertPlainText;
 
 const allowedFontFamilies = new Set(FONT_FAMILY_OPTIONS);
 const allowedFontSizes = new Set(FONT_SIZE_OPTIONS);
@@ -140,32 +208,13 @@ const MENU_SHORTCUT_LABELS = {
   close: { mac: "⌘W", default: "Ctrl+W" },
   undo: { mac: "⌘Z", default: "Ctrl+Z" },
   redo: { mac: "⌘⇧Z", default: "Ctrl+Y" },
-  panelDrag: { mac: "Cmd+Opt+P", default: "Ctrl+Alt+P" },
+  search: { mac: "Cmd+F", default: "Ctrl+F" },
   zoomIn: { mac: "⌘+", default: "Ctrl++" },
   zoomOut: { mac: "⌘-", default: "Ctrl+-" },
   pages1: { mac: "⌘1", default: "Ctrl+1" },
   pages2: { mac: "⌘2", default: "Ctrl+2" },
   pages3: { mac: "⌘3", default: "Ctrl+3" },
   pages4: { mac: "⌘4", default: "Ctrl+4" }
-};
-
-const toolbarIcons = {
-  undo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 14 5 10l4-4"></path><path d="M5 10h11a4 4 0 1 1 0 8h-1"></path></svg>',
-  redo: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="m15 14 4-4-4-4"></path><path d="M19 10H8a4 4 0 1 0 0 8h1"></path></svg>',
-  bold: '<span class="fr-letter-icon bold" aria-hidden="true">B</span>',
-  italic: '<span class="fr-letter-icon italic" aria-hidden="true">I</span>',
-  underline: '<span class="fr-letter-icon underline" aria-hidden="true">U</span>',
-  strike: '<span class="fr-letter-icon strike" aria-hidden="true">S</span>',
-  unorderedList: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M9 6h11"></path><path d="M9 12h11"></path><path d="M9 18h11"></path><path d="M5 6v.01"></path><path d="M5 12v.01"></path><path d="M5 18v.01"></path></svg>',
-  orderedList: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M11 6h9"></path><path d="M11 12h9"></path><path d="M12 18h8"></path><path d="M4 6h1v4"></path><path d="M4 10h2"></path><path d="M6 18H4c0-1.2 2-2.1 2-3.2 0-.7-.5-1.2-1.2-1.2-.5 0-.9.2-1.2.6"></path></svg>',
-  outdent: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6H9"></path><path d="M20 12h-7"></path><path d="M20 18H9"></path><path d="m8 8-4 4 4 4"></path></svg>',
-  indent: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M20 6H9"></path><path d="M20 12h-7"></path><path d="M20 18H9"></path><path d="m4 8 4 4-4 4"></path></svg>',
-  alignLeft: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M4 12h10"></path><path d="M4 18h14"></path></svg>',
-  alignCenter: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M8 12h8"></path><path d="M6 18h12"></path></svg>',
-  alignRight: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6h16"></path><path d="M10 12h10"></path><path d="M6 18h14"></path></svg>',
-  clear: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M4.2 12.3h7.4"></path><path d="m5.3 8.8 3.9-4.2 2.2 2.1-3.9 4.2H5.3z"></path><path d="M4 13.1 12.5 3"></path></svg>',
-  format: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 4.5h10M3 8h10M3 11.5h10"></path><path d="M5.5 3v3M10.5 6.5v3M7.5 10v3"></path></svg>',
-  detach: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M5.4 3.6H4.1c-.8 0-1.4.6-1.4 1.4v6.9c0 .8.6 1.4 1.4 1.4H11c.8 0 1.4-.6 1.4-1.4v-1.3"></path><path d="M8.2 3.4h4.4v4.4"></path><path d="M7.2 8.8 12.4 3.6"></path></svg>'
 };
 
 function nowIso() {
@@ -226,19 +275,15 @@ function handleGlobalShortcut(event) {
     return true;
   }
 
-  const isPanelDragShortcut = isMacPlatform()
-    ? event.metaKey && event.altKey && !event.ctrlKey && !event.shiftKey && key === "p"
-    : event.ctrlKey && event.altKey && !event.metaKey && !event.shiftKey && key === "p";
+  if (event.altKey) return false;
+  if (!hasPlatformShortcutModifier(event)) return false;
 
-  if (isPanelDragShortcut) {
+  if (!event.shiftKey && key === "f") {
     event.preventDefault();
-    setPanelDragEnabled(!panelDragEnabled);
+    openSearch({ scope: "all" });
     closeTopMenus();
     return true;
   }
-
-  if (event.altKey) return false;
-  if (!hasPlatformShortcutModifier(event)) return false;
 
   if (!event.shiftKey && key === "z") {
     event.preventDefault();
@@ -313,6 +358,16 @@ function formatDate(iso) {
   }).format(date);
 }
 
+function formatVersionDate(iso) {
+  const date = new Date(iso);
+  if (Number.isNaN(date.valueOf())) return iso;
+  const now = new Date();
+  const options = date.getFullYear() === now.getFullYear()
+    ? { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
+    : { month: "short", day: "numeric", year: "2-digit", hour: "numeric", minute: "2-digit" };
+  return new Intl.DateTimeFormat(undefined, options).format(date);
+}
+
 function formatDateForExport(iso) {
   const date = new Date(iso);
   if (Number.isNaN(date.valueOf())) return iso;
@@ -320,6 +375,15 @@ function formatDateForExport(iso) {
     dateStyle: "full",
     timeStyle: "short"
   }).format(date);
+}
+
+function compactTitleHtml(fullTitle, shortTitle) {
+  return `
+    <span class="compact-title" title="${escapeHtml(fullTitle)}">
+      <span class="compact-title-full">${escapeHtml(fullTitle)}</span>
+      <span class="compact-title-short" aria-hidden="true">${escapeHtml(shortTitle)}</span>
+    </span>
+  `;
 }
 
 function draftContentKey(draftId) {
@@ -432,6 +496,19 @@ function draftHasVisibleMainPanel(draft) {
   return !detachedUnitKeys.has(draftUnitKey(draft.id));
 }
 
+function topLevelPageKeyForDraft(draftId) {
+  return draftContentKey(draftId);
+}
+
+function topLevelDisplayPageKeys() {
+  const keys = [];
+  if (displayedPageKeys.has(STORY_KEY) && !detachedUnitKeys.has(STORY_KEY)) keys.push(STORY_KEY);
+  state?.drafts?.forEach(draft => {
+    if (draftHasVisibleMainPanel(draft)) keys.push(topLevelPageKeyForDraft(draft.id));
+  });
+  return keys;
+}
+
 function mainDisplayPageCount() {
   if (!state) return 0;
   let count = displayedPageKeys.has(STORY_KEY) && !detachedUnitKeys.has(STORY_KEY) ? 1 : 0;
@@ -441,16 +518,49 @@ function mainDisplayPageCount() {
   return count;
 }
 
+function versionHistoryPageCount() {
+  if (!state || !versionHistoryDraftId) return 0;
+  if (versionHistoryDraftId === STORY_KEY) return ensureProjectNotesVersionHistory().length;
+
+  const draft = draftById(versionHistoryDraftId);
+  return draft ? ensureDraftVersionHistory(draft).length : 0;
+}
+
+function currentPagesOnScreenLimit() {
+  if (!state) return clampPagesOnScreen(DEFAULT_PAGES_ON_SCREEN);
+
+  if (versionHistoryDraftId) {
+    return Math.max(1, Math.min(4, versionHistoryPageCount() || 1));
+  }
+
+  if (showChanges) {
+    return Math.max(1, Math.min(4, selectedCompareIndexes().length || 1));
+  }
+
+  return Math.max(1, Math.min(4, selectedDisplayPageCount() || 1));
+}
+
 function normalizePagesOnScreenForSelection(value) {
-  const requestedPagesOnScreen = clampPagesOnScreen(value);
-  const selectedCount = selectedDisplayPageCount();
-  if (selectedCount === 0) return 1;
-  return Math.min(requestedPagesOnScreen, selectedCount);
+  return Math.min(clampPagesOnScreen(value), currentPagesOnScreenLimit());
+}
+
+function updatePagesOnScreenControls() {
+  if (!els.pagesOnScreen) return;
+
+  const maxPages = currentPagesOnScreenLimit();
+  els.pagesOnScreen.querySelectorAll("[data-pages-on-screen]").forEach(button => {
+    const value = Number(button.dataset.pagesOnScreen);
+    const disabled = value > maxPages;
+    button.disabled = disabled;
+    button.setAttribute("aria-disabled", String(disabled));
+    button.setAttribute("aria-pressed", String(!disabled && value === pagesOnScreen));
+  });
 }
 
 function syncPagesOnScreenToDisplaySelection() {
   const normalizedPagesOnScreen = normalizePagesOnScreenForSelection(pagesOnScreen);
   if (normalizedPagesOnScreen !== pagesOnScreen) setPagesOnScreen(normalizedPagesOnScreen);
+  else updatePagesOnScreenControls();
 }
 
 function saveFileViewStates() {
@@ -484,16 +594,16 @@ function legacyViewState() {
   };
 }
 
-function saveDisplaySelection() {
-  saveCurrentViewState();
-}
-
-function saveCollapsedNotes() {
-  saveCurrentViewState();
+function saveLayoutViewState() {
+  saveCurrentViewState({ syncDom: false });
 }
 
 function saveNotesPanePercents() {
-  saveCurrentViewState();
+  saveLayoutViewState();
+}
+
+function savePagePanePercents() {
+  saveLayoutViewState();
 }
 
 function getSelectedDraft() {
@@ -508,7 +618,7 @@ function createDraft(copyFrom, indexOverride, defaultFormatOverride = null) {
   const index = indexOverride || ((state?.drafts?.length || 0) + 1);
   const createdAt = nowIso();
   const defaultFormat = normalizeFormat(defaultFormatOverride || currentDefaultFormat(state));
-  return {
+  const draft = {
     id: makeId("draft"),
     title: `Draft ${index}`,
     createdAt,
@@ -526,6 +636,7 @@ function createDraft(copyFrom, indexOverride, defaultFormatOverride = null) {
       format: { ...defaultFormat }
     }
   };
+  return draft;
 }
 
 function createDefaultState() {
@@ -552,6 +663,11 @@ function createDefaultState() {
 
 function fileNameFromPath(filePath) {
   return String(filePath || "").split(/[\\/]/).filter(Boolean).pop() || "";
+}
+
+function closestElement(target, selector) {
+  const element = target instanceof Element ? target : target?.parentElement;
+  return element?.closest?.(selector) || null;
 }
 
 function ensureTxtExtension(fileName) {
@@ -598,7 +714,9 @@ function rememberProjectStateForPath(filePath, projectState = state) {
   cache[textFileStateCacheKey(filePath)] = {
     filePath,
     updatedAt: nowIso(),
-    state: projectStateFromSnapshot(serializeProjectState(projectState))
+    state: projectStateFromSnapshot(serializeProjectState(projectState, {
+      includeVersionHistory: !versionHistoryFolderPath
+    }))
   };
 
   const entries = Object.entries(cache)
@@ -635,14 +753,118 @@ function updateProjectTitle() {
   document.title = `${title} - Draft Diff Editor`;
 }
 
+function syncBackupMenu() {
+  if (!els.fileActivateBackup) return;
+
+  const active = Boolean(backupFolderPath);
+  els.fileActivateBackup.setAttribute("aria-pressed", String(active));
+  els.fileActivateBackup.title = backupFolderMissing && active
+    ? `Backup folder missing: ${backupFolderPath}`
+    : active
+    ? `Backups active: ${backupFolderPath}\\original txt; summaries: ${backupFolderPath}\\version history summaries; JSON: ${backupFolderPath}\\json`
+    : "Choose a backup and version history folder";
+}
+
 function closeFileMenu() {
   if (els.fileMenu) els.fileMenu.open = false;
+  setRecentSubmenuOpen(false);
 }
 
 function closeTopMenus(exceptMenu = null) {
   [els.fileMenu, els.editMenu, els.viewMenu].forEach(menu => {
     if (menu && menu !== exceptMenu) menu.open = false;
   });
+  if (exceptMenu !== els.fileMenu) setRecentSubmenuOpen(false);
+}
+
+function setRecentSubmenuOpen(open) {
+  const isOpen = Boolean(open);
+  els.fileOpenRecent?.classList.toggle("is-open", isOpen);
+  els.fileOpenRecentButton?.setAttribute("aria-expanded", String(isOpen));
+  if (isOpen) {
+    startRecentSubmenuTracking();
+  } else {
+    stopRecentSubmenuTracking();
+  }
+}
+
+function pointInRect(clientX, clientY, rect, padding = 0) {
+  if (!rect) return false;
+  return clientX >= rect.left - padding &&
+    clientX <= rect.right + padding &&
+    clientY >= rect.top - padding &&
+    clientY <= rect.bottom + padding;
+}
+
+function pointInTriangle(point, a, b, c) {
+  const sign = (p1, p2, p3) =>
+    (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y);
+  const hasNegative = sign(point, a, b) < 0 || sign(point, b, c) < 0 || sign(point, c, a) < 0;
+  const hasPositive = sign(point, a, b) > 0 || sign(point, b, c) > 0 || sign(point, c, a) > 0;
+  return !(hasNegative && hasPositive);
+}
+
+function isPointInRecentSubmenuPanel(clientX, clientY) {
+  if (!els.fileOpenRecentMenu) return false;
+  return pointInRect(clientX, clientY, els.fileOpenRecentMenu.getBoundingClientRect(), 3);
+}
+
+function isPointInRecentSubmenuSafeArea(clientX, clientY) {
+  if (!els.fileOpenRecent || !els.fileOpenRecentButton || !els.fileOpenRecentMenu) return false;
+
+  const triggerRect = els.fileOpenRecentButton.getBoundingClientRect();
+  const menuRect = els.fileOpenRecent.closest(".file-menu-panel")?.getBoundingClientRect();
+  const submenuRect = els.fileOpenRecentMenu.getBoundingClientRect();
+  if (pointInRect(clientX, clientY, triggerRect, 3) || pointInRect(clientX, clientY, submenuRect, 3)) return true;
+
+  const bridgeRect = {
+    left: Math.min(triggerRect.right, submenuRect.left),
+    right: Math.max(triggerRect.right, submenuRect.left),
+    top: Math.min(triggerRect.top, submenuRect.top),
+    bottom: Math.max(menuRect?.bottom || triggerRect.bottom, submenuRect.bottom)
+  };
+  if (pointInRect(clientX, clientY, bridgeRect, 3)) return true;
+
+  if (!menuRect) return false;
+  return pointInTriangle(
+    { x: clientX, y: clientY },
+    { x: menuRect.left, y: triggerRect.top },
+    { x: triggerRect.right, y: triggerRect.bottom },
+    { x: triggerRect.right, y: menuRect.bottom }
+  );
+}
+
+function handleRecentSubmenuPointerMove(event) {
+  if (!els.fileOpenRecent?.classList.contains("is-open")) return;
+  if (!isPointInRecentSubmenuSafeArea(event.clientX, event.clientY)) setRecentSubmenuOpen(false);
+}
+
+function handleRecentSubmenuWheel(event) {
+  if (!els.fileOpenRecent?.classList.contains("is-open")) return;
+
+  if (!isPointInRecentSubmenuSafeArea(event.clientX, event.clientY)) {
+    setRecentSubmenuOpen(false);
+    return;
+  }
+
+  if (isPointInRecentSubmenuPanel(event.clientX, event.clientY) || !els.fileOpenRecentMenu) return;
+  if (els.fileOpenRecentMenu.scrollHeight <= els.fileOpenRecentMenu.clientHeight) return;
+  event.preventDefault();
+  els.fileOpenRecentMenu.scrollTop += event.deltaY || event.deltaX;
+}
+
+function startRecentSubmenuTracking() {
+  if (recentSubmenuTracking) return;
+  recentSubmenuTracking = true;
+  document.addEventListener("pointermove", handleRecentSubmenuPointerMove);
+  document.addEventListener("wheel", handleRecentSubmenuWheel, { passive: false });
+}
+
+function stopRecentSubmenuTracking() {
+  if (!recentSubmenuTracking) return;
+  recentSubmenuTracking = false;
+  document.removeEventListener("pointermove", handleRecentSubmenuPointerMove);
+  document.removeEventListener("wheel", handleRecentSubmenuWheel);
 }
 
 function setStatus(text) {
@@ -653,6 +875,7 @@ function setStatus(text) {
   } else {
     els.saveStatus.textContent = statusText;
   }
+  els.saveStatus.title = statusText;
   els.saveStatus.classList.toggle("is-saving", /saving|unsaved/i.test(text));
 }
 
@@ -678,67 +901,101 @@ function lineBreakCount(value) {
 }
 
 function normalizeFormat(format = {}) {
-  const fontFamily = allowedFontFamilies.has(format.fontFamily)
-    ? format.fontFamily
-    : DEFAULT_FORMAT.fontFamily;
-  const fontSize = allowedFontSizes.has(String(format.fontSize))
-    ? String(format.fontSize)
-    : DEFAULT_FORMAT.fontSize;
-  const lineHeight = allowedLineHeights.has(String(format.lineHeight))
-    ? String(format.lineHeight)
-    : DEFAULT_FORMAT.lineHeight;
-  return { fontFamily, fontSize, lineHeight };
+  return StateCore.normalizeFormat(format);
 }
 
 function upgradeLegacyDefaultFormat(format = {}, shouldUpgrade = false) {
-  const normalized = normalizeFormat(format);
-  return shouldUpgrade && normalized.fontFamily === LEGACY_DEFAULT_FONT_FAMILY
-    ? { ...normalized, fontFamily: DEFAULT_FORMAT.fontFamily }
-    : normalized;
+  return StateCore.upgradeLegacyDefaultFormat(format, shouldUpgrade);
 }
 
 function currentDefaultFormat(projectState = null) {
-  return normalizeFormat(projectState?.defaultFormat || DEFAULT_FORMAT);
+  return StateCore.currentDefaultFormat(projectState);
 }
 
 function migrateLegacyDefaultFonts(projectState) {
-  if (!projectState) return projectState;
-
-  const shouldUpgrade = projectState.formatDefaultVersion !== FORMAT_DEFAULT_VERSION;
-  projectState.defaultFormat = upgradeLegacyDefaultFormat(
-    projectState.defaultFormat || DEFAULT_FORMAT,
-    shouldUpgrade
-  );
-  if (!shouldUpgrade) return projectState;
-
-  const upgradePage = page => {
-    if (page) page.format = upgradeLegacyDefaultFormat(page.format, true);
-  };
-
-  upgradePage(projectState.initialNotes);
-  projectState.drafts?.forEach(draft => {
-    upgradePage(draft);
-    upgradePage(draft.notes);
-  });
-  projectState.formatDefaultVersion = FORMAT_DEFAULT_VERSION;
-  return projectState;
+  return StateCore.migrateLegacyDefaultFonts(projectState);
 }
 
-function serializeProjectState(projectState = state) {
-  return projectState ? JSON.stringify(projectState) : "";
+function projectStateWithoutVersionHistory(projectState) {
+  return StateCore.stateWithoutVersionHistory(projectState);
+}
+
+function serializeProjectState(projectState = state, options = {}) {
+  return StateCore.serializeProjectState(projectState, options);
 }
 
 function projectStateFromSnapshot(snapshot) {
-  return migrateLegacyDefaultFonts(JSON.parse(snapshot));
+  return StateCore.projectStateFromSnapshot(snapshot);
 }
 
 function markStateChanged() {
   stateRevision += 1;
 }
 
-function queueSave(delay = 450) {
+function queueSave(delay = AUTOSAVE_DELAY_MS) {
+  clearPendingPageSaves();
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(saveNow, delay);
+}
+
+function clearPendingPageSaves() {
+  pendingPageSaveKeys.clear();
+  pendingPageVersionHistorySaveKeys.clear();
+  window.clearTimeout(pageSaveTimer);
+  pageSaveTimer = null;
+}
+
+function queuePendingPageSaves(delay = 0) {
+  if (!pendingPageSaveKeys.size) return;
+  window.clearTimeout(pageSaveTimer);
+  pageSaveTimer = window.setTimeout(savePendingPagesNow, delay);
+}
+
+function queuePageSave(pageKey, delay = AUTOSAVE_DELAY_MS, options = {}) {
+  if (!pageKey) return;
+  pendingPageSaveKeys.add(pageKey);
+  if (options.includeVersionHistory) pendingPageVersionHistorySaveKeys.add(pageKey);
+  queuePendingPageSaves(delay);
+}
+
+function pageSavePayload(pageKey, options = {}) {
+  const page = pageForEditorKey(pageKey);
+  if (!page) return null;
+
+  ensurePageFields(page);
+  const parsed = parseDraftPageKey(pageKey);
+  const payloadPage = {
+    content: page.content,
+    contentHtml: page.contentHtml,
+    format: normalizeFormat(page.format)
+  };
+  if (parsed?.type === "content") payloadPage.title = page.title || "";
+  if (options.includeVersionHistory && Array.isArray(page.versionHistory)) {
+    payloadPage.versionHistory = page.versionHistory;
+  }
+
+  return {
+    key: pageKey,
+    page: payloadPage
+  };
+}
+
+function pageKeyForTitleInput(titleInput) {
+  const draftId = titleInput?.dataset?.titleDraftId;
+  return draftId && draftExists(draftId) ? draftContentKey(draftId) : "";
+}
+
+function syncDraftTitleInput(titleInput) {
+  const draft = draftById(titleInput?.dataset?.titleDraftId);
+  if (!draft) return "";
+
+  const nextTitle = titleInput.value || "Untitled draft";
+  if (draft.title !== nextTitle) {
+    draft.title = nextTitle;
+    draft.updatedAt = nowIso();
+  }
+  if (draft.notes) draft.notes.title = `${draft.title} Notes`;
+  return draftContentKey(draft.id);
 }
 
 function updateUndoRedoControls() {
@@ -752,16 +1009,279 @@ function resetHistory() {
   updateUndoRedoControls();
 }
 
-function recordUndoSnapshot() {
-  if (!state || isRestoringHistory) return;
+function isPageHistoryEntry(entry) {
+  return entry?.type === "page" && typeof entry.key === "string";
+}
 
-  const snapshot = serializeProjectState();
-  if (!snapshot || snapshot === undoStack[undoStack.length - 1]) return;
+function isDraftStructureHistoryEntry(entry) {
+  return entry?.type === "draft-structure" && Array.isArray(entry.draftOrder);
+}
 
-  undoStack.push(snapshot);
+function isProjectFormatHistoryEntry(entry) {
+  return entry?.type === "project-format" && Array.isArray(entry.pageFormats);
+}
+
+function isFullHistoryEntry(entry) {
+  return typeof entry === "string" || entry?.type === "full";
+}
+
+function fullHistorySnapshot(entry) {
+  return typeof entry === "string" ? entry : entry?.snapshot || "";
+}
+
+function pageHistorySnapshot(page) {
+  if (!page) return null;
+  ensurePageFields(page);
+  return {
+    title: page.title || "",
+    content: page.content || "",
+    contentHtml: page.contentHtml || "",
+    format: normalizeFormat(page.format),
+    updatedAt: page.updatedAt || page.createdAt || nowIso()
+  };
+}
+
+function pageHistoryEntryForKey(pageKey) {
+  const page = pageForEditorKey(pageKey);
+  const snapshot = pageHistorySnapshot(page);
+  return snapshot ? { type: "page", key: pageKey, page: snapshot } : null;
+}
+
+function cloneHistoryValue(value) {
+  return JSON.parse(JSON.stringify(value));
+}
+
+function draftHistorySnapshot(draft) {
+  if (!draft?.id) return null;
+  const { versionHistory, ...draftSnapshot } = draft;
+  const snapshot = {
+    ...draftSnapshot,
+    format: normalizeFormat(draft.format)
+  };
+
+  if (draft.notes) {
+    const { versionHistory: notesVersionHistory, ...notesSnapshot } = draft.notes;
+    snapshot.notes = {
+      ...notesSnapshot,
+      format: normalizeFormat(draft.notes.format)
+    };
+  }
+
+  return cloneHistoryValue(snapshot);
+}
+
+function compactDraftStructureIds(affectedDraftIds = []) {
+  const ids = new Set(affectedDraftIds.filter(Boolean));
+  if (selectedDraftId) ids.add(selectedDraftId);
+  const parsedActive = parseDraftPageKey(activeEditorKey);
+  if (parsedActive?.draftId) ids.add(parsedActive.draftId);
+  if (versionHistoryDraftId && versionHistoryDraftId !== STORY_KEY) ids.add(versionHistoryDraftId);
+  return Array.from(ids);
+}
+
+function draftStructureHistoryEntry(affectedDraftIds = []) {
+  if (!state) return null;
+
+  const draftIds = compactDraftStructureIds(affectedDraftIds);
+  const draftsById = new Map((state.drafts || []).map(draft => [draft.id, draft]));
+  const draftSnapshots = draftIds
+    .map(draftId => draftHistorySnapshot(draftsById.get(draftId)))
+    .filter(Boolean);
+
+  return {
+    type: "draft-structure",
+    affectedDraftIds: Array.from(new Set(affectedDraftIds.filter(Boolean))),
+    draftOrder: (state.drafts || []).map(draft => draft.id).filter(Boolean),
+    drafts: draftSnapshots,
+    selectedDraftId,
+    activeArea,
+    activeEditorKey,
+    displayedPageKeys: Array.from(displayedPageKeys),
+    collapsedNotesIds: Array.from(collapsedNotesIds),
+    versionHistoryDraftId
+  };
+}
+
+function pageFormatHistorySnapshot(entry) {
+  if (!entry?.key || !entry.page) return null;
+  ensurePageFields(entry.page);
+  return {
+    key: entry.key,
+    format: normalizeFormat(entry.page.format)
+  };
+}
+
+function projectFormatHistoryEntry() {
+  if (!state) return null;
+  return {
+    type: "project-format",
+    defaultFormat: normalizeFormat(state.defaultFormat),
+    pageFormats: Array.from(pageEntriesForProjectState(state).values())
+      .map(pageFormatHistorySnapshot)
+      .filter(Boolean),
+    activeEditorKey
+  };
+}
+
+function pageHistorySignature(entry) {
+  if (!isPageHistoryEntry(entry)) return "";
+  return JSON.stringify({
+    key: entry.key,
+    title: entry.page?.title || "",
+    content: entry.page?.content || "",
+    contentHtml: entry.page?.contentHtml || "",
+    format: normalizeFormat(entry.page?.format || {})
+  });
+}
+
+function draftStructureHistorySignature(entry) {
+  if (!isDraftStructureHistoryEntry(entry)) return "";
+  return JSON.stringify({
+    affectedDraftIds: entry.affectedDraftIds || [],
+    draftOrder: entry.draftOrder || [],
+    drafts: entry.drafts || [],
+    selectedDraftId: entry.selectedDraftId || "",
+    activeArea: entry.activeArea || "",
+    activeEditorKey: entry.activeEditorKey || "",
+    displayedPageKeys: entry.displayedPageKeys || [],
+    collapsedNotesIds: entry.collapsedNotesIds || [],
+    versionHistoryDraftId: entry.versionHistoryDraftId || ""
+  });
+}
+
+function projectFormatHistorySignature(entry) {
+  if (!isProjectFormatHistoryEntry(entry)) return "";
+  return JSON.stringify({
+    defaultFormat: normalizeFormat(entry.defaultFormat),
+    pageFormats: entry.pageFormats || [],
+    activeEditorKey: entry.activeEditorKey || ""
+  });
+}
+
+function historyEntriesMatch(left, right) {
+  if (isPageHistoryEntry(left) || isPageHistoryEntry(right)) {
+    return isPageHistoryEntry(left)
+      && isPageHistoryEntry(right)
+      && pageHistorySignature(left) === pageHistorySignature(right);
+  }
+
+  if (isDraftStructureHistoryEntry(left) || isDraftStructureHistoryEntry(right)) {
+    return isDraftStructureHistoryEntry(left)
+      && isDraftStructureHistoryEntry(right)
+      && draftStructureHistorySignature(left) === draftStructureHistorySignature(right);
+  }
+
+  if (isProjectFormatHistoryEntry(left) || isProjectFormatHistoryEntry(right)) {
+    return isProjectFormatHistoryEntry(left)
+      && isProjectFormatHistoryEntry(right)
+      && projectFormatHistorySignature(left) === projectFormatHistorySignature(right);
+  }
+
+  if (isFullHistoryEntry(left) || isFullHistoryEntry(right)) {
+    return isFullHistoryEntry(left)
+      && isFullHistoryEntry(right)
+      && fullHistorySnapshot(left) === fullHistorySnapshot(right);
+  }
+
+  return false;
+}
+
+function pushUndoHistoryEntry(entry) {
+  if (!entry || historyEntriesMatch(entry, undoStack[undoStack.length - 1])) return;
+
+  undoStack.push(entry);
   if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
   redoStack = [];
   updateUndoRedoControls();
+}
+
+function recordUndoSnapshot() {
+  if (!state || isRestoringHistory) return;
+  typingUndoGroup = null;
+
+  const snapshot = serializeProjectState(state, { includeVersionHistory: false });
+  if (!snapshot) return;
+  pushUndoHistoryEntry(snapshot);
+}
+
+function recordPageUndoSnapshot(pageKey) {
+  if (!state || isRestoringHistory) return;
+  typingUndoGroup = null;
+
+  pushUndoHistoryEntry(pageHistoryEntryForKey(pageKey));
+}
+
+function recordDraftStructureUndoSnapshot(affectedDraftIds = []) {
+  if (!state || isRestoringHistory) return;
+  typingUndoGroup = null;
+  pushUndoHistoryEntry(draftStructureHistoryEntry(affectedDraftIds));
+}
+
+function recordProjectFormatUndoSnapshot() {
+  if (!state || isRestoringHistory) return;
+  typingUndoGroup = null;
+  pushUndoHistoryEntry(projectFormatHistoryEntry());
+}
+
+function isGroupedTypingInput(inputType) {
+  return /^(insertText|insertCompositionText|insertParagraph|deleteContentBackward|deleteContentForward)$/u
+    .test(String(inputType || ""));
+}
+
+function undoTargetForInputEvent(event) {
+  const editorEl = closestElement(event.target, "[data-editor-key]");
+  if (editorEl) {
+    return {
+      type: "page",
+      key: editorEl.dataset.editorKey,
+      grouped: isGroupedTypingInput(event.inputType)
+    };
+  }
+
+  const titleInput = closestElement(event.target, "[data-title-draft-id]");
+  if (titleInput) {
+    const pageKey = pageKeyForTitleInput(titleInput);
+    if (!pageKey) return null;
+    return {
+      type: "page",
+      key: pageKey,
+      grouped: isGroupedTypingInput(event.inputType)
+    };
+  }
+
+  return null;
+}
+
+function recordUndoSnapshotForInput(event) {
+  const target = undoTargetForInputEvent(event);
+  if (!target) return;
+
+  if (!target.grouped) {
+    if (target.type === "page") {
+      recordPageUndoSnapshot(target.key);
+    } else {
+      recordUndoSnapshot();
+    }
+    return;
+  }
+
+  const now = performance.now();
+  const canContinueGroup = typingUndoGroup
+    && typingUndoGroup.key === target.key
+    && now - typingUndoGroup.lastAt <= UNDO_TYPING_GROUP_WINDOW_MS
+    && now - typingUndoGroup.startedAt <= UNDO_TYPING_GROUP_MAX_MS;
+
+  if (canContinueGroup) {
+    typingUndoGroup.lastAt = now;
+    return;
+  }
+
+  if (target.type === "page") {
+    recordPageUndoSnapshot(target.key);
+  } else {
+    recordUndoSnapshot();
+  }
+  typingUndoGroup = { key: target.key, startedAt: now, lastAt: now };
 }
 
 function draftExists(draftId) {
@@ -799,7 +1319,9 @@ function reconcileViewAfterHistoryRestore() {
 
 function restoreHistorySnapshot(snapshot) {
   isRestoringHistory = true;
+  const versionHistories = draftVersionHistoriesById();
   state = projectStateFromSnapshot(snapshot);
+  restoreDraftVersionHistories(state, versionHistories);
   editorSelections = {};
   reconcileViewAfterHistoryRestore();
   render();
@@ -931,7 +1453,9 @@ function makeHistoryTargetVisible(target) {
 
 function restoreHistorySnapshotWithTarget(snapshot, target) {
   isRestoringHistory = true;
+  const versionHistories = draftVersionHistoriesById();
   state = projectStateFromSnapshot(snapshot);
+  restoreDraftVersionHistories(state, versionHistories);
   editorSelections = {};
   reconcileViewAfterHistoryRestore();
   makeHistoryTargetVisible(target);
@@ -942,31 +1466,267 @@ function restoreHistorySnapshotWithTarget(snapshot, target) {
   isRestoringHistory = false;
 }
 
+function pageHistoryEntryForTarget(entry) {
+  if (!isPageHistoryEntry(entry)) return null;
+  return {
+    key: entry.key,
+    page: entry.page,
+    type: parseDraftPageKey(entry.key)?.type || "page"
+  };
+}
+
+function findPageHistoryChangeTarget(fromEntry, toEntry) {
+  if (!isPageHistoryEntry(fromEntry) || !isPageHistoryEntry(toEntry)) return null;
+
+  const beforeEntry = pageHistoryEntryForTarget(fromEntry);
+  const afterEntry = pageHistoryEntryForTarget(toEntry);
+  const beforeText = pagePlainTextForHistory(beforeEntry);
+  const afterText = pagePlainTextForHistory(afterEntry);
+  const titleChanged = (beforeEntry?.page?.title || "") !== (afterEntry?.page?.title || "");
+  const textChanged = beforeText !== afterText || (beforeEntry?.page?.contentHtml || "") !== (afterEntry?.page?.contentHtml || "");
+
+  return {
+    key: toEntry.key,
+    type: textChanged ? "text" : (titleChanged ? "title" : "panel"),
+    offset: firstChangedTextOffset(beforeText, afterText)
+  };
+}
+
+function applyPageHistoryEntry(entry) {
+  if (!isPageHistoryEntry(entry)) return false;
+
+  const parsed = parseDraftPageKey(entry.key);
+  const page = pageForEditorKey(entry.key);
+  if (!parsed || !page || !entry.page) return false;
+
+  const snapshot = pageHistorySnapshot(entry.page);
+  if (!snapshot) return false;
+
+  page.content = snapshot.content;
+  page.contentHtml = snapshot.contentHtml;
+  page.format = snapshot.format;
+  page.updatedAt = snapshot.updatedAt || nowIso();
+
+  if (parsed.type === "content" && typeof snapshot.title === "string") {
+    page.title = snapshot.title.trim() || "Untitled draft";
+    if (page.notes) page.notes.title = `${page.title} Notes`;
+  } else if (parsed.type === "story" && typeof snapshot.title === "string") {
+    page.title = snapshot.title || PROJECT_NOTES_TITLE;
+  }
+
+  ensurePageFields(page);
+  return true;
+}
+
+function restorePageHistoryEntryWithTarget(entry, target) {
+  isRestoringHistory = true;
+  if (!applyPageHistoryEntry(entry)) {
+    isRestoringHistory = false;
+    updateUndoRedoControls();
+    return;
+  }
+
+  editorSelections = {
+    ...editorSelections,
+    [entry.key]: {}
+  };
+  makeHistoryTargetVisible(target || { key: entry.key, type: "text", offset: 0 });
+  render();
+  schedulePageSave(entry.key);
+  updateUndoRedoControls();
+  revealHistoryChange(target || { key: entry.key, type: "text", offset: 0 });
+  isRestoringHistory = false;
+}
+
+function pageKeyForDraftStructureEntry(entry) {
+  if (pageKeyExists(entry?.activeEditorKey)) return entry.activeEditorKey;
+  if (entry?.activeArea === "story") return STORY_KEY;
+  return draftContentKey(selectedDraftId);
+}
+
+function applyDraftStructureHistoryEntry(entry) {
+  if (!state || !isDraftStructureHistoryEntry(entry)) return false;
+
+  const currentDrafts = new Map((state.drafts || []).map(draft => [draft.id, draft]));
+  const snapshots = new Map((entry.drafts || []).map(draft => [draft.id, draft]));
+  const nextDrafts = [];
+
+  (entry.draftOrder || []).forEach(draftId => {
+    const existingDraft = currentDrafts.get(draftId);
+    if (existingDraft) {
+      nextDrafts.push(existingDraft);
+      return;
+    }
+
+    const snapshot = snapshots.get(draftId);
+    if (snapshot) nextDrafts.push(cloneHistoryValue(snapshot));
+  });
+
+  const nextIds = new Set(nextDrafts.map(draft => draft.id));
+  (state.drafts || []).forEach(draft => {
+    if (nextIds.has(draft.id)) return;
+    clearDraftVersionTimer(draft.id);
+    delete editorSelections[draftContentKey(draft.id)];
+    delete editorSelections[draftNotesKey(draft.id)];
+  });
+
+  state.drafts = nextDrafts.length ? nextDrafts : [createDraft(null)];
+  selectedDraftId = draftExists(entry.selectedDraftId) ? entry.selectedDraftId : state.drafts[0]?.id || null;
+  activeArea = entry.activeArea === "story" ? "story" : "draft";
+  activeEditorKey = pageKeyExists(entry.activeEditorKey)
+    ? entry.activeEditorKey
+    : (activeArea === "story" ? STORY_KEY : draftContentKey(selectedDraftId));
+  versionHistoryDraftId = entry.versionHistoryDraftId === STORY_KEY || draftExists(entry.versionHistoryDraftId)
+    ? entry.versionHistoryDraftId
+    : null;
+
+  displayedPageKeys = new Set((entry.displayedPageKeys || []).filter(pageKeyExists));
+  collapsedNotesIds = new Set((entry.collapsedNotesIds || []).filter(draftExists));
+  ensureDisplaySelection();
+  return true;
+}
+
+function restoreDraftStructureHistoryEntryWithTarget(entry) {
+  isRestoringHistory = true;
+  if (!applyDraftStructureHistoryEntry(entry)) {
+    isRestoringHistory = false;
+    updateUndoRedoControls();
+    return;
+  }
+
+  const target = { key: pageKeyForDraftStructureEntry(entry), type: "panel", offset: 0 };
+  render();
+  scheduleSave();
+  queueViewStateSave(0);
+  updateUndoRedoControls();
+  revealHistoryChange(target);
+  isRestoringHistory = false;
+}
+
+function applyProjectFormatHistoryEntry(entry) {
+  if (!state || !isProjectFormatHistoryEntry(entry)) return false;
+
+  state.defaultFormat = normalizeFormat(entry.defaultFormat);
+  (entry.pageFormats || []).forEach(pageFormat => {
+    const page = pageForEditorKey(pageFormat.key);
+    if (!page) return;
+    ensurePageFields(page);
+    page.format = normalizeFormat(pageFormat.format);
+  });
+  return true;
+}
+
+function restoreProjectFormatHistoryEntryWithTarget(entry) {
+  isRestoringHistory = true;
+  if (!applyProjectFormatHistoryEntry(entry)) {
+    isRestoringHistory = false;
+    updateUndoRedoControls();
+    return;
+  }
+
+  const target = { key: pageKeyExists(entry.activeEditorKey) ? entry.activeEditorKey : activeEditorKey, type: "panel", offset: 0 };
+  makeHistoryTargetVisible(target);
+  render();
+  scheduleSave();
+  updateUndoRedoControls();
+  revealHistoryChange(target);
+  isRestoringHistory = false;
+}
+
 function undoProjectChange() {
+  typingUndoGroup = null;
   if (!undoStack.length) {
     updateUndoRedoControls();
     return;
   }
 
+  const previousEntry = undoStack[undoStack.length - 1];
+  if (isPageHistoryEntry(previousEntry)) {
+    syncPageFromDom(previousEntry.key);
+    undoStack.pop();
+    const currentEntry = pageHistoryEntryForKey(previousEntry.key);
+    if (currentEntry && !historyEntriesMatch(currentEntry, previousEntry)) redoStack.push(currentEntry);
+    restorePageHistoryEntryWithTarget(previousEntry, findPageHistoryChangeTarget(currentEntry, previousEntry));
+    return;
+  }
+
+  if (isDraftStructureHistoryEntry(previousEntry)) {
+    syncFromInputs();
+    undoStack.pop();
+    const currentEntry = draftStructureHistoryEntry(previousEntry.affectedDraftIds || []);
+    if (currentEntry && !historyEntriesMatch(currentEntry, previousEntry)) redoStack.push(currentEntry);
+    restoreDraftStructureHistoryEntryWithTarget(previousEntry);
+    return;
+  }
+
+  if (isProjectFormatHistoryEntry(previousEntry)) {
+    syncFromInputs();
+    undoStack.pop();
+    const currentEntry = projectFormatHistoryEntry();
+    if (currentEntry && !historyEntriesMatch(currentEntry, previousEntry)) redoStack.push(currentEntry);
+    restoreProjectFormatHistoryEntryWithTarget(previousEntry);
+    return;
+  }
+
   syncFromInputs();
-  const fromState = projectStateFromSnapshot(serializeProjectState());
-  const currentSnapshot = serializeProjectState();
-  const previousSnapshot = undoStack.pop();
+  undoStack.pop();
+  const previousSnapshot = fullHistorySnapshot(previousEntry);
+  const fromState = projectStateFromSnapshot(serializeProjectState(state, { includeVersionHistory: false }));
+  const currentSnapshot = serializeProjectState(state, { includeVersionHistory: false });
   const toState = projectStateFromSnapshot(previousSnapshot);
   if (currentSnapshot && currentSnapshot !== previousSnapshot) redoStack.push(currentSnapshot);
   restoreHistorySnapshotWithTarget(previousSnapshot, findHistoryChangeTarget(fromState, toState));
 }
 
 function redoProjectChange() {
+  typingUndoGroup = null;
   if (!redoStack.length) {
     updateUndoRedoControls();
     return;
   }
 
+  const nextEntry = redoStack[redoStack.length - 1];
+  if (isPageHistoryEntry(nextEntry)) {
+    syncPageFromDom(nextEntry.key);
+    redoStack.pop();
+    const currentEntry = pageHistoryEntryForKey(nextEntry.key);
+    if (currentEntry && !historyEntriesMatch(currentEntry, nextEntry)) {
+      undoStack.push(currentEntry);
+      if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+    }
+    restorePageHistoryEntryWithTarget(nextEntry, findPageHistoryChangeTarget(currentEntry, nextEntry));
+    return;
+  }
+
+  if (isDraftStructureHistoryEntry(nextEntry)) {
+    syncFromInputs();
+    redoStack.pop();
+    const currentEntry = draftStructureHistoryEntry(nextEntry.affectedDraftIds || []);
+    if (currentEntry && !historyEntriesMatch(currentEntry, nextEntry)) {
+      undoStack.push(currentEntry);
+      if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+    }
+    restoreDraftStructureHistoryEntryWithTarget(nextEntry);
+    return;
+  }
+
+  if (isProjectFormatHistoryEntry(nextEntry)) {
+    syncFromInputs();
+    redoStack.pop();
+    const currentEntry = projectFormatHistoryEntry();
+    if (currentEntry && !historyEntriesMatch(currentEntry, nextEntry)) {
+      undoStack.push(currentEntry);
+      if (undoStack.length > HISTORY_LIMIT) undoStack.shift();
+    }
+    restoreProjectFormatHistoryEntryWithTarget(nextEntry);
+    return;
+  }
+
   syncFromInputs();
-  const fromState = projectStateFromSnapshot(serializeProjectState());
-  const currentSnapshot = serializeProjectState();
-  const nextSnapshot = redoStack.pop();
+  redoStack.pop();
+  const nextSnapshot = fullHistorySnapshot(nextEntry);
+  const fromState = projectStateFromSnapshot(serializeProjectState(state, { includeVersionHistory: false }));
+  const currentSnapshot = serializeProjectState(state, { includeVersionHistory: false });
   const toState = projectStateFromSnapshot(nextSnapshot);
   if (currentSnapshot && currentSnapshot !== nextSnapshot) {
     undoStack.push(currentSnapshot);
@@ -976,8 +1736,7 @@ function redoProjectChange() {
 }
 
 function editableHistoryTarget(target) {
-  if (!(target instanceof Element)) return null;
-  return target.closest("[data-editor-key], [data-title-draft-id]");
+  return closestElement(target, "[data-editor-key], [data-title-draft-id]");
 }
 
 function ensurePageFields(page) {
@@ -995,6 +1754,275 @@ function ensurePageFields(page) {
   }
   page.format = normalizeFormat({ ...currentDefaultFormat(state), ...(page.format || {}) });
   return page;
+}
+
+function stateCoreHistoryOptions() {
+  return {
+    ensurePage: ensurePageFields,
+    now: nowIso,
+    sanitizeHtml: sanitizeRichHtml,
+    textFromHtml: plainTextFromHtml
+  };
+}
+
+function pageVersionSnapshot(page, fallbackTitle, timestamp = nowIso()) {
+  ensurePageFields(page);
+  return StateCore.pageVersionSnapshot(page, fallbackTitle, timestamp);
+}
+
+function versionHasMeaningfulContent(version) {
+  return StateCore.versionHasMeaningfulContent(version);
+}
+
+function ensurePageVersionHistory(page, fallbackTitle) {
+  return StateCore.ensurePageVersionHistory(page, fallbackTitle, stateCoreHistoryOptions());
+}
+
+function ensureDraftVersionHistory(draft) {
+  return StateCore.ensureDraftVersionHistory(draft, stateCoreHistoryOptions());
+}
+
+function ensureProjectNotesVersionHistory(projectState = state) {
+  return StateCore.ensureProjectNotesVersionHistory(projectState, stateCoreHistoryOptions());
+}
+
+function pageVersionSignature(version) {
+  return StateCore.pageVersionSignature(version);
+}
+
+function versionHistoryTime(version) {
+  return StateCore.versionHistoryTime(version);
+}
+
+function sortVersionHistoryByCreatedAt(history) {
+  return StateCore.sortVersionHistoryByCreatedAt(history);
+}
+
+function latestVersionHistoryEntry(history) {
+  return StateCore.latestVersionHistoryEntry(history);
+}
+
+function currentPageHistorySnapshot(page, fallbackTitle) {
+  return StateCore.currentPageHistorySnapshot(page, fallbackTitle, stateCoreHistoryOptions());
+}
+
+function addCurrentPageToHistoryIfMissing(history, page, fallbackTitle) {
+  return StateCore.addCurrentPageToHistoryIfMissing(history, page, fallbackTitle, stateCoreHistoryOptions());
+}
+
+function applyVersionHistoryEntryToPage(page, version, fallbackTitle) {
+  return StateCore.applyVersionHistoryEntryToPage(page, version, fallbackTitle, stateCoreHistoryOptions());
+}
+
+function promotePageToNewestHistoryVersion(page, fallbackTitle) {
+  return StateCore.promotePageToNewestHistoryVersion(page, fallbackTitle, stateCoreHistoryOptions());
+}
+
+function appendPageVersionIfChanged(page, fallbackTitle) {
+  return StateCore.appendPageVersionIfChanged(page, fallbackTitle, stateCoreHistoryOptions());
+}
+
+function appendDraftVersionIfChanged(draft) {
+  return appendPageVersionIfChanged(draft, draft?.title || "Untitled draft");
+}
+
+function appendProjectNotesVersionIfChanged() {
+  return appendPageVersionIfChanged(state?.initialNotes, PROJECT_NOTES_TITLE);
+}
+
+function restoreDraftVersion(draftId, versionId) {
+  const draft = draftById(draftId);
+  if (!draft) return;
+
+  const pageKey = draftContentKey(draft.id);
+  syncPageFromDom(pageKey);
+  const history = ensureDraftVersionHistory(draft);
+  const versionIndex = history.findIndex(version => version.id === versionId);
+  if (versionIndex < 0) return;
+
+  const version = history[versionIndex];
+  const label = `Draft ${draftVersionNumber(draft, versionIndex)}`;
+  const confirmed = window.confirm(
+    `Restore ${label}?\n\nThis will replace the current draft title, text, and formatting. The current draft will be kept in version history.`
+  );
+  if (!confirmed) return;
+
+  recordPageUndoSnapshot(pageKey);
+  clearDraftVersionTimer(draft.id);
+  appendDraftVersionIfChanged(draft);
+
+  const contentHtml = sanitizeRichHtml(version.contentHtml || textToHtml(version.content || ""));
+  draft.title = version.title || draft.title || "Untitled draft";
+  draft.contentHtml = contentHtml;
+  draft.content = typeof version.content === "string" ? version.content : plainTextFromHtml(contentHtml);
+  draft.format = normalizeFormat({ ...currentDefaultFormat(state), ...(version.format || {}) });
+  draft.updatedAt = nowIso();
+  if (draft.notes) draft.notes.title = `${draft.title} Notes`;
+
+  appendDraftVersionIfChanged(draft);
+  versionHistoryDraftId = draft.id;
+  selectedDraftId = draft.id;
+  activeArea = "draft";
+  activeEditorKey = pageKey;
+  displayPage(activeEditorKey, true);
+  schedulePageSave(pageKey, {
+    includeVersionHistory: true,
+    refreshUi: false,
+    refreshDiff: false
+  });
+  render();
+  setStatus(`Restored ${label}; saving...`);
+}
+
+function restoreProjectNotesVersion(versionId) {
+  if (!state?.initialNotes) return;
+
+  syncPageFromDom(STORY_KEY);
+  const history = ensureProjectNotesVersionHistory();
+  const versionIndex = history.findIndex(version => version.id === versionId);
+  if (versionIndex < 0) return;
+
+  const version = history[versionIndex];
+  const label = `Project notes ${versionIndex + 1}`;
+  const confirmed = window.confirm(
+    `Restore ${label}?\n\nThis will replace the current Project notes text and formatting. The current Project notes will be kept in version history.`
+  );
+  if (!confirmed) return;
+
+  recordPageUndoSnapshot(STORY_KEY);
+  clearDraftVersionTimer(STORY_KEY);
+  appendProjectNotesVersionIfChanged();
+
+  const contentHtml = sanitizeRichHtml(version.contentHtml || textToHtml(version.content || ""));
+  state.initialNotes.title = PROJECT_NOTES_TITLE;
+  state.initialNotes.contentHtml = contentHtml;
+  state.initialNotes.content = typeof version.content === "string" ? version.content : plainTextFromHtml(contentHtml);
+  state.initialNotes.format = normalizeFormat({ ...currentDefaultFormat(state), ...(version.format || {}) });
+  state.initialNotes.updatedAt = nowIso();
+
+  appendProjectNotesVersionIfChanged();
+  versionHistoryDraftId = STORY_KEY;
+  activeArea = "story";
+  activeEditorKey = STORY_KEY;
+  displayPage(STORY_KEY, true);
+  schedulePageSave(STORY_KEY, {
+    includeVersionHistory: true,
+    refreshUi: false,
+    refreshDiff: false
+  });
+  render();
+  setStatus(`Restored ${label}; saving...`);
+}
+
+function clearDraftVersionTimer(draftId) {
+  window.clearTimeout(draftVersionTimers.get(draftId));
+  draftVersionTimers.delete(draftId);
+}
+
+function flushDraftVersionCapture(draftId, options = {}) {
+  const draft = draftById(draftId);
+  if (!draft) return false;
+
+  clearDraftVersionTimer(draftId);
+  const changed = appendDraftVersionIfChanged(draft);
+  if (changed && options.markChanged !== false) {
+    markStateChanged();
+    rememberLinkedProjectState();
+    if (versionHistoryDraftId === draftId) renderDiffSoon("Loading version history");
+  }
+  return changed;
+}
+
+function flushProjectNotesVersionCapture(options = {}) {
+  if (!state?.initialNotes) return false;
+
+  clearDraftVersionTimer(STORY_KEY);
+  const changed = appendProjectNotesVersionIfChanged();
+  if (changed && options.markChanged !== false) {
+    markStateChanged();
+    rememberLinkedProjectState();
+    if (versionHistoryDraftId === STORY_KEY) renderDiffSoon("Loading version history");
+  }
+  return changed;
+}
+
+function flushVersionCapture(captureKey, options = {}) {
+  return captureKey === STORY_KEY
+    ? flushProjectNotesVersionCapture(options)
+    : flushDraftVersionCapture(captureKey, options);
+}
+
+function scheduleVersionHistoryPageSave(pageKey, historyKey = pageKey) {
+  schedulePageSave(pageKey, {
+    includeVersionHistory: true,
+    refreshUi: false,
+    refreshDiff: false
+  });
+  if (versionHistoryDraftId === historyKey) renderDiffSoon("Loading version history");
+}
+
+function flushDraftVersionCaptures() {
+  const changedCaptureKeys = [];
+  [...draftVersionTimers.keys()].forEach(captureKey => {
+    if (flushVersionCapture(captureKey, { markChanged: false })) changedCaptureKeys.push(captureKey);
+  });
+  return changedCaptureKeys;
+}
+
+function queueDraftVersionCapture(draftId) {
+  if (!draftId || isRestoringHistory) return;
+
+  clearDraftVersionTimer(draftId);
+  draftVersionTimers.set(draftId, window.setTimeout(() => {
+    draftVersionTimers.delete(draftId);
+    if (appendDraftVersionIfChanged(draftById(draftId))) {
+      scheduleVersionHistoryPageSave(draftContentKey(draftId), draftId);
+    }
+  }, DRAFT_VERSION_CAPTURE_DELAY_MS));
+}
+
+function queueProjectNotesVersionCapture() {
+  if (isRestoringHistory) return;
+
+  clearDraftVersionTimer(STORY_KEY);
+  draftVersionTimers.set(STORY_KEY, window.setTimeout(() => {
+    draftVersionTimers.delete(STORY_KEY);
+    if (appendProjectNotesVersionIfChanged()) {
+      scheduleVersionHistoryPageSave(STORY_KEY);
+    }
+  }, DRAFT_VERSION_CAPTURE_DELAY_MS));
+}
+
+function queueDraftVersionCaptureForEditor(editorEl) {
+  const parsed = parseDraftPageKey(editorEl?.dataset.editorKey);
+  if (parsed?.type === "story") queueProjectNotesVersionCapture();
+  if (parsed?.type === "content") queueDraftVersionCapture(parsed.draftId);
+}
+
+function draftVersionHistoriesById(projectState = state) {
+  const histories = new Map();
+  if (Array.isArray(projectState?.initialNotes?.versionHistory)) {
+    histories.set(STORY_KEY, projectState.initialNotes.versionHistory);
+  }
+  projectState?.drafts?.forEach(draft => {
+    if (draft?.id && Array.isArray(draft.versionHistory)) {
+      histories.set(draft.id, draft.versionHistory);
+    }
+  });
+  return histories;
+}
+
+function restoreDraftVersionHistories(projectState, histories) {
+  if (projectState?.initialNotes) {
+    if (histories?.has(STORY_KEY)) projectState.initialNotes.versionHistory = histories.get(STORY_KEY);
+    ensureProjectNotesVersionHistory(projectState);
+    promotePageToNewestHistoryVersion(projectState.initialNotes, PROJECT_NOTES_TITLE);
+  }
+  projectState?.drafts?.forEach(draft => {
+    if (histories?.has(draft.id)) draft.versionHistory = histories.get(draft.id);
+    ensureDraftVersionHistory(draft);
+    promotePageToNewestHistoryVersion(draft, draft.title || "Untitled draft");
+  });
 }
 
 function fontStyle(format) {
@@ -1158,16 +2186,26 @@ function applyPageSnapshot(key, snapshotPage) {
     page.updatedAt = nowIso();
   }
 
+  if (parsed.type === "story" && changed) queueProjectNotesVersionCapture();
+  if (parsed.type === "content" && changed) queueDraftVersionCapture(parsed.draftId);
+
   return true;
 }
 
-function applyDetachedUnitSnapshot(unit) {
-  if (!unit?.pages?.length) return false;
-  let applied = false;
+function applyDetachedUnitSnapshotPageKeys(unit) {
+  const appliedPageKeys = [];
+  if (!unit?.pages?.length) return appliedPageKeys;
+
   unit.pages.forEach(page => {
-    if (page?.key && applyPageSnapshot(page.key, page.page || page)) applied = true;
+    if (page?.key && applyPageSnapshot(page.key, page.page || page)) {
+      appliedPageKeys.push(page.key);
+    }
   });
-  return applied;
+  return appliedPageKeys;
+}
+
+function applyDetachedUnitSnapshot(unit) {
+  return applyDetachedUnitSnapshotPageKeys(unit).length > 0;
 }
 
 function displayKeys() {
@@ -1240,6 +2278,16 @@ function storedEditorSelections() {
   return selections;
 }
 
+function storedPagePanePercents() {
+  const validKeys = new Set([STORY_KEY, ...state.drafts.map(draft => topLevelPageKeyForDraft(draft.id))]);
+  const stored = {};
+  Object.entries(pagePanePercents).forEach(([key, value]) => {
+    const numericValue = Number(value);
+    if (validKeys.has(key) && Number.isFinite(numericValue)) stored[key] = numericValue;
+  });
+  return stored;
+}
+
 function restoreEditorSelections(stored) {
   editorSelections = {};
   if (!stored || typeof stored !== "object" || Array.isArray(stored)) return;
@@ -1251,11 +2299,13 @@ function restoreEditorSelections(stored) {
   });
 }
 
-function saveCurrentViewState() {
+function saveCurrentViewState(options = {}) {
   if (!state) return;
 
-  saveCurrentEditorViewState();
-  saveVisibleEditorScrollPositions();
+  if (options.syncDom !== false) {
+    saveCurrentEditorViewState();
+    saveVisibleEditorScrollPositions();
+  }
 
   const selectedDraftIndex = draftIndexForId(selectedDraftId);
   const selectedDraft = state.drafts[selectedDraftIndex] || state.drafts[0] || null;
@@ -1268,6 +2318,7 @@ function saveCurrentViewState() {
     const index = draftIndexForId(draftId);
     if (index >= 0 && Number.isFinite(Number(value))) notesPanePercentsByIndex[index] = Number(value);
   });
+  const storedPanePercents = storedPagePanePercents();
 
   const viewState = {
     version: VIEW_STATE_VERSION,
@@ -1283,6 +2334,7 @@ function saveCurrentViewState() {
     collapsedNotesIndexes,
     collapsedNotesIds: [...collapsedNotesIds],
     notesPanePercents: notesPanePercentsByIndex,
+    pagePanePercents: storedPanePercents,
     pagesOnScreen,
     selectedDraftId: selectedDraft?.id || null,
     selectedDraftIndex: selectedDraftIndex >= 0 ? selectedDraftIndex : 0,
@@ -1298,6 +2350,71 @@ function saveCurrentViewState() {
   state.viewState = viewState;
   fileViewStates[projectViewStateKey()] = viewState;
   saveFileViewStates();
+}
+
+async function saveViewStateNow(options = {}) {
+  if (!state) return false;
+
+  if (isSavingViewState) {
+    viewStateSaveQueued = true;
+    return false;
+  }
+
+  saveCurrentViewState();
+  isSavingViewState = true;
+
+  try {
+    const response = await fetch("/api/view-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ viewState: state.viewState }),
+      keepalive: Boolean(options.keepalive)
+    });
+
+    if (response.ok) {
+      const payload = await response.json().catch(() => ({}));
+      if (payload.viewState) state.viewState = payload.viewState;
+    }
+    return response.ok;
+  } catch {
+    return false;
+  } finally {
+    isSavingViewState = false;
+    if (viewStateSaveQueued) {
+      viewStateSaveQueued = false;
+      queueViewStateSave(0);
+    }
+  }
+}
+
+function queueViewStateSave(delay = 350) {
+  if (!state) return;
+  window.clearTimeout(viewStateSaveTimer);
+  viewStateSaveTimer = window.setTimeout(() => {
+    saveViewStateNow();
+  }, delay);
+}
+
+function persistViewStateChange(delay = 0) {
+  if (!state) return;
+  saveCurrentViewState();
+  if (pendingPageSaveKeys.size) queuePendingPageSaves(0);
+  const hasPendingProjectSave = pendingPageSaveKeys.size || Boolean(saveTimer) || isSaving;
+  queueViewStateSave(hasPendingProjectSave ? Math.max(delay, AUTOSAVE_DELAY_MS + 100) : delay);
+}
+
+function sendViewStateBeacon() {
+  if (!state) return;
+  saveCurrentViewState();
+  const body = JSON.stringify({ viewState: state.viewState });
+  if (!navigator.sendBeacon?.("/api/view-state", new Blob([body], { type: "application/json" }))) {
+    void fetch("/api/view-state", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+      keepalive: true
+    }).catch(() => {});
+  }
 }
 
 function restoreStoredViewState(stored) {
@@ -1323,6 +2440,15 @@ function restoreStoredViewState(stored) {
   Object.entries(stored?.notesPanePercents || {}).forEach(([index, value]) => {
     const draftId = state.drafts[Number(index)]?.id;
     if (draftId && Number.isFinite(Number(value))) notesPanePercents[draftId] = Number(value);
+  });
+
+  pagePanePercents = {};
+  Object.entries(stored?.pagePanePercents || {}).forEach(([key, value]) => {
+    const numericValue = Number(value);
+    if (!Number.isFinite(numericValue)) return;
+    if (key === STORY_KEY || parseDraftPageKey(key)?.type === "content") {
+      pagePanePercents[key] = Math.max(MIN_PAGE_PANE_PERCENT, numericValue);
+    }
   });
 
   pagesOnScreen = clampPagesOnScreen(stored?.pagesOnScreen);
@@ -1371,14 +2497,17 @@ function ensureDisplaySelection() {
   notesPanePercents = Object.fromEntries(
     Object.entries(notesPanePercents).filter(([id]) => validDraftIds.has(id))
   );
+  pagePanePercents = Object.fromEntries(
+    Object.entries(pagePanePercents).filter(([key]) => (
+      key === STORY_KEY || validDraftIds.has(parseDraftPageKey(key)?.draftId)
+    ))
+  );
 
   if (!hasStoredDisplaySelection && !displayedPageKeys.size) {
     displayedPageKeys = new Set(defaultDisplayKeys());
   }
 
-  saveDisplaySelection();
-  saveCollapsedNotes();
-  saveNotesPanePercents();
+  saveLayoutViewState();
   syncPagesOnScreenToDisplaySelection();
 }
 
@@ -1417,22 +2546,88 @@ function activeDisplayKey() {
   return selectedDraftId ? draftContentKey(selectedDraftId) : STORY_KEY;
 }
 
+function defaultPagePanePercent() {
+  return 100 / Math.max(1, pagesOnScreen);
+}
+
+function pagePanePercent(key) {
+  const value = Number(pagePanePercents[key]);
+  return Number.isFinite(value) ? Math.max(MIN_PAGE_PANE_PERCENT, value) : defaultPagePanePercent();
+}
+
+function setPagePanePercent(key, value) {
+  if (!key) return;
+  pagePanePercents[key] = Math.max(MIN_PAGE_PANE_PERCENT, Number(value) || defaultPagePanePercent());
+}
+
+function targetPagePaneTotal(keys = topLevelDisplayPageKeys()) {
+  return keys.length * defaultPagePanePercent();
+}
+
+function normalizePagePanePercentsForLayout(keys = topLevelDisplayPageKeys()) {
+  if (!keys.length) return;
+  keys.forEach(key => {
+    if (!Number.isFinite(Number(pagePanePercents[key]))) pagePanePercents[key] = defaultPagePanePercent();
+  });
+
+  const total = keys.reduce((sum, key) => sum + pagePanePercent(key), 0);
+  const targetTotal = targetPagePaneTotal(keys);
+  if (!total || !targetTotal) return;
+
+  const scale = targetTotal / total;
+  keys.forEach(key => {
+    pagePanePercents[key] = Math.max(MIN_PAGE_PANE_PERCENT, pagePanePercent(key) * scale);
+  });
+}
+
+function pagePaneStyle(key, extra = "") {
+  return `--page-pane-percent: ${pagePanePercent(key)}; ${extra}`.trim();
+}
+
+function applyPagePaneStyles() {
+  Object.entries(pagePanePercents).forEach(([key, value]) => {
+    const element = els.pageCanvas.querySelector(`[data-page-key="${cssEscape(key)}"]`);
+    if (element) element.style.setProperty("--page-pane-percent", String(value));
+  });
+  queueNotesHeadingDensityUpdate();
+  queueDraftHeadingDensityUpdate();
+}
+
+function setAdjacentPagePanePercents(beforeKey, afterKey, beforeValue, afterValue) {
+  setPagePanePercent(beforeKey, beforeValue);
+  setPagePanePercent(afterKey, afterValue);
+  applyPagePaneStyles();
+}
+
+function applyAdjacentPagePaneResize(beforeKey, afterKey, nextBeforeValue) {
+  if (!beforeKey || !afterKey) return;
+  const beforeValue = pagePanePercent(beforeKey);
+  const afterValue = pagePanePercent(afterKey);
+  const pairTotal = beforeValue + afterValue;
+  if (!pairTotal) return;
+
+  const minimum = Math.min(MIN_PAGE_PANE_PERCENT, pairTotal / 2);
+  const clampedBeforeValue = Math.min(pairTotal - minimum, Math.max(minimum, nextBeforeValue));
+  setAdjacentPagePanePercents(beforeKey, afterKey, clampedBeforeValue, pairTotal - clampedBeforeValue);
+}
+
+function resetPagePanePercents(keys = topLevelDisplayPageKeys()) {
+  const defaultValue = defaultPagePanePercent();
+  keys.forEach(key => {
+    pagePanePercents[key] = defaultValue;
+  });
+  applyPagePaneStyles();
+  savePagePanePercents();
+  queueViewStateSave(250);
+}
+
 function setPagesOnScreen(value) {
   pagesOnScreen = normalizePagesOnScreenForSelection(value);
-  const visiblePagesOnScreen = Math.max(1, Math.min(pagesOnScreen, mainDisplayPageCount() || pagesOnScreen));
-  const outerPadding = 0;
-  const pageGap = 0;
-  const widthOffset = outerPadding + pageGap * (visiblePagesOnScreen - 1);
-  document.documentElement.style.setProperty(
-    "--page-width",
-    `calc((100vw - ${widthOffset}px) / ${visiblePagesOnScreen})`
-  );
-  if (els.pagesOnScreen) {
-    els.pagesOnScreen.querySelectorAll("[data-pages-on-screen]").forEach(button => {
-      button.setAttribute("aria-pressed", String(Number(button.dataset.pagesOnScreen) === pagesOnScreen));
-    });
-  }
-  saveCurrentViewState();
+  normalizePagePanePercentsForLayout();
+  applyPagePaneStyles();
+  updatePagesOnScreenControls();
+  persistViewStateChange(500);
+  if (changesPanelIsOpen()) renderDiffSoon();
   window.requestAnimationFrame(() => {
     alignPageInCanvas(activeDisplayKey());
     updateAllNotesHeadingDensity();
@@ -1480,7 +2675,7 @@ function reattachDetachedUnit(key, options = {}) {
 
 function detachUnit(key) {
   if (!state) return;
-  syncFromInputs();
+  syncDetachedUnitFromDom(key);
 
   const unit = snapshotForDetachedUnit(key);
   if (!unit) return;
@@ -1515,15 +2710,19 @@ function detachUnit(key) {
 
 function handleDetachedUnitUpdate(key, unit) {
   if (!detachedUnitKeys.has(key)) return;
-  if (!applyDetachedUnitSnapshot(unit)) return;
+  const appliedPageKeys = applyDetachedUnitSnapshotPageKeys(unit);
+  if (!appliedPageKeys.length) return;
 
   markStateChanged();
+  saveRetryCount = 0;
   rememberLinkedProjectState();
   refreshRenderedPageLabels();
   renderDraftTabs();
-  renderDiff();
+  renderDiffSoon();
   setStatus(isSaving ? "Saving..." : "Unsaved changes");
-  queueSave();
+  Array.from(new Set(appliedPageKeys)).forEach(pageKey => {
+    queuePageSave(pageKey, AUTOSAVE_DELAY_MS);
+  });
 }
 
 async function refreshDetachedUnitFromServer(key) {
@@ -1725,7 +2924,10 @@ function saveCurrentEditorSelection() {
   const anchor = selection?.anchorNode;
   const anchorElement = anchor?.nodeType === Node.ELEMENT_NODE ? anchor : anchor?.parentElement;
   const editorEl = anchorElement?.closest?.("[data-editor-key]");
-  if (editorEl && els.pageCanvas.contains(editorEl)) saveEditorSelection(editorEl);
+  if (editorEl && els.pageCanvas.contains(editorEl)) {
+    saveEditorSelection(editorEl);
+    queueViewStateSave(1000);
+  }
 }
 
 function saveCurrentEditorViewState() {
@@ -1772,6 +2974,653 @@ function restoreEditorSelection(editorEl) {
   return true;
 }
 
+function searchHighlightsSupported() {
+  return Boolean(window.CSS?.highlights && window.Highlight);
+}
+
+function clearSearchHighlights() {
+  if (!window.CSS?.highlights) return;
+  CSS.highlights.delete(SEARCH_MATCH_HIGHLIGHT);
+  CSS.highlights.delete(SEARCH_ACTIVE_HIGHLIGHT);
+}
+
+function setSearchHighlights(matchRanges, activeRanges) {
+  clearSearchHighlights();
+  if (!searchHighlightsSupported()) return;
+  if (matchRanges.length) CSS.highlights.set(SEARCH_MATCH_HIGHLIGHT, new Highlight(...matchRanges));
+  if (activeRanges.length) CSS.highlights.set(SEARCH_ACTIVE_HIGHLIGHT, new Highlight(...activeRanges));
+}
+
+function pageSearchLabel(item) {
+  if (!item) return "";
+  if (item.key === STORY_KEY) return PROJECT_NOTES_TITLE;
+  if (item.type === "notes" && item.draft) return `${item.draft.title} notes`;
+  return item.title || "Untitled";
+}
+
+function allSearchPageKeys() {
+  return state ? allPageItems().map(item => item.key) : [];
+}
+
+function normalizeSearchScopeSelection() {
+  const validKeys = new Set(allSearchPageKeys());
+  searchState.selectedKeys = new Set([...searchState.selectedKeys].filter(key => validKeys.has(key)));
+}
+
+function setSearchScopeAll(checked = true) {
+  searchState.selectedKeys = checked ? new Set(allSearchPageKeys()) : new Set();
+}
+
+function setSearchScopeSingle(pageKey) {
+  searchState.selectedKeys = pageKeyExists(pageKey) ? new Set([pageKey]) : new Set();
+}
+
+function isAllSearchScopeSelected() {
+  const allKeys = allSearchPageKeys();
+  return Boolean(allKeys.length) && allKeys.every(key => searchState.selectedKeys.has(key));
+}
+
+function searchScopeLabelText() {
+  const allKeys = allSearchPageKeys();
+  const selectedKeys = [...searchState.selectedKeys];
+  if (!selectedKeys.length) return "No pages";
+  if (allKeys.length && selectedKeys.length === allKeys.length) return "All pages";
+  if (selectedKeys.length === 1) return pageSearchLabel(pageItemForKey(selectedKeys[0]));
+  return `${selectedKeys.length} pages`;
+}
+
+function populateSearchScopeOptions() {
+  if (!els.searchScopeMenu || !state) return;
+  normalizeSearchScopeSelection();
+
+  const pageOptions = allPageItems().map(item => `
+    <label class="search-scope-option">
+      <input type="checkbox" data-search-scope-page="${escapeHtml(item.key)}"${searchState.selectedKeys.has(item.key) ? " checked" : ""}>
+      <span>${escapeHtml(pageSearchLabel(item))}</span>
+    </label>
+  `).join("");
+  const allChecked = isAllSearchScopeSelected();
+
+  els.searchScopeMenu.innerHTML = `
+    <label class="search-scope-option search-scope-all">
+      <input type="checkbox" data-search-scope-all${allChecked ? " checked" : ""}>
+      <span>All pages</span>
+    </label>
+    <span class="menu-divider" aria-hidden="true"></span>
+    ${pageOptions}
+  `;
+  const allInput = els.searchScopeMenu.querySelector("[data-search-scope-all]");
+  if (allInput) allInput.indeterminate = Boolean(searchState.selectedKeys.size && !allChecked);
+  if (els.searchScopeLabel) els.searchScopeLabel.textContent = searchScopeLabelText();
+}
+
+function selectedSearchText() {
+  const text = window.getSelection?.()?.toString?.() || "";
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function searchScopePageKeys() {
+  if (!state) return [];
+  normalizeSearchScopeSelection();
+  return [...searchState.selectedKeys];
+}
+
+function makePageVisibleForSearch(pageKey) {
+  if (pageKey === STORY_KEY) {
+    if (detachedUnitKeys.has(STORY_KEY)) return false;
+    const changed = !displayedPageKeys.has(STORY_KEY);
+    displayedPageKeys.add(STORY_KEY);
+    return changed;
+  }
+
+  const parsed = parseDraftPageKey(pageKey);
+  if (!parsed?.draftId || detachedUnitKeys.has(draftUnitKey(parsed.draftId))) return false;
+
+  const draftKey = draftContentKey(parsed.draftId);
+  let changed = !displayedPageKeys.has(draftKey);
+  displayedPageKeys.add(draftKey);
+  if (parsed.type === "notes" && collapsedNotesIds.has(parsed.draftId)) {
+    collapsedNotesIds.delete(parsed.draftId);
+    changed = true;
+  }
+  return changed;
+}
+
+function ensureSearchScopeVisible() {
+  if (!state || !searchState.open || !searchState.query) return false;
+
+  let shouldRender = false;
+  if (showChanges) {
+    showChanges = false;
+    shouldRender = true;
+  }
+
+  searchScopePageKeys().forEach(pageKey => {
+    if (makePageVisibleForSearch(pageKey)) shouldRender = true;
+  });
+
+  if (!shouldRender) return false;
+  hasStoredDisplaySelection = true;
+  ensureDisplaySelection();
+  persistViewStateChange(0);
+  render();
+  return true;
+}
+
+function textSegmentsForEditor(editorEl) {
+  const segments = [];
+  const walker = document.createTreeWalker(editorEl, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const value = node.nodeValue || "";
+    if (!value) continue;
+    segments.push({ node, start: offset, end: offset + value.length });
+    offset += value.length;
+  }
+
+  return segments;
+}
+
+function textBoundaryFromSegments(segments, offset) {
+  if (!segments.length) return null;
+  for (const segment of segments) {
+    if (offset <= segment.end) {
+      return {
+        node: segment.node,
+        offset: Math.max(0, Math.min(segment.node.nodeValue.length, offset - segment.start))
+      };
+    }
+  }
+
+  const last = segments[segments.length - 1];
+  return { node: last.node, offset: last.node.nodeValue.length };
+}
+
+function rangeFromTextSegments(segments, startOffset, endOffset) {
+  const start = textBoundaryFromSegments(segments, startOffset);
+  const end = textBoundaryFromSegments(segments, endOffset);
+  if (!start || !end) return null;
+
+  const range = document.createRange();
+  range.setStart(start.node, start.offset);
+  range.setEnd(end.node, end.offset);
+  return range.collapsed ? null : range;
+}
+
+function searchMatchesForEditor(editorEl, query) {
+  const needle = String(query || "");
+  if (!editorEl || !needle) return [];
+
+  const segments = textSegmentsForEditor(editorEl);
+  const haystack = segments.map(segment => segment.node.nodeValue).join("");
+  const normalizedHaystack = haystack.toLocaleLowerCase();
+  const normalizedNeedle = needle.toLocaleLowerCase();
+  const matches = [];
+  let index = normalizedHaystack.indexOf(normalizedNeedle);
+
+  while (index >= 0) {
+    const range = rangeFromTextSegments(segments, index, index + needle.length);
+    if (range) matches.push({ range });
+    index = normalizedHaystack.indexOf(normalizedNeedle, index + Math.max(1, normalizedNeedle.length));
+  }
+
+  return matches;
+}
+
+function searchSummaryText(totalMatches, pageCount) {
+  const query = searchState.query;
+  if (!query) return "Enter a search term.";
+  if (!totalMatches) return `No matches for "${query}".`;
+  return `${totalMatches.toLocaleString()} ${totalMatches === 1 ? "match" : "matches"} in ${pageCount} ${pageCount === 1 ? "page" : "pages"}.`;
+}
+
+function syncSearchResultBars(scopedKeys, results) {
+  const scoped = new Set(scopedKeys);
+  const query = searchState.query;
+
+  els.pageCanvas.querySelectorAll("[data-search-bar-for]").forEach(bar => {
+    const key = bar.dataset.searchBarFor;
+    const matches = results.get(key) || [];
+    const activeIndex = Math.min(matches.length - 1, Math.max(0, Number(searchState.activeIndexes[key]) || 0));
+    const visible = Boolean(searchState.open && query && scoped.has(key));
+    const countText = matches.length
+      ? `${matches.length.toLocaleString()} ${matches.length === 1 ? "match" : "matches"}`
+      : "No matches";
+
+    bar.hidden = !visible;
+    bar.querySelector("[data-search-count]")?.replaceChildren(document.createTextNode(countText));
+    bar.querySelector("[data-search-position]")?.replaceChildren(
+      document.createTextNode(matches.length ? `${activeIndex + 1} of ${matches.length}` : "")
+    );
+    bar.querySelectorAll("[data-search-page-prev], [data-search-page-next]").forEach(button => {
+      button.disabled = matches.length < 2;
+    });
+  });
+}
+
+function scrollSearchMatchIntoView(pageKey, index) {
+  const match = searchState.results.get(pageKey)?.[index];
+  if (!match) return;
+
+  const editorEl = editorElementForKey(pageKey);
+  if (!editorEl) return;
+
+  alignPageInCanvas(pageKey);
+  window.requestAnimationFrame(() => {
+    const rect = match.range.getBoundingClientRect();
+    const editorRect = editorEl.getBoundingClientRect();
+    if (!rect.height && !rect.width) return;
+
+    const targetTop = editorEl.scrollTop + rect.top - editorRect.top;
+    const targetLeft = editorEl.scrollLeft + rect.left - editorRect.left;
+    editorEl.scrollTo({
+      top: Math.max(0, targetTop - (editorEl.clientHeight * 0.36)),
+      left: Math.max(0, targetLeft - 28),
+      behavior: "smooth"
+    });
+  });
+}
+
+function refreshSearchResults(options = {}) {
+  if (!els.searchPopover) return;
+
+  if (!searchState.open) {
+    searchState.results = new Map();
+    syncSearchResultBars([], searchState.results);
+    clearSearchHighlights();
+    return;
+  }
+
+  populateSearchScopeOptions();
+
+  const query = searchState.query;
+  if (!query) {
+    searchState.results = new Map();
+    syncSearchResultBars(searchScopePageKeys(), searchState.results);
+    clearSearchHighlights();
+    if (els.searchSummary) els.searchSummary.textContent = searchSummaryText(0, 0);
+    return;
+  }
+
+  if (options.allowRender !== false && ensureSearchScopeVisible()) {
+    window.requestAnimationFrame(() => refreshSearchResults({ ...options, allowRender: false }));
+    return;
+  }
+
+  const scopedKeys = searchScopePageKeys();
+  const signature = `${scopedKeys.join("\u0000")}\n${query}`;
+  const shouldResetActive = searchState.shouldScrollToFirst || signature !== searchState.lastSignature;
+  const results = new Map();
+  const matchRanges = [];
+  const activeRanges = [];
+  let totalMatches = 0;
+  let pagesWithMatches = 0;
+
+  if (!scopedKeys.length) {
+    searchState.results = results;
+    searchState.lastSignature = signature;
+    syncSearchResultBars(scopedKeys, results);
+    clearSearchHighlights();
+    if (els.searchSummary) els.searchSummary.textContent = "No pages selected.";
+    if (els.searchPrev) els.searchPrev.disabled = true;
+    if (els.searchNext) els.searchNext.disabled = true;
+    searchState.shouldScrollToFirst = false;
+    return;
+  }
+
+  if (shouldResetActive) {
+    searchState.activeIndexes = {};
+    searchState.activeKey = null;
+  }
+
+  scopedKeys.forEach(key => {
+    const editorEl = editorElementForKey(key);
+    const matches = editorEl ? searchMatchesForEditor(editorEl, query) : [];
+    results.set(key, matches);
+    if (matches.length) {
+      pagesWithMatches += 1;
+      totalMatches += matches.length;
+      const activeIndex = Math.min(
+        matches.length - 1,
+        Math.max(0, Number(searchState.activeIndexes[key]) || 0)
+      );
+      searchState.activeIndexes[key] = activeIndex;
+      if (!searchState.activeKey) searchState.activeKey = key;
+      matches.forEach((match, index) => {
+        if (index === activeIndex) {
+          activeRanges.push(match.range);
+        } else {
+          matchRanges.push(match.range);
+        }
+      });
+    } else {
+      delete searchState.activeIndexes[key];
+    }
+  });
+
+  searchState.results = results;
+  searchState.lastSignature = signature;
+  syncSearchResultBars(scopedKeys, results);
+  setSearchHighlights(matchRanges, activeRanges);
+  if (els.searchSummary) els.searchSummary.textContent = searchSummaryText(totalMatches, pagesWithMatches);
+  if (els.searchPrev) els.searchPrev.disabled = totalMatches < 2;
+  if (els.searchNext) els.searchNext.disabled = totalMatches < 2;
+
+  if (shouldResetActive) {
+    results.forEach((matches, key) => {
+      if (matches.length) scrollSearchMatchIntoView(key, searchState.activeIndexes[key] || 0);
+    });
+  } else if (options.scrollActive && searchState.activeKey) {
+    scrollSearchMatchIntoView(searchState.activeKey, searchState.activeIndexes[searchState.activeKey] || 0);
+  }
+
+  searchState.shouldScrollToFirst = false;
+}
+
+function openSearch(options = {}) {
+  if (!els.searchPopover) return;
+  if (options.pageKey) {
+    syncPageFromDom(options.pageKey);
+  } else {
+    syncFromInputs();
+  }
+  searchState.open = true;
+  if (options.pageKey) {
+    setSearchScopeSingle(options.pageKey);
+  } else if (options.scope === "all" || !searchState.selectedKeys.size) {
+    setSearchScopeAll(true);
+  }
+  if (options.query !== undefined) {
+    searchState.query = String(options.query);
+  } else if (!searchState.query) {
+    searchState.query = selectedSearchText();
+  }
+  searchState.shouldScrollToFirst = true;
+  els.searchPopover.hidden = false;
+  if (els.searchInput) els.searchInput.value = searchState.query;
+  refreshSearchResults();
+  window.requestAnimationFrame(() => {
+    els.searchInput?.focus();
+    els.searchInput?.select();
+  });
+}
+
+function closeSearch() {
+  searchState.open = false;
+  searchState.results = new Map();
+  if (els.searchPopover) els.searchPopover.hidden = true;
+  if (els.searchScopeMenu) els.searchScopeMenu.hidden = true;
+  if (els.searchScopeToggle) els.searchScopeToggle.setAttribute("aria-expanded", "false");
+  syncSearchResultBars([], searchState.results);
+  clearSearchHighlights();
+}
+
+function toggleSearchScopeMenu(open = null) {
+  if (!els.searchScopeMenu || !els.searchScopeToggle) return;
+  const nextOpen = open ?? els.searchScopeMenu.hidden;
+  els.searchScopeMenu.hidden = !nextOpen;
+  els.searchScopeToggle.setAttribute("aria-expanded", String(nextOpen));
+}
+
+function setSearchQuery(value) {
+  searchState.query = String(value || "");
+  searchState.shouldScrollToFirst = true;
+  refreshSearchResults();
+}
+
+function setSearchScopeFromControl(control) {
+  if (!control) return;
+  if (control.matches("[data-search-scope-all]")) {
+    setSearchScopeAll(control.checked);
+  } else if (control.matches("[data-search-scope-page]")) {
+    const pageKey = control.dataset.searchScopePage;
+    if (control.checked) {
+      searchState.selectedKeys.add(pageKey);
+    } else {
+      searchState.selectedKeys.delete(pageKey);
+    }
+  }
+
+  searchState.activeKey = null;
+  searchState.shouldScrollToFirst = true;
+  refreshSearchResults();
+}
+
+function cycleSearchPage(pageKey, direction) {
+  const matches = searchState.results.get(pageKey) || [];
+  if (!matches.length) return;
+  const current = Number(searchState.activeIndexes[pageKey]) || 0;
+  const next = (current + direction + matches.length) % matches.length;
+  searchState.activeIndexes[pageKey] = next;
+  searchState.activeKey = pageKey;
+  refreshSearchResults({ allowRender: false, scrollActive: true });
+}
+
+function cycleSearch(direction) {
+  const flatMatches = [];
+  searchScopePageKeys().forEach(key => {
+    const matches = searchState.results.get(key) || [];
+    matches.forEach((_, index) => flatMatches.push({ key, index }));
+  });
+  if (!flatMatches.length) return;
+
+  const currentFlatIndex = flatMatches.findIndex(match => (
+    match.key === searchState.activeKey &&
+    match.index === (Number(searchState.activeIndexes[match.key]) || 0)
+  ));
+  const nextFlatIndex = (Math.max(0, currentFlatIndex) + direction + flatMatches.length) % flatMatches.length;
+  const next = flatMatches[nextFlatIndex];
+  searchState.activeIndexes[next.key] = next.index;
+  searchState.activeKey = next.key;
+  refreshSearchResults({ allowRender: false, scrollActive: true });
+}
+
+function closeSpellcheckMenu() {
+  spellcheckMenu?.remove();
+  spellcheckMenu = null;
+  spellcheckRange = null;
+}
+
+function caretRangeFromPoint(clientX, clientY) {
+  if (document.caretRangeFromPoint) return document.caretRangeFromPoint(clientX, clientY);
+  const position = document.caretPositionFromPoint?.(clientX, clientY);
+  if (!position) return null;
+
+  const range = document.createRange();
+  range.setStart(position.offsetNode, position.offset);
+  range.collapse(true);
+  return range;
+}
+
+function wordRangeAtPoint(editorEl, clientX, clientY) {
+  const caretRange = caretRangeFromPoint(clientX, clientY);
+  if (!caretRange || !editorEl.contains(caretRange.startContainer)) return null;
+
+  let node = caretRange.startContainer;
+  let offset = caretRange.startOffset;
+  if (node.nodeType !== Node.TEXT_NODE) {
+    node = Array.from(node.childNodes || []).find(child => child.nodeType === Node.TEXT_NODE) || null;
+    offset = 0;
+  }
+  if (!node?.nodeValue) return null;
+
+  const text = node.nodeValue;
+  const isWordCharacter = character => /[\p{L}\p{N}'’-]/u.test(character || "");
+  if (offset > 0 && !isWordCharacter(text[offset]) && isWordCharacter(text[offset - 1])) offset -= 1;
+  if (!isWordCharacter(text[offset])) return null;
+
+  let start = offset;
+  let end = offset;
+  while (start > 0 && isWordCharacter(text[start - 1])) start -= 1;
+  while (end < text.length && isWordCharacter(text[end])) end += 1;
+  if (start === end) return null;
+
+  const range = document.createRange();
+  range.setStart(node, start);
+  range.setEnd(node, end);
+  return { word: text.slice(start, end), range };
+}
+
+function selectSpellcheckRange(range = spellcheckRange) {
+  if (!range) return false;
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
+}
+
+function replaceSpellcheckWord(value) {
+  const range = spellcheckRange?.cloneRange();
+  closeSpellcheckMenu();
+  if (!selectSpellcheckRange(range)) return;
+
+  const editorEl = range.startContainer.parentElement?.closest("[data-editor-key]");
+  if (editorEl) activeEditorKey = editorEl.dataset.editorKey;
+  if (editorEl) {
+    recordPageUndoSnapshot(editorEl.dataset.editorKey);
+  } else {
+    recordUndoSnapshot();
+  }
+  insertPlainText(value, { document });
+  if (editorEl) {
+    const page = pageForEditorKey(editorEl.dataset.editorKey);
+    if (page) syncRichPage(page, editorEl);
+    schedulePageSave(editorEl.dataset.editorKey, {
+      updateViewState: false,
+      refreshUi: false,
+      refreshDiff: false
+    });
+    return;
+  }
+  scheduleSave({ syncInputs: false, refreshUi: false, refreshDiff: false });
+}
+
+function menuButtonHtml(label, action, disabled = false) {
+  return `<button type="button" data-spellcheck-action="${escapeHtml(action)}"${disabled ? " disabled" : ""}>${escapeHtml(label)}</button>`;
+}
+
+function showSpellcheckMenu({ word, range = null, suggestions = [], misspelled = false, clientX, clientY }) {
+  closeSpellcheckMenu();
+  spellcheckRange = range;
+  const menu = document.createElement("div");
+  menu.className = "spellcheck-menu";
+  menu.setAttribute("role", "menu");
+
+  const suggestionButtons = misspelled
+    ? (suggestions.length
+      ? suggestions.map((suggestion, index) => menuButtonHtml(suggestion, `suggestion:${index}`)).join("")
+      : menuButtonHtml("No spelling suggestions", "none", true))
+    : "";
+
+  menu.innerHTML = `
+    ${suggestionButtons}
+    ${misspelled ? '<span class="menu-divider" aria-hidden="true"></span>' : ""}
+    ${misspelled ? menuButtonHtml(`Ignore "${word}"`, "ignore") : ""}
+    ${misspelled ? menuButtonHtml(`Add "${word}" to dictionary`, "add") : ""}
+    <span class="menu-divider" aria-hidden="true"></span>
+    ${menuButtonHtml("Cut", "cut")}
+    ${menuButtonHtml("Copy", "copy")}
+    ${menuButtonHtml("Paste", "paste")}
+    <span class="menu-divider" aria-hidden="true"></span>
+    ${menuButtonHtml("Select all", "selectAll")}
+  `;
+
+  menu.addEventListener("click", async event => {
+    const button = event.target.closest("[data-spellcheck-action]");
+    if (!button || button.disabled) return;
+    const action = button.dataset.spellcheckAction;
+
+    if (action.startsWith("suggestion:")) {
+      replaceSpellcheckWord(suggestions[Number(action.split(":")[1])]);
+      return;
+    }
+    if (action === "ignore") {
+      ignoredSpellcheckWords.add(word.toLocaleLowerCase());
+      closeSpellcheckMenu();
+      return;
+    }
+    if (action === "add") {
+      await window.draftDiffDesktop?.addWordToDictionary?.(word);
+      replaceSpellcheckWord(word);
+      return;
+    }
+    if (action === "selectAll") {
+      const editorEl = spellcheckRange?.startContainer?.parentElement?.closest("[data-editor-key]");
+      if (editorEl) {
+        const range = document.createRange();
+        range.selectNodeContents(editorEl);
+        selectSpellcheckRange(range);
+      }
+      closeSpellcheckMenu();
+      return;
+    }
+
+    selectSpellcheckRange();
+    execRichTextCommand(action, { document });
+    closeSpellcheckMenu();
+  });
+
+  document.body.append(menu);
+  const rect = menu.getBoundingClientRect();
+  const margin = 6;
+  menu.style.left = `${Math.max(margin, Math.min(clientX, window.innerWidth - rect.width - margin))}px`;
+  menu.style.top = `${Math.max(margin, Math.min(clientY, window.innerHeight - rect.height - margin))}px`;
+  spellcheckMenu = menu;
+}
+
+async function readSpellcheckValue(callback, fallback) {
+  try {
+    return await Promise.resolve(callback());
+  } catch {
+    return fallback;
+  }
+}
+
+async function handleEditorContextMenu(event) {
+  const target = event.target instanceof Element ? event.target : event.target?.parentElement;
+  const editorEl = target?.closest?.("[data-editor-key]");
+  if (!editorEl) return;
+
+  const wordInfo = wordRangeAtPoint(editorEl, event.clientX, event.clientY);
+  event.preventDefault();
+  const range = wordInfo?.range?.cloneRange() || null;
+
+  let misspelled = false;
+  let suggestions = [];
+  if (wordInfo?.word && window.draftDiffDesktop?.checkSpelling) {
+    const normalizedWord = wordInfo.word.toLocaleLowerCase();
+    const result = await readSpellcheckValue(
+      () => window.draftDiffDesktop.checkSpelling(wordInfo.word),
+      { misspelled: false, suggestions: [] }
+    );
+    misspelled = !ignoredSpellcheckWords.has(normalizedWord) && Boolean(result?.misspelled);
+    suggestions = misspelled && Array.isArray(result?.suggestions) ? result.suggestions : [];
+  } else if (wordInfo?.word && window.draftDiffDesktop?.isWordMisspelled) {
+    const normalizedWord = wordInfo.word.toLocaleLowerCase();
+    misspelled = !ignoredSpellcheckWords.has(normalizedWord) && await readSpellcheckValue(
+      () => window.draftDiffDesktop.isWordMisspelled(wordInfo.word),
+      false
+    );
+    if (misspelled && window.draftDiffDesktop?.getWordSuggestions) {
+      suggestions = await readSpellcheckValue(
+        () => window.draftDiffDesktop.getWordSuggestions(wordInfo.word),
+        []
+      );
+    }
+  }
+
+  showSpellcheckMenu({
+    word: wordInfo?.word || "",
+    range,
+    suggestions,
+    misspelled,
+    clientX: event.clientX,
+    clientY: event.clientY
+  });
+}
+
 function displayElementForKey(pageKey) {
   if (pageKey === STORY_KEY) {
     return Array.from(els.pageCanvas.querySelectorAll("[data-page-key]"))
@@ -1785,14 +3634,14 @@ function displayElementForKey(pageKey) {
     .find(stack => stack.dataset.draftStackId === parsed.draftId);
 }
 
-function alignPageInCanvas(pageKey) {
+function alignPageInCanvas(pageKey, behavior = "auto") {
   const pageEl = displayElementForKey(pageKey);
   if (!pageEl) return;
 
   const canvasRect = els.pageCanvas.getBoundingClientRect();
   const pageRect = pageEl.getBoundingClientRect();
   const left = els.pageCanvas.scrollLeft + pageRect.left - canvasRect.left;
-  els.pageCanvas.scrollTo({ left, behavior: "auto" });
+  els.pageCanvas.scrollTo({ left, behavior });
 }
 
 function toolbarForEditor(editorKey) {
@@ -1810,7 +3659,7 @@ function pageForEditorKey(editorKey) {
 }
 
 function wordCountForText(text) {
-  const matches = String(text || "").match(/[\p{L}\p{N}]+(?:['’\-][\p{L}\p{N}]+)*/gu);
+  const matches = String(text || "").match(/[\p{L}\p{N}]+(?:[\u0027\u2019/-][\p{L}\p{N}]+)*|\*+/gu);
   return matches ? matches.length : 0;
 }
 
@@ -1822,50 +3671,6 @@ function pageWordCount(page) {
 function formatWordCount(count) {
   const value = Number(count) || 0;
   return `${value.toLocaleString()} ${value === 1 ? "word" : "words"}`;
-}
-
-function sanitizeStyleMarks(styleValue = "") {
-  const style = styleValue.toLowerCase();
-  return {
-    bold: /font-weight\s*:\s*(bold|[6-9]00)/.test(style),
-    italic: /font-style\s*:\s*italic/.test(style),
-    underline: /text-decoration[^;]*underline/.test(style),
-    strike: /text-decoration[^;]*(line-through|strike)/.test(style)
-  };
-}
-
-function wrapSemanticHtml(html, marks) {
-  let output = html;
-  if (marks.strike) output = `<s>${output}</s>`;
-  if (marks.underline) output = `<u>${output}</u>`;
-  if (marks.italic) output = `<em>${output}</em>`;
-  if (marks.bold) output = `<strong>${output}</strong>`;
-  return output;
-}
-
-function sanitizeRichHtml(html) {
-  const template = document.createElement("template");
-  template.innerHTML = String(html || "");
-  const blockTags = new Set(["div", "p", "blockquote", "ul", "ol", "li"]);
-
-  const sanitizeNode = node => {
-    if (node.nodeType === Node.TEXT_NODE) return escapeHtml(node.nodeValue);
-    if (node.nodeType !== Node.ELEMENT_NODE) return "";
-
-    const tag = node.tagName.toLowerCase();
-    if (tag === "br") return "<br>";
-
-    const inner = Array.from(node.childNodes).map(sanitizeNode).join("");
-    if (tag === "b" || tag === "strong") return `<strong>${inner}</strong>`;
-    if (tag === "i" || tag === "em") return `<em>${inner}</em>`;
-    if (tag === "u") return `<u>${inner}</u>`;
-    if (tag === "s" || tag === "strike" || tag === "del") return `<s>${inner}</s>`;
-    if (tag === "span") return wrapSemanticHtml(inner, sanitizeStyleMarks(node.getAttribute("style") || ""));
-    if (blockTags.has(tag)) return `<${tag}>${inner}</${tag}>`;
-    return inner;
-  };
-
-  return Array.from(template.content.childNodes).map(sanitizeNode).join("");
 }
 
 function plainTextFromHtml(html) {
@@ -1934,11 +3739,22 @@ function exportPageBlock(title, createdAt, content, metadata = {}) {
   const body = String(content || "").trimEnd();
   const lines = [
     title,
-    `Created: ${formatDateForExport(createdAt)}`,
+    `Created: ${formatDateForExport(createdAt)}`
   ];
   if (metadata.updatedAt) lines.push(`Last edited: ${formatDateForExport(metadata.updatedAt)}`);
+  if (Number.isFinite(metadata.wordCount)) {
+    lines.push(`Word count: ${Number(metadata.wordCount).toLocaleString("en-GB")}`);
+  }
   lines.push("", body || "[No text yet]");
   return lines.join("\n");
+}
+
+function draftExportMetadata(draft) {
+  ensurePageFields(draft);
+  return {
+    updatedAt: draft.updatedAt || draft.createdAt,
+    wordCount: pageWordCount(draft)
+  };
 }
 
 function projectNotesExportMetadata(projectState) {
@@ -1960,7 +3776,7 @@ function formatExportText(projectState) {
 
   projectState.drafts.forEach((draft, index) => {
     const title = draft.title || `Draft ${index + 1}`;
-    pages.push(exportPageBlock(title, draft.createdAt, draft.content));
+    pages.push(exportPageBlock(title, draft.createdAt, draft.content, draftExportMetadata(draft)));
     pages.push(exportPageBlock(`${title} Notes`, draft.notes.createdAt, draft.notes.content));
   });
 
@@ -2011,6 +3827,7 @@ function parseExportBlock(block) {
     throw new Error("This file does not match the Draft Diff text format.");
   }
 
+  let updatedAt = "";
   let bodyStart = 2;
   for (; bodyStart < lines.length; bodyStart += 1) {
     const line = lines[bodyStart] || "";
@@ -2019,7 +3836,13 @@ function parseExportBlock(block) {
       break;
     }
 
-    if (/^Last edited:\s*/i.test(line) || /^Word count:\s*/i.test(line)) continue;
+    const lastEditedMatch = /^Last edited:\s*(.*)$/i.exec(line);
+    if (lastEditedMatch) {
+      updatedAt = parseCreatedAt(lastEditedMatch[1]);
+      continue;
+    }
+
+    if (/^Word count:\s*/i.test(line)) continue;
     break;
   }
 
@@ -2029,6 +3852,7 @@ function parseExportBlock(block) {
   return {
     title: title.trim() || "Untitled",
     createdAt: parseCreatedAt(createdMatch[1]),
+    updatedAt,
     content: content === "[No text yet]" ? "" : content
   };
 }
@@ -2041,6 +3865,7 @@ function pageFromImportedBlock(block, fallbackTitle, previousPage = null) {
   const title = block?.title || fallbackTitle;
   const content = block?.content || "";
   const importedCreatedAt = block?.createdAt || nowIso();
+  const importedUpdatedAt = block?.updatedAt || importedCreatedAt;
   const createdAt = previousPage?.createdAt || importedCreatedAt;
   const previousContent = previousPage
     ? previousPage.content || plainTextFromHtml(previousPage.contentHtml || "")
@@ -2050,7 +3875,7 @@ function pageFromImportedBlock(block, fallbackTitle, previousPage = null) {
     id: previousPage?.id || makeId("page"),
     title,
     createdAt,
-    updatedAt: contentChanged ? nowIso() : previousPage?.updatedAt || createdAt,
+    updatedAt: contentChanged ? nowIso() : previousPage?.updatedAt || importedUpdatedAt || createdAt,
     content,
     contentHtml: textToHtml(content),
     format: preservedFormat(previousPage)
@@ -2094,17 +3919,36 @@ function stateFromExportText(text, previousState = null) {
     const draftNumber = drafts.length + 1;
     const previousDraft = previousState?.drafts?.[draftNumber - 1] || null;
     const draft = pageFromImportedBlock(draftBlock, `Draft ${draftNumber}`, previousDraft);
+    if (Array.isArray(previousDraft?.versionHistory)) {
+      draft.versionHistory = previousDraft.versionHistory;
+    }
     const notes = pageFromImportedBlock(notesBlock, `${draft.title} Notes`, previousDraft?.notes);
     notes.id = previousDraft?.notes?.id || makeId("notes");
     notes.title = `${draft.title} Notes`;
-    drafts.push({
+    const importedDraft = {
       ...draft,
       id: previousDraft?.id || makeId("draft"),
       notes
-    });
+    };
+    ensureDraftVersionHistory(importedDraft);
+    promotePageToNewestHistoryVersion(importedDraft, importedDraft.title || `Draft ${draftNumber}`);
+    appendDraftVersionIfChanged(importedDraft);
+    drafts.push(importedDraft);
   }
 
   if (!drafts.length) drafts.push(createDraft(null, 1));
+
+  const initialNotes = {
+    ...pageFromImportedBlock(storyBlock, PROJECT_NOTES_TITLE, previousState?.initialNotes),
+    id: "initial-notes",
+    title: PROJECT_NOTES_TITLE
+  };
+  if (Array.isArray(previousState?.initialNotes?.versionHistory)) {
+    initialNotes.versionHistory = previousState.initialNotes.versionHistory;
+  }
+  ensurePageVersionHistory(initialNotes, PROJECT_NOTES_TITLE);
+  promotePageToNewestHistoryVersion(initialNotes, PROJECT_NOTES_TITLE);
+  appendPageVersionIfChanged(initialNotes, PROJECT_NOTES_TITLE);
 
   return {
     version: 1,
@@ -2113,11 +3957,7 @@ function stateFromExportText(text, previousState = null) {
     createdAt,
     updatedAt: nowIso(),
     viewState: previousState?.viewState || null,
-    initialNotes: {
-      ...pageFromImportedBlock(storyBlock, PROJECT_NOTES_TITLE, previousState?.initialNotes),
-      id: "initial-notes",
-      title: PROJECT_NOTES_TITLE
-    },
+    initialNotes,
     drafts
   };
 }
@@ -2224,650 +4064,8 @@ function splitLines(text) {
   return text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
 }
 
-function isDiffSequenceWordText(text) {
-  return /^[\p{L}\p{N}]+$/u.test(text || "");
-}
-
-function isDiffSequenceWhitespaceText(text) {
-  return /^\s+$/u.test(text || "");
-}
-
-function previousSameWordIndex(parts, index) {
-  for (let current = index - 1; current >= 0; current -= 1) {
-    if (parts[current].type === "same" && isDiffSequenceWordText(parts[current].text)) return current;
-  }
-
-  return -1;
-}
-
-function nextSameWordIndex(parts, index) {
-  for (let current = index + 1; current < parts.length; current += 1) {
-    if (parts[current].type === "same" && isDiffSequenceWordText(parts[current].text)) return current;
-    if (parts[current].type !== "same") return -1;
-  }
-
-  return -1;
-}
-
-function changedWordCounts(parts, start, end) {
-  const counts = { added: 0, removed: 0 };
-
-  for (let index = start; index < end; index += 1) {
-    const part = parts[index];
-    if ((part.type === "added" || part.type === "removed") && isDiffSequenceWordText(part.text)) {
-      counts[part.type] += 1;
-    }
-  }
-
-  return counts;
-}
-
-function shouldCoalesceReplacementSegment(segment) {
-  const counts = changedWordCounts(segment, 0, segment.length);
-  return counts.added >= 2 && counts.removed >= 2 && counts.added + counts.removed <= 12;
-}
-
-function isChangedDiffPart(part) {
-  return part?.type === "added" || part?.type === "removed";
-}
-
-function sameWordCount(parts) {
-  return parts.filter(part => part.type === "same" && isDiffSequenceWordText(part.text)).length;
-}
-
-function wordTokenCount(parts) {
-  return parts.filter(part => isDiffSequenceWordText(part.text)).length;
-}
-
-function coerceDiffPartType(part, type) {
-  return {
-    ...part,
-    type,
-    beforeIndex: type === "removed" ? part.beforeIndex : undefined,
-    afterIndex: type === "added" ? part.afterIndex : undefined
-  };
-}
-
-function coalesceReplacementSegment(segment) {
-  const removed = [];
-  const added = [];
-  const neutral = [];
-  let sawRemoved = false;
-  let sawAdded = false;
-
-  segment.forEach(part => {
-    if (part.type === "removed") {
-      removed.push(part);
-      if (isDiffSequenceWordText(part.text)) sawRemoved = true;
-      return;
-    }
-
-    if (part.type === "added") {
-      added.push(part);
-      if (isDiffSequenceWordText(part.text)) sawAdded = true;
-      return;
-    }
-
-    if (part.type === "same" && isDiffSequenceWhitespaceText(part.text)) {
-      if (sawRemoved) removed.push(coerceDiffPartType(part, "removed"));
-      if (sawAdded) added.push(coerceDiffPartType(part, "added"));
-      return;
-    }
-
-    neutral.push(part);
-  });
-
-  return [...removed, ...added, ...neutral];
-}
-
-function coalesceInterleavedReplacementWindow(segment) {
-  const removed = [];
-  const added = [];
-
-  segment.forEach(part => {
-    if (part.type === "removed") {
-      removed.push(part);
-      return;
-    }
-
-    if (part.type === "added") {
-      added.push(part);
-      return;
-    }
-
-    if (part.type !== "same") return;
-
-    removed.push(coerceDiffPartType(part, "removed"));
-    added.push(coerceDiffPartType(part, "added"));
-  });
-
-  return [...removed, ...added];
-}
-
-function shouldCoalesceInterleavedReplacementWindow(segment) {
-  const counts = changedWordCounts(segment, 0, segment.length);
-  const anchors = sameWordCount(segment);
-  if (counts.added < 3 || counts.removed < 3) return false;
-
-  const words = wordTokenCount(segment);
-  if (words > 18) return false;
-
-  const changedWords = counts.added + counts.removed;
-  if (!anchors) return changedWords / words >= 0.75;
-
-  if (anchors > 5) return false;
-  return changedWords / words >= 0.55;
-}
-
-function changedWordTypes(segment) {
-  return segment
-    .filter(part => isChangedDiffPart(part) && isDiffSequenceWordText(part.text))
-    .map(part => part.type);
-}
-
-function changedWordInfos(segment) {
-  return segment
-    .map((part, index) => ({ part, index }))
-    .filter(({ part }) => isChangedDiffPart(part) && isDiffSequenceWordText(part.text))
-    .map(({ part, index }) => ({ type: part.type, index }));
-}
-
-function changedTypesAreCoalescableAlternation(types) {
-  if (types.length < 6) return false;
-
-  const added = types.filter(type => type === "added").length;
-  const removed = types.length - added;
-  if (added < 3 || removed < 3) return false;
-
-  return types.every((type, index) => index === 0 || type !== types[index - 1]);
-}
-
-function shouldCoalesceAlternatingChangedWords(segment) {
-  return changedTypesAreCoalescableAlternation(changedWordTypes(segment));
-}
-
-function alternatingChangedWordRunBounds(segment) {
-  const infos = changedWordInfos(segment);
-  if (infos.length < 6) return null;
-
-  let best = null;
-  let runStart = 0;
-  const considerRun = end => {
-    const run = infos.slice(runStart, end);
-    const types = run.map(info => info.type);
-    if (!changedTypesAreCoalescableAlternation(types)) return;
-
-    if (!best || run.length > best.wordCount) {
-      best = {
-        start: run[0].index,
-        end: run[run.length - 1].index + 1,
-        wordCount: run.length
-      };
-    }
-  };
-
-  for (let index = 1; index <= infos.length; index += 1) {
-    if (index === infos.length || infos[index].type === infos[index - 1].type) {
-      considerRun(index);
-      runStart = index;
-    }
-  }
-
-  return best;
-}
-
-function coalesceAlternatingChangedWordRun(segment) {
-  const bounds = alternatingChangedWordRunBounds(segment);
-  if (!bounds) return segment;
-
-  return [
-    ...segment.slice(0, bounds.start),
-    ...coalesceInterleavedReplacementWindow(segment.slice(bounds.start, bounds.end)),
-    ...coalesceAlternatingChangedWordRun(segment.slice(bounds.end))
-  ];
-}
-
-function coalesceAlternatingChangedWordSubsegments(segment) {
-  const coalesced = [];
-  let start = 0;
-
-  for (let index = 0; index <= segment.length; index += 1) {
-    const isBoundary = index === segment.length || segment[index].text === "\n";
-    if (!isBoundary) continue;
-
-    coalesced.push(...coalesceAlternatingChangedWordRun(segment.slice(start, index)));
-
-    if (index < segment.length) coalesced.push(segment[index]);
-    start = index + 1;
-  }
-
-  return coalesced;
-}
-
-function coalesceAlternatingChangedWordSegments(parts) {
-  const coalesced = [];
-  let index = 0;
-
-  while (index < parts.length) {
-    if (parts[index].type === "same" && isDiffSequenceWordText(parts[index].text)) {
-      coalesced.push(parts[index]);
-      index += 1;
-      continue;
-    }
-
-    const segmentStart = index;
-    while (
-      index < parts.length &&
-      !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
-    ) {
-      index += 1;
-    }
-
-    coalesced.push(...coalesceAlternatingChangedWordSubsegments(parts.slice(segmentStart, index)));
-  }
-
-  return coalesced;
-}
-
-function coalesceInterleavedReplacementSubsegment(segment) {
-  const firstChanged = segment.findIndex(isChangedDiffPart);
-  if (firstChanged < 0) return segment;
-
-  let lastChanged = -1;
-  for (let index = segment.length - 1; index >= firstChanged; index -= 1) {
-    if (isChangedDiffPart(segment[index])) {
-      lastChanged = index;
-      break;
-    }
-  }
-
-  const replacementWindow = segment.slice(firstChanged, lastChanged + 1);
-  if (!shouldCoalesceInterleavedReplacementWindow(replacementWindow)) return segment;
-
-  return [
-    ...segment.slice(0, firstChanged),
-    ...coalesceInterleavedReplacementWindow(replacementWindow),
-    ...segment.slice(lastChanged + 1)
-  ];
-}
-
-function coalesceInterleavedReplacementSegments(parts) {
-  const coalesced = [];
-  let start = 0;
-
-  for (let index = 0; index <= parts.length; index += 1) {
-    const isBoundary = index === parts.length || parts[index].text === "\n";
-    if (!isBoundary) continue;
-
-    coalesced.push(...coalesceInterleavedReplacementSubsegment(parts.slice(start, index)));
-    if (index < parts.length) coalesced.push(parts[index]);
-    start = index + 1;
-  }
-
-  return coalesced;
-}
-
-function coalesceReplacementSubsegments(segment) {
-  const coalesced = [];
-  let start = 0;
-
-  for (let index = 0; index <= segment.length; index += 1) {
-    const isBoundary = index === segment.length || segment[index].text === "\n";
-    if (!isBoundary) continue;
-
-    const subsegment = segment.slice(start, index);
-    if (shouldCoalesceReplacementSegment(subsegment)) {
-      coalesced.push(...coalesceReplacementSegment(subsegment));
-    } else {
-      coalesced.push(...subsegment);
-    }
-
-    if (index < segment.length) coalesced.push(segment[index]);
-    start = index + 1;
-  }
-
-  return coalesced;
-}
-
-function coalesceReplacementSegments(parts) {
-  const coalesced = [];
-  let index = 0;
-
-  while (index < parts.length) {
-    const part = parts[index];
-
-    if (part.type !== "same" || !isDiffSequenceWordText(part.text)) {
-      const segmentStart = index;
-      while (
-        index < parts.length &&
-        !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
-      ) {
-        index += 1;
-      }
-
-      coalesced.push(...coalesceReplacementSubsegments(parts.slice(segmentStart, index)));
-      continue;
-    }
-
-    coalesced.push(part);
-    index += 1;
-
-    const segmentStart = index;
-    while (
-      index < parts.length &&
-      !(parts[index].type === "same" && isDiffSequenceWordText(parts[index].text))
-    ) {
-      index += 1;
-    }
-
-    const segment = parts.slice(segmentStart, index);
-    coalesced.push(...coalesceReplacementSubsegments(segment));
-  }
-
-  return coalesced;
-}
-
-function diffPartKey(part) {
-  const marks = part?.marks || {};
-  return [
-    part?.text || "",
-    marks.bold ? "b" : "",
-    marks.italic ? "i" : "",
-    marks.underline ? "u" : "",
-    marks.strike ? "s" : ""
-  ].join("|");
-}
-
-function diffChangedTokenRun(before, after) {
-  const rows = Array.from({ length: before.length + 1 }, () => Array(after.length + 1).fill(0));
-
-  for (let i = before.length - 1; i >= 0; i -= 1) {
-    for (let j = after.length - 1; j >= 0; j -= 1) {
-      rows[i][j] = diffPartKey(before[i]) === diffPartKey(after[j])
-        ? rows[i + 1][j + 1] + 1
-        : Math.max(rows[i + 1][j], rows[i][j + 1]);
-    }
-  }
-
-  const result = [];
-  let i = 0;
-  let j = 0;
-
-  while (i < before.length && j < after.length) {
-    if (diffPartKey(before[i]) === diffPartKey(after[j])) {
-      result.push({
-        ...after[j],
-        type: "same",
-        beforeIndex: before[i].beforeIndex,
-        afterIndex: after[j].afterIndex
-      });
-      i += 1;
-      j += 1;
-    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
-      result.push(before[i]);
-      i += 1;
-    } else {
-      result.push(after[j]);
-      j += 1;
-    }
-  }
-
-  while (i < before.length) {
-    result.push(before[i]);
-    i += 1;
-  }
-
-  while (j < after.length) {
-    result.push(after[j]);
-    j += 1;
-  }
-
-  return result;
-}
-
-function sameDiffPartFromChangedPair(removedPart, addedPart) {
-  return {
-    ...addedPart,
-    type: "same",
-    marks: addedPart.marks || removedPart.marks || {},
-    beforeIndex: removedPart.beforeIndex,
-    afterIndex: addedPart.afterIndex
-  };
-}
-
-function changedRunContentCount(parts) {
-  return parts.filter(part => String(part.text || "").trim()).length;
-}
-
-function isMeaningfulCommonChangedRun(parts) {
-  if (!parts.length) return false;
-  const wordCount = parts.filter(part => isDiffSequenceWordText(part.text)).length;
-  return wordCount >= 1;
-}
-
-function commonChangedPrefixLength(removed, added) {
-  let length = 0;
-  while (
-    length < removed.length &&
-    length < added.length &&
-    diffPartKey(removed[length]) === diffPartKey(added[length])
-  ) {
-    length += 1;
-  }
-  return length;
-}
-
-function commonChangedSuffixLength(removed, added, prefixLength) {
-  let length = 0;
-  while (
-    length < removed.length - prefixLength &&
-    length < added.length - prefixLength &&
-    diffPartKey(removed[removed.length - 1 - length]) === diffPartKey(added[added.length - 1 - length])
-  ) {
-    length += 1;
-  }
-  return length;
-}
-
-function restoreCommonChangedAffixes(segment) {
-  const removed = segment.filter(part => part.type === "removed");
-  const added = segment.filter(part => part.type === "added");
-  if (!removed.length || !added.length) return segment;
-
-  let prefixLength = commonChangedPrefixLength(removed, added);
-  if (!isMeaningfulCommonChangedRun(removed.slice(0, prefixLength))) prefixLength = 0;
-
-  let suffixLength = commonChangedSuffixLength(removed, added, prefixLength);
-  if (!isMeaningfulCommonChangedRun(removed.slice(removed.length - suffixLength))) suffixLength = 0;
-
-  if (!prefixLength && !suffixLength) return segment;
-
-  const prefix = removed
-    .slice(0, prefixLength)
-    .map((part, index) => sameDiffPartFromChangedPair(part, added[index]));
-  const suffixRemovedStart = removed.length - suffixLength;
-  const suffixAddedStart = added.length - suffixLength;
-  const suffix = removed
-    .slice(suffixRemovedStart)
-    .map((part, index) => sameDiffPartFromChangedPair(part, added[suffixAddedStart + index]));
-
-  return [
-    ...prefix,
-    ...removed.slice(prefixLength, suffixRemovedStart),
-    ...added.slice(prefixLength, suffixAddedStart),
-    ...suffix
-  ];
-}
-
-function shouldRestoreChangedTokenRun(segment) {
-  const changedParts = segment.filter(part => part.type === "added" || part.type === "removed");
-  if (!changedParts.some(part => part.type === "added")) return false;
-  if (!changedParts.some(part => part.type === "removed")) return false;
-  if (segment.some(part => part.type === "same")) return false;
-  return changedParts.every(part => !isDiffSequenceWordText(part.text));
-}
-
-function restoreIdenticalChangedTokens(parts) {
-  const restored = [];
-  let index = 0;
-
-  while (index < parts.length) {
-    if (parts[index].type === "same") {
-      restored.push(parts[index]);
-      index += 1;
-      continue;
-    }
-
-    const segmentStart = index;
-    while (
-      index < parts.length &&
-      parts[index].type !== "same"
-    ) {
-      index += 1;
-    }
-
-    const segment = parts.slice(segmentStart, index);
-    const affixRestored = restoreCommonChangedAffixes(segment);
-    if (affixRestored !== segment) {
-      restored.push(...affixRestored);
-      continue;
-    }
-
-    if (!shouldRestoreChangedTokenRun(segment)) {
-      restored.push(...segment);
-      continue;
-    }
-
-    restored.push(...diffChangedTokenRun(
-      segment.filter(part => part.type === "removed"),
-      segment.filter(part => part.type === "added")
-    ));
-  }
-
-  return restored;
-}
-
-function shouldAbsorbWeakReplacementAnchor(parts, index) {
-  const part = parts[index];
-  if (part?.type !== "same" || !isDiffSequenceWordText(part.text)) return false;
-
-  const previousIndex = previousSameWordIndex(parts, index);
-  const followingIndex = nextSameWordIndex(parts, index);
-  if (previousIndex < 0 || followingIndex < 0) return false;
-
-  const counts = changedWordCounts(parts, previousIndex + 1, index);
-  return counts.added >= 2 && counts.removed >= 2 && counts.added + counts.removed <= 10;
-}
-
-function cleanupWeakReplacementAnchors(parts) {
-  const absorbIndexes = new Set();
-
-  parts.forEach((part, index) => {
-    if (!shouldAbsorbWeakReplacementAnchor(parts, index)) return;
-    absorbIndexes.add(index);
-
-    for (let current = index + 1; current < parts.length; current += 1) {
-      if (parts[current].type !== "same" || !isDiffSequenceWhitespaceText(parts[current].text)) break;
-      absorbIndexes.add(current);
-    }
-  });
-
-  const absorbedParts = absorbIndexes.size ? parts.map((part, index) => {
-    if (!absorbIndexes.has(index)) return part;
-    return {
-      ...part,
-      type: "added",
-      beforeIndex: undefined
-    };
-  }) : parts;
-
-  return restoreIdenticalChangedTokens(coalesceReplacementSegments(
-    coalesceInterleavedReplacementSegments(
-      coalesceAlternatingChangedWordSegments(absorbedParts)
-    )
-  ));
-}
-
-function diffSequence(before, after) {
-  const rows = Array.from({ length: before.length + 1 }, () => Array(after.length + 1).fill(0));
-
-  for (let i = before.length - 1; i >= 0; i -= 1) {
-    for (let j = after.length - 1; j >= 0; j -= 1) {
-      rows[i][j] = before[i].key === after[j].key
-        ? rows[i + 1][j + 1] + 1
-        : Math.max(rows[i + 1][j], rows[i][j + 1]);
-    }
-  }
-
-  const result = [];
-  let i = 0;
-  let j = 0;
-
-  while (i < before.length && j < after.length) {
-    if (before[i].key === after[j].key) {
-      result.push({
-        type: "same",
-        text: after[j].text,
-        marks: after[j].marks || before[i].marks || {},
-        beforeIndex: before[i].index ?? i,
-        afterIndex: after[j].index ?? j
-      });
-      i += 1;
-      j += 1;
-    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
-      result.push({
-        type: "removed",
-        text: before[i].text,
-        marks: before[i].marks || {},
-        beforeIndex: before[i].index ?? i
-      });
-      i += 1;
-    } else {
-      result.push({
-        type: "added",
-        text: after[j].text,
-        marks: after[j].marks || {},
-        afterIndex: after[j].index ?? j
-      });
-      j += 1;
-    }
-  }
-
-  while (i < before.length) {
-    result.push({
-      type: "removed",
-      text: before[i].text,
-      marks: before[i].marks || {},
-      beforeIndex: before[i].index ?? i
-    });
-    i += 1;
-  }
-
-  while (j < after.length) {
-    result.push({
-      type: "added",
-      text: after[j].text,
-      marks: after[j].marks || {},
-      afterIndex: after[j].index ?? j
-    });
-    j += 1;
-  }
-
-  return cleanupWeakReplacementAnchors(result);
-}
-
 function tokenizeSegment(text, marks = {}) {
-  const normalized = String(text || "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");
-  const matches = normalized.match(/\n|[^\S\n]+|[\p{L}\p{N}]+|[^\s\p{L}\p{N}]/gu) || [];
-  const semanticKey = marks.whitespace ? "" : `${marks.bold ? "b" : ""}${marks.italic ? "i" : ""}${marks.underline ? "u" : ""}${marks.strike ? "s" : ""}`;
-  return matches.map(token => ({
-    key: /^\s+$/u.test(token)
-      ? token
-      : `${token}|${semanticKey}`,
-    text: token,
-    marks: { ...marks },
-    isWhitespace: /^\s+$/u.test(token)
-  }));
+  return DiffCore.tokenizeText(text, marks);
 }
 
 function semanticTokensFromHtml(html) {
@@ -2945,408 +4143,136 @@ function semanticTokensFromHtml(html) {
   return tokens.map((token, index) => ({ ...token, index }));
 }
 
-const DIFF_COMMON_WORDS = new Set([
-  "a", "an", "and", "are", "as", "at", "be", "been", "but", "by", "for", "from",
-  "had", "has", "have", "he", "her", "his", "i", "in", "is", "it", "its", "me",
-  "my", "not", "of", "on", "or", "our", "she", "so", "that", "the", "their",
-  "them", "then", "there", "they", "this", "to", "was", "we", "were", "with",
-  "you", "your"
-]);
-
-const DIFF_CLAUSE_STARTERS = new Set([
-  "and", "but", "or", "so", "then", "yet", "though", "although", "because",
-  "while", "when", "where", "who", "which", "that", "one", "two", "some",
-  "couple", "another", "other", "others", "going", "no", "i", "he", "she",
-  "they", "we", "it", "the", "there", "this"
-]);
-
-const DIFF_BOUNDARY_CONJUNCTIONS = new Set([
-  "and", "but", "or", "so", "yet"
-]);
-
-const DIFF_LONG_COMMA_CLAUSE_MIN_TERMS = 4;
-const DIFF_LONG_CONJUNCTION_CLAUSE_MIN_TERMS = 4;
-
-function isDiffWordToken(token) {
-  return /^[\p{L}\p{N}]+$/u.test(token?.text || "");
+function hashDiffText(value) {
+  return DiffCore.hashText(value);
 }
 
-function diffTermForToken(token) {
-  return String(token?.text || "").toLowerCase();
+function diffHtmlSignature(html) {
+  const text = String(html || "");
+  return `${text.length}:${hashDiffText(text)}`;
 }
 
-function comparableDiffTerm(term) {
-  return String(term || "").replace(/[^\p{L}\p{N}]+/gu, "").toLowerCase();
-}
+function rememberLimitedCache(cache, key, value, limit) {
+  if (cache.has(key)) cache.delete(key);
+  cache.set(key, value);
 
-function diffTermsMatch(left, right) {
-  if (left === right) return true;
-
-  const normalizedLeft = comparableDiffTerm(left);
-  const normalizedRight = comparableDiffTerm(right);
-  return Boolean(
-    normalizedLeft &&
-    normalizedRight &&
-    normalizedLeft === normalizedRight
-  );
-}
-
-function meaningfulTermsForTokens(tokens) {
-  const terms = tokens
-    .filter(isDiffWordToken)
-    .map(diffTermForToken)
-    .filter(term => term.length > 1 && !DIFF_COMMON_WORDS.has(term));
-
-  if (terms.length) return terms;
-
-  return tokens
-    .filter(isDiffWordToken)
-    .map(diffTermForToken)
-    .filter(term => term.length > 1);
-}
-
-function isDiffClauseDashToken(token) {
-  const text = token?.text || "";
-  return text === "\u2014" || text === "\u2013";
-}
-
-function splitDiffBlocks(tokens) {
-  const blocks = [];
-  let current = [];
-  let pendingSentenceBoundary = false;
-  const closingPunctuation = new Set([")", "]", "}", "\"", "'", "”", "’"]);
-
-  const flush = () => {
-    if (!current.length) return;
-    if (current.some(token => String(token.text || "").trim() || token.text === "\n")) {
-      blocks.push(current);
-    }
-    current = [];
-    pendingSentenceBoundary = false;
-  };
-
-  const shouldSplitAfterComma = index => {
-    let nextWord = "";
-    const clauseTokens = [];
-
-    for (let nextIndex = index + 1; nextIndex < tokens.length; nextIndex += 1) {
-      const nextToken = tokens[nextIndex];
-      if (nextToken.text === "\n") return true;
-      if (/[.!?:;]/u.test(nextToken.text || "") || nextToken.text === "," || isDiffClauseDashToken(nextToken)) break;
-      clauseTokens.push(nextToken);
-      if (/^\s+$/u.test(nextToken.text || "")) continue;
-      if (!isDiffWordToken(nextToken)) break;
-      if (!nextWord) nextWord = diffTermForToken(nextToken);
-    }
-
-    return Boolean(
-      nextWord &&
-      (
-        DIFF_CLAUSE_STARTERS.has(nextWord) ||
-        meaningfulTermsForTokens(clauseTokens).length >= DIFF_LONG_COMMA_CLAUSE_MIN_TERMS
-      )
-    );
-  };
-
-  const shouldSplitAfterConjunction = index => {
-    if (!isDiffWordToken(tokens[index])) return false;
-    if (!DIFF_BOUNDARY_CONJUNCTIONS.has(diffTermForToken(tokens[index]))) return false;
-
-    let nextWord = "";
-    const clauseTokens = [];
-
-    for (let nextIndex = index + 1; nextIndex < tokens.length; nextIndex += 1) {
-      const nextToken = tokens[nextIndex];
-      if (nextToken.text === "\n") break;
-      if (/[.!?:;]/u.test(nextToken.text || "") || nextToken.text === "," || isDiffClauseDashToken(nextToken)) break;
-      clauseTokens.push(nextToken);
-      if (/^\s+$/u.test(nextToken.text || "")) continue;
-      if (!isDiffWordToken(nextToken)) break;
-      if (!nextWord) nextWord = diffTermForToken(nextToken);
-    }
-
-    return Boolean(
-      nextWord &&
-      meaningfulTermsForTokens(clauseTokens).length >= DIFF_LONG_CONJUNCTION_CLAUSE_MIN_TERMS
-    );
-  };
-
-  tokens.forEach((token, index) => {
-    const isWhitespace = /^\s+$/u.test(token.text || "");
-    if (token.text === "(" && current.some(currentToken => String(currentToken.text || "").trim())) flush();
-    if (pendingSentenceBoundary && !isWhitespace && !closingPunctuation.has(token.text)) flush();
-
-    current.push(token);
-
-    if (token.text === "\n") {
-      flush();
-    } else if (
-      /[.!?:;]/u.test(token.text || "") ||
-      isDiffClauseDashToken(token) ||
-      (token.text === "," && shouldSplitAfterComma(index)) ||
-      shouldSplitAfterConjunction(index)
-    ) {
-      pendingSentenceBoundary = true;
-    }
-  });
-
-  flush();
-  return blocks;
-}
-
-function blockSimilarity(beforeBlock, afterBlock) {
-  const beforeTerms = meaningfulTermsForTokens(beforeBlock);
-  const afterTerms = meaningfulTermsForTokens(afterBlock);
-  if (!beforeTerms.length || !afterTerms.length) return 0;
-
-  const availableBeforeTerms = [...beforeTerms];
-
-  let shared = 0;
-  afterTerms.forEach(term => {
-    const matchedIndex = availableBeforeTerms.findIndex(beforeTerm => diffTermsMatch(beforeTerm, term));
-    if (matchedIndex < 0) return;
-    shared += 1;
-    availableBeforeTerms.splice(matchedIndex, 1);
-  });
-
-  if (!shared) return 0;
-
-  return (2 * shared) / (beforeTerms.length + afterTerms.length);
-}
-
-function shouldAlignBlocks(beforeBlock, afterBlock) {
-  const beforeTerms = meaningfulTermsForTokens(beforeBlock);
-  const afterTerms = meaningfulTermsForTokens(afterBlock);
-  const shorterLength = Math.min(beforeTerms.length, afterTerms.length);
-  if (!shorterLength) return false;
-
-  const similarity = blockSimilarity(beforeBlock, afterBlock);
-  const threshold = shorterLength <= 2 ? 0.5 : shorterLength <= 3 ? 0.42 : 0.38;
-  return similarity >= threshold;
-}
-
-function alignDiffBlocks(beforeBlocks, afterBlocks) {
-  const rows = Array.from(
-    { length: beforeBlocks.length + 1 },
-    () => Array(afterBlocks.length + 1).fill(0)
-  );
-  const similarities = Array.from(
-    { length: beforeBlocks.length },
-    () => Array(afterBlocks.length).fill(0)
-  );
-
-  for (let i = beforeBlocks.length - 1; i >= 0; i -= 1) {
-    for (let j = afterBlocks.length - 1; j >= 0; j -= 1) {
-      const similarity = shouldAlignBlocks(beforeBlocks[i], afterBlocks[j])
-        ? blockSimilarity(beforeBlocks[i], afterBlocks[j])
-        : 0;
-      similarities[i][j] = similarity;
-      rows[i][j] = Math.max(
-        rows[i + 1][j],
-        rows[i][j + 1],
-        similarity ? similarity + rows[i + 1][j + 1] : 0
-      );
-    }
+  while (cache.size > limit) {
+    cache.delete(cache.keys().next().value);
   }
 
-  const pairs = [];
-  let i = 0;
-  let j = 0;
-  while (i < beforeBlocks.length && j < afterBlocks.length) {
-    const similarity = similarities[i][j];
-    const matchScore = similarity ? similarity + rows[i + 1][j + 1] : -1;
-    if (similarity && matchScore >= rows[i + 1][j] && matchScore >= rows[i][j + 1]) {
-      pairs.push([i, j]);
-      i += 1;
-      j += 1;
-    } else if (rows[i + 1][j] >= rows[i][j + 1]) {
-      i += 1;
-    } else {
-      j += 1;
-    }
-  }
-
-  return pairs;
+  return value;
 }
 
-function flattenDiffBlockRange(blocks, start, end) {
-  return blocks.slice(start, end).flat();
+function cachedDiffBlocks(signature, html) {
+  const cached = diffBlockCache.get(signature);
+  if (!cached || cached.html !== html) return null;
+
+  diffBlockCache.delete(signature);
+  diffBlockCache.set(signature, cached);
+  return cached;
 }
 
-function diffBlockRangeSimilarity(beforeBlocks, afterBlocks, range) {
-  return blockSimilarity(
-    flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd),
-    flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd)
-  );
+function diffBlocksForPage(page) {
+  ensurePageFields(page);
+  const html = page.contentHtml || textToHtml(page.content || "");
+  const signature = diffHtmlSignature(html);
+  const cached = cachedDiffBlocks(signature, html);
+  if (cached) return cached;
+
+  const tokens = semanticTokensFromHtml(html);
+  const blocks = DiffCore.splitDiffBlocks(tokens);
+  return rememberLimitedCache(diffBlockCache, signature, {
+    html,
+    signature,
+    tokens,
+    blocks
+  }, DIFF_BLOCK_CACHE_LIMIT);
 }
 
-function shouldExpandDiffBlockRange(currentSimilarity, candidateSimilarity) {
-  const improvement = candidateSimilarity - currentSimilarity;
-  if (candidateSimilarity >= 0.9 && improvement >= 0.02) return true;
-  if (candidateSimilarity >= 0.68 && improvement >= 0.05) return true;
-  return currentSimilarity < 0.62 && improvement >= 0.1;
-}
-
-function diffBlockHasMeaningfulTerms(block) {
-  return meaningfulTermsForTokens(block).length > 0;
-}
-
-function previousDiffExpansionStart(blocks, start, limit) {
-  let candidateStart = start - 1;
-  while (candidateStart > limit && !diffBlockHasMeaningfulTerms(blocks[candidateStart])) {
-    candidateStart -= 1;
-  }
-  return candidateStart;
-}
-
-function nextDiffExpansionEnd(blocks, end, limit) {
-  let candidateEnd = end + 1;
-  while (candidateEnd < limit && !diffBlockHasMeaningfulTerms(blocks[candidateEnd - 1])) {
-    candidateEnd += 1;
-  }
-  return candidateEnd;
-}
-
-function expandDiffBlockPairs(pairs, beforeBlocks, afterBlocks) {
-  const ranges = pairs.map(([beforeIndex, afterIndex]) => ({
-    beforeStart: beforeIndex,
-    beforeEnd: beforeIndex + 1,
-    afterStart: afterIndex,
-    afterEnd: afterIndex + 1
-  }));
-
-  let changed = true;
-  let guard = beforeBlocks.length + afterBlocks.length;
-
-  while (changed && guard > 0) {
-    changed = false;
-    guard -= 1;
-
-    ranges.forEach((range, index) => {
-      const prevBeforeLimit = index > 0 ? ranges[index - 1].beforeEnd : 0;
-      const prevAfterLimit = index > 0 ? ranges[index - 1].afterEnd : 0;
-      const nextBeforeLimit = index + 1 < ranges.length ? ranges[index + 1].beforeStart : beforeBlocks.length;
-      const nextAfterLimit = index + 1 < ranges.length ? ranges[index + 1].afterStart : afterBlocks.length;
-      const currentSimilarity = diffBlockRangeSimilarity(beforeBlocks, afterBlocks, range);
-      let bestRange = null;
-      let bestSimilarity = currentSimilarity;
-
-      const candidates = [];
-      if (range.beforeStart > prevBeforeLimit) {
-        candidates.push({
-          ...range,
-          beforeStart: previousDiffExpansionStart(beforeBlocks, range.beforeStart, prevBeforeLimit)
-        });
-      }
-      if (range.afterStart > prevAfterLimit) {
-        candidates.push({
-          ...range,
-          afterStart: previousDiffExpansionStart(afterBlocks, range.afterStart, prevAfterLimit)
-        });
-      }
-      if (range.beforeEnd < nextBeforeLimit) {
-        candidates.push({
-          ...range,
-          beforeEnd: nextDiffExpansionEnd(beforeBlocks, range.beforeEnd, nextBeforeLimit)
-        });
-      }
-      if (range.afterEnd < nextAfterLimit) {
-        candidates.push({
-          ...range,
-          afterEnd: nextDiffExpansionEnd(afterBlocks, range.afterEnd, nextAfterLimit)
-        });
-      }
-
-      candidates.forEach(candidate => {
-        const candidateSimilarity = diffBlockRangeSimilarity(beforeBlocks, afterBlocks, candidate);
-        if (
-          candidateSimilarity > bestSimilarity &&
-          shouldExpandDiffBlockRange(currentSimilarity, candidateSimilarity)
-        ) {
-          bestRange = candidate;
-          bestSimilarity = candidateSimilarity;
-        }
-      });
-
-      if (bestRange) {
-        range.beforeStart = bestRange.beforeStart;
-        range.beforeEnd = bestRange.beforeEnd;
-        range.afterStart = bestRange.afterStart;
-        range.afterEnd = bestRange.afterEnd;
-        changed = true;
-      }
-    });
-  }
-
-  return ranges;
-}
-
-function diffUnmatchedBlock(tokens, type) {
-  return tokens.map(token => ({
-    type,
+function sameDiffPartsFromTokens(beforeTokens, afterTokens) {
+  return afterTokens.map((token, index) => ({
+    type: "same",
     text: token.text,
-    marks: token.marks || {},
-    beforeIndex: type === "removed" ? token.index : undefined,
-    afterIndex: type === "added" ? token.index : undefined
+    marks: token.marks || beforeTokens[index]?.marks || {},
+    beforeIndex: beforeTokens[index]?.index ?? index,
+    afterIndex: token.index ?? index
   }));
 }
 
-function diffBlocksHaveSameTokens(beforeBlock, afterBlock) {
-  if (beforeBlock.length !== afterBlock.length) return false;
-  return beforeBlock.every((token, index) => token.key === afterBlock[index].key);
+function diffResultCacheKey(beforeInfo, afterInfo) {
+  return `${beforeInfo.signature}>${afterInfo.signature}`;
 }
 
-function appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeStart, beforeEnd, afterStart, afterEnd) {
-  let beforeIndex = beforeStart;
-  let afterIndex = afterStart;
+function cachedDiffResult(beforeInfo, afterInfo) {
+  const cacheKey = diffResultCacheKey(beforeInfo, afterInfo);
+  const cached = diffResultCache.get(cacheKey);
+  if (!cached || cached.beforeHtml !== beforeInfo.html || cached.afterHtml !== afterInfo.html) return null;
 
-  while (beforeIndex < beforeEnd || afterIndex < afterEnd) {
-    if (
-      beforeIndex < beforeEnd &&
-      afterIndex < afterEnd &&
-      diffBlocksHaveSameTokens(beforeBlocks[beforeIndex], afterBlocks[afterIndex])
-    ) {
-      parts.push(...diffSequence(beforeBlocks[beforeIndex], afterBlocks[afterIndex]));
-      beforeIndex += 1;
-      afterIndex += 1;
-      continue;
-    }
+  diffResultCache.delete(cacheKey);
+  diffResultCache.set(cacheKey, cached);
+  return cached.result;
+}
 
-    if (beforeIndex < beforeEnd) {
-      parts.push(...diffUnmatchedBlock(beforeBlocks[beforeIndex], "removed"));
-      beforeIndex += 1;
-      continue;
-    }
+function rememberDiffResult(beforeInfo, afterInfo, result) {
+  if ((result.parts?.length || 0) > DIFF_RESULT_MAX_CACHE_PARTS) return result;
 
-    parts.push(...diffUnmatchedBlock(afterBlocks[afterIndex], "added"));
-    afterIndex += 1;
+  return rememberLimitedCache(diffResultCache, diffResultCacheKey(beforeInfo, afterInfo), {
+    beforeHtml: beforeInfo.html,
+    afterHtml: afterInfo.html,
+    result
+  }, DIFF_RESULT_CACHE_LIMIT).result;
+}
+
+function completeDiffResult(beforeInfo, afterInfo, parts) {
+  return {
+    parts,
+    hasChanges: beforeInfo.html !== afterInfo.html || parts.some(DiffCore.isChangedDiffPart)
+  };
+}
+
+function diffRichPagesResult(beforePage, afterPage) {
+  const beforeInfo = diffBlocksForPage(beforePage);
+  const afterInfo = diffBlocksForPage(afterPage);
+  const cached = cachedDiffResult(beforeInfo, afterInfo);
+  if (cached) return cached;
+
+  if (beforeInfo.html === afterInfo.html) {
+    return rememberDiffResult(beforeInfo, afterInfo, completeDiffResult(
+      beforeInfo,
+      afterInfo,
+      sameDiffPartsFromTokens(beforeInfo.tokens, afterInfo.tokens)
+    ));
   }
-}
 
-function diffRichPages(beforePage, afterPage) {
-  ensurePageFields(beforePage);
-  ensurePageFields(afterPage);
-  const beforeBlocks = splitDiffBlocks(semanticTokensFromHtml(beforePage.contentHtml));
-  const afterBlocks = splitDiffBlocks(semanticTokensFromHtml(afterPage.contentHtml));
-  const pairs = expandDiffBlockPairs(alignDiffBlocks(beforeBlocks, afterBlocks), beforeBlocks, afterBlocks);
+  const beforeBlocks = beforeInfo.blocks;
+  const afterBlocks = afterInfo.blocks;
+  const pairs = DiffCore.expandDiffBlockPairs(DiffCore.alignDiffBlocks(beforeBlocks, afterBlocks), beforeBlocks, afterBlocks);
   const parts = [];
   let beforeIndex = 0;
   let afterIndex = 0;
 
   pairs.forEach(range => {
-    appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, range.beforeStart, afterIndex, range.afterStart);
+    DiffCore.appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, range.beforeStart, afterIndex, range.afterStart);
 
-    parts.push(...diffSequence(
-      flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd),
-      flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd)
-    ));
+    const beforeTokens = DiffCore.flattenDiffBlockRange(beforeBlocks, range.beforeStart, range.beforeEnd);
+    const afterTokens = DiffCore.flattenDiffBlockRange(afterBlocks, range.afterStart, range.afterEnd);
+
+    parts.push(...DiffCore.diffSequence(beforeTokens, afterTokens));
     beforeIndex = range.beforeEnd;
     afterIndex = range.afterEnd;
   });
 
-  appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, beforeBlocks.length, afterIndex, afterBlocks.length);
+  DiffCore.appendUnmatchedBlockGap(parts, beforeBlocks, afterBlocks, beforeIndex, beforeBlocks.length, afterIndex, afterBlocks.length);
 
-  return restoreIdenticalChangedTokens(parts);
+  return rememberDiffResult(beforeInfo, afterInfo, completeDiffResult(
+    beforeInfo,
+    afterInfo,
+    DiffCore.restoreIdenticalChangedTokens(parts)
+  ));
+}
+
+function diffRichPages(beforePage, afterPage) {
+  return diffRichPagesResult(beforePage, afterPage).parts;
 }
 
 function countMeaningfulChanges(parts) {
@@ -3368,12 +4294,32 @@ function countMeaningfulChanges(parts) {
   return count;
 }
 
-function diffTokenStats(parts) {
-  return parts.reduce((stats, part) => {
-    if (part.type === "added" && part.text.trim()) stats.adds += 1;
-    if (part.type === "removed" && part.text.trim()) stats.dels += 1;
-    return stats;
-  }, { adds: 0, dels: 0 });
+function countDiffSegments(parts, type) {
+  let count = 0;
+  let text = "";
+
+  const flush = () => {
+    if (text.trim()) count += 1;
+    text = "";
+  };
+
+  parts.forEach(part => {
+    if (part.type === type) {
+      text += part.text || "";
+      return;
+    }
+    if (text) flush();
+  });
+  if (text) flush();
+
+  return count;
+}
+
+function diffSegmentStats(parts) {
+  return {
+    adds: countDiffSegments(parts, "added"),
+    dels: countDiffSegments(parts, "removed")
+  };
 }
 
 function pairForIndexes(beforeIndex, afterIndex) {
@@ -3391,17 +4337,23 @@ function draftIndexForId(draftId) {
 }
 
 function renderDraftTabs() {
-  const storyDisabled = showChanges;
-  els.storyTab.classList.toggle("active", !showChanges && activeArea === "story");
-  els.storyTab.classList.toggle("is-disabled", storyDisabled);
-  els.storyTab.setAttribute("aria-disabled", String(storyDisabled));
-  els.storyDisplayToggle.checked = showChanges ? false : displayedPageKeys.has(STORY_KEY);
-  els.storyDisplayToggle.disabled = storyDisabled;
-  els.storyDisplayToggle.setAttribute("aria-label", showChanges ? "Project notes are not compared" : "Display Project notes");
+  const historyMode = Boolean(versionHistoryDraftId);
+  const storyHistoryActive = versionHistoryDraftId === STORY_KEY;
+  const storySelectionDisabled = showChanges || historyMode;
+  els.tabStrip?.classList.toggle("version-history-tabs", historyMode);
+  els.storyTab.classList.toggle("history-tab", historyMode);
+  els.storyTab.classList.toggle("active", historyMode ? storyHistoryActive : (!showChanges && activeArea === "story"));
+  els.storyTab.classList.toggle("is-disabled", showChanges);
+  els.storyTab.setAttribute("aria-disabled", String(showChanges));
+  els.storyDisplayToggle.checked = storySelectionDisabled ? false : displayedPageKeys.has(STORY_KEY);
+  els.storyDisplayToggle.disabled = storySelectionDisabled;
+  els.storyDisplayToggle.setAttribute("aria-label", historyMode
+    ? "Project notes display selection is not used in version history"
+    : (showChanges ? "Project notes are not compared" : "Display Project notes"));
   const storyFocusButton = els.storyTab.querySelector("[data-story-focus]");
   if (storyFocusButton) {
-    storyFocusButton.disabled = storyDisabled;
-    storyFocusButton.setAttribute("aria-disabled", String(storyDisabled));
+    storyFocusButton.disabled = showChanges;
+    storyFocusButton.setAttribute("aria-disabled", String(showChanges));
   }
   const selectedDrafts = selectedDraftDisplayCount();
   const hasDrafts = Boolean(state.drafts.length);
@@ -3409,17 +4361,26 @@ function renderDraftTabs() {
   const partiallySelected = selectedDrafts > 0 && !allSelected;
 
   if (els.allDraftsTab && els.allDraftsToggle) {
-    els.allDraftsTab.classList.toggle("is-partial", partiallySelected);
-    els.allDraftsToggle.checked = allSelected;
-    els.allDraftsToggle.indeterminate = partiallySelected;
-    els.allDraftsToggle.disabled = !hasDrafts;
-    els.allDraftsToggle.setAttribute("aria-label", showChanges ? "Compare all drafts" : "Display all drafts");
-    els.allDraftsToggle.setAttribute("aria-checked", partiallySelected ? "mixed" : String(allSelected));
+    els.allDraftsTab.classList.toggle("is-partial", !historyMode && partiallySelected);
+    els.allDraftsTab.classList.toggle("is-disabled", historyMode || !hasDrafts);
+    els.allDraftsToggle.checked = historyMode ? false : allSelected;
+    els.allDraftsToggle.indeterminate = historyMode ? false : partiallySelected;
+    els.allDraftsToggle.disabled = historyMode || !hasDrafts;
+    els.allDraftsToggle.setAttribute("aria-label", historyMode
+      ? "Draft display selection is not used in version history"
+      : (showChanges ? "Compare all drafts" : "Display all drafts"));
+    els.allDraftsToggle.setAttribute("aria-checked", historyMode ? "false" : (partiallySelected ? "mixed" : String(allSelected)));
   }
 
   els.draftTabs.innerHTML = state.drafts.map((draft, index) => {
-    const active = draft.id === selectedDraftId && activeArea !== "story" ? " active" : "";
+    const activeDraftId = historyMode ? versionHistoryDraftId : selectedDraftId;
+    const active = draft.id === activeDraftId && (historyMode || activeArea !== "story") ? " active" : "";
     const checked = displayedPageKeys.has(draftContentKey(draft.id)) ? " checked" : "";
+    const disabled = historyMode ? " disabled" : "";
+    const historyClass = historyMode ? " history-tab" : "";
+    const displayLabel = historyMode
+      ? `Draft display selection is not used in version history for ${draft.title}`
+      : `${showChanges ? "Compare" : "Display"} ${draft.title}`;
     const draftNumber = String(index + 1);
     const deleteButton = canDeleteDraft(draft)
       ? `
@@ -3431,8 +4392,8 @@ function renderDraftTabs() {
       `
       : "";
     return `
-      <div class="page-tab draft-tab${active}" data-draft-tab-id="${draft.id}">
-        <input type="checkbox" data-display-draft-id="${draft.id}" aria-label="${showChanges ? "Compare" : "Display"} ${escapeHtml(draft.title)}"${checked}>
+      <div class="page-tab draft-tab${historyClass}${active}" data-draft-tab-id="${draft.id}">
+        <input type="checkbox" data-display-draft-id="${draft.id}" aria-label="${escapeHtml(displayLabel)}"${checked}${disabled}>
         <button class="tab-label" type="button" data-draft-id="${draft.id}" aria-label="${escapeHtml(draft.title)}">
           <span class="tab-label-full">${escapeHtml(draft.title)}</span>
           <span class="tab-label-short" aria-hidden="true">${escapeHtml(draftNumber)}</span>
@@ -3528,32 +4489,295 @@ function endTabScrollbarDrag() {
   window.removeEventListener("pointermove", dragTabScrollbar);
 }
 
+function queueNotesHeadingDensityUpdate() {
+  if (notesHeadingDensityFrame) return;
+  notesHeadingDensityFrame = window.requestAnimationFrame(() => {
+    notesHeadingDensityFrame = null;
+    updateAllNotesHeadingDensity();
+  });
+}
+
+function visibleElementWidth(element) {
+  if (!element) return 0;
+  const styles = window.getComputedStyle(element);
+  if (styles.display === "none") {
+    const horizontalPadding = (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+    const horizontalMargin = (parseFloat(styles.marginLeft) || 0) + (parseFloat(styles.marginRight) || 0);
+    return Math.ceil(measuredTextWidth(element.textContent || "", element) + horizontalPadding + horizontalMargin);
+  }
+  return Math.ceil(Math.max(element.scrollWidth || 0, element.getBoundingClientRect().width || 0));
+}
+
+function styleGap(element) {
+  if (!element) return 0;
+  const styles = window.getComputedStyle(element);
+  return parseFloat(styles.columnGap || styles.gap) || 0;
+}
+
+const DRAFT_HEADING_DENSITY_CLASSES = [
+  "draft-heading-no-detach",
+  "draft-heading-title-short",
+  "draft-heading-hide-meta",
+  "draft-heading-hide-detach",
+  "draft-heading-hide-format"
+];
+const DRAFT_HEADING_META_MIN_WIDTH = 72;
+
+function matchingElements(root, selector) {
+  const elements = [];
+  if (root instanceof Element && root.matches(selector)) elements.push(root);
+  root?.querySelectorAll?.(selector).forEach(element => elements.push(element));
+  return elements;
+}
+
+function draftHeadingTitleWidth(row, useShortTitle = false) {
+  const input = row?.querySelector(".draft-title-input");
+  if (!input) return 0;
+  const shortTitle = row.querySelector(".draft-title-short-display")?.textContent || input.dataset.shortTitle || input.value;
+  const text = useShortTitle ? shortTitle : input.value;
+  return Math.ceil(measuredTextWidth(text, input) + horizontalPaddingWidth(input));
+}
+
+function headingHorizontalPadding(heading) {
+  const styles = window.getComputedStyle(heading);
+  return (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+}
+
+function draftHeadingNaturalWidth(heading, options = {}) {
+  const row = heading.querySelector(".draft-title-row");
+  const metaWidth = options.metaWidth ?? visibleElementWidth(heading.querySelector(".meta"));
+  const widths = [
+    draftHeadingTitleWidth(row, options.shortTitle === true),
+    options.includeFormat === false ? 0 : visibleElementWidth(heading.querySelector(".panel-format-toggle")),
+    options.includeDetach === false ? 0 : visibleElementWidth(heading.querySelector(".panel-detach-button")),
+    options.includeMeta === false ? 0 : metaWidth
+  ].filter(Boolean);
+
+  return headingHorizontalPadding(heading)
+    + widths.reduce((total, width) => total + width, 0)
+    + Math.max(0, widths.length - 1) * styleGap(heading);
+}
+
+function draftHeadingTitleIsClipped(row) {
+  if (!row) return false;
+  const input = row.querySelector(".draft-title-input");
+  return Boolean(input && draftHeadingTitleWidth(row, false) > input.clientWidth + 1);
+}
+
+function updateDraftHeadingDensity(heading) {
+  if (!heading) return;
+
+  const row = heading.querySelector(".draft-title-row");
+  if (!row) return;
+
+  heading.classList.remove(...DRAFT_HEADING_DENSITY_CLASSES);
+  heading.classList.toggle("draft-heading-no-detach", !heading.querySelector(".panel-detach-button"));
+  row.classList.remove("use-short-title");
+
+  const shortTitleWidth = Math.max(18, draftHeadingTitleWidth(row, true));
+  heading.style.setProperty("--draft-heading-title-min", `${shortTitleWidth}px`);
+
+  const availableWidth = heading.clientWidth || 0;
+  if (!availableWidth) return;
+
+  if (
+    draftHeadingNaturalWidth(heading, { shortTitle: false }) > availableWidth + 1 ||
+    draftHeadingTitleIsClipped(row)
+  ) {
+    row.classList.add("use-short-title");
+    heading.classList.add("draft-heading-title-short");
+  }
+
+  const useShortTitle = row.classList.contains("use-short-title");
+  if (
+    draftHeadingNaturalWidth(heading, {
+      shortTitle: useShortTitle,
+      metaWidth: DRAFT_HEADING_META_MIN_WIDTH
+    }) > availableWidth + 1
+  ) {
+    heading.classList.add("draft-heading-hide-meta");
+  }
+  if (
+    (!heading.querySelector(".panel-detach-button") && heading.classList.contains("draft-heading-hide-meta")) ||
+    draftHeadingNaturalWidth(heading, { shortTitle: useShortTitle, includeMeta: false }) > availableWidth + 1
+  ) {
+    heading.classList.add("draft-heading-hide-detach");
+  }
+  if (draftHeadingNaturalWidth(heading, { shortTitle: useShortTitle, includeMeta: false, includeDetach: false }) > availableWidth + 1) {
+    heading.classList.add("draft-heading-hide-format");
+  }
+}
+
+function updateAllDraftHeadingDensity(root = document) {
+  const headings = new Set();
+  matchingElements(root, ".draft-title-row").forEach(row => {
+    const heading = row.closest(".panel-heading:not(.notes-toggle-heading)");
+    if (heading) headings.add(heading);
+  });
+  headings.forEach(updateDraftHeadingDensity);
+}
+
+function queueDraftHeadingDensityUpdate() {
+  if (draftHeadingDensityFrame) return;
+  draftHeadingDensityFrame = window.requestAnimationFrame(() => {
+    draftHeadingDensityFrame = null;
+    updateAllDraftHeadingDensity();
+  });
+}
+
+function observeDraftHeadingDensity() {
+  if (!("ResizeObserver" in window) || !els.pageCanvas) return;
+  if (!draftHeadingResizeObserver) {
+    draftHeadingResizeObserver = new ResizeObserver(queueDraftHeadingDensityUpdate);
+  }
+  draftHeadingResizeObserver.disconnect();
+  updateAllDraftHeadingDensity(els.pageCanvas);
+  matchingElements(els.pageCanvas, ".draft-title-row").forEach(row => {
+    const heading = row.closest(".panel-heading:not(.notes-toggle-heading)");
+    if (heading) draftHeadingResizeObserver.observe(heading);
+  });
+}
+
+function notesHeadingNaturalWidth(heading, options = {}) {
+  const includeHint = options.includeHint === true;
+  const includeLabel = options.includeLabel !== false;
+  const includeWordStats = options.includeWordStats !== false;
+  const main = heading.querySelector(".notes-heading-main");
+  const actions = heading.querySelector(".notes-heading-actions");
+  const caret = heading.querySelector(".notes-caret");
+  const label = heading.querySelector(".panel-kicker");
+  const hint = heading.querySelector(".notes-collapse-hint");
+  const formatButton = heading.querySelector(".panel-format-toggle");
+  const detachButton = heading.querySelector(".panel-detach-button");
+  const wordCount = heading.querySelector(".notes-heading-word-count");
+  const divider = heading.querySelector(".notes-heading-stat-divider");
+  const date = heading.querySelector(".notes-heading-last-edited");
+
+  const headingStyles = window.getComputedStyle(heading);
+  const horizontalPadding = (parseFloat(headingStyles.paddingLeft) || 0) + (parseFloat(headingStyles.paddingRight) || 0);
+  const headingGap = styleGap(heading);
+  const actionsGap = styleGap(actions);
+  const mainGap = styleGap(main);
+  const statsGap = styleGap(heading.querySelector(".notes-heading-stats"));
+
+  const mainWidths = [
+    visibleElementWidth(caret),
+    includeLabel ? visibleElementWidth(label) : 0
+  ].filter(Boolean);
+  const mainWidth = mainWidths.reduce((total, width) => total + width, 0)
+    + Math.max(0, mainWidths.length - 1) * mainGap;
+
+  const statsWidths = [
+    includeWordStats ? visibleElementWidth(wordCount) : 0,
+    includeWordStats ? visibleElementWidth(divider) : 0,
+    visibleElementWidth(date)
+  ].filter(Boolean);
+  const statsWidth = statsWidths.reduce((total, width) => total + width, 0)
+    + Math.max(0, statsWidths.length - 1) * statsGap;
+
+  const actionWidths = [
+    visibleElementWidth(formatButton),
+    includeHint ? visibleElementWidth(hint) : 0,
+    visibleElementWidth(detachButton),
+    statsWidth
+  ].filter(Boolean);
+  const actionsWidth = actionWidths.reduce((total, width) => total + width, 0)
+    + Math.max(0, actionWidths.length - 1) * actionsGap;
+
+  const headerWidths = [
+    mainWidth,
+    actionsWidth
+  ].filter(Boolean);
+
+  return horizontalPadding
+    + headerWidths.reduce((total, width) => total + width, 0)
+    + Math.max(0, headerWidths.length - 1) * headingGap;
+}
+
+function notesHeadingNeedsCompaction(heading, options = {}) {
+  return notesHeadingNaturalWidth(heading, options) > heading.clientWidth + 1;
+}
+
 function updateNotesHeadingDensity(heading) {
   if (!heading) return;
 
-  heading.classList.remove("notes-heading-hide-label", "notes-heading-is-tight");
+  heading.classList.remove("notes-heading-hide-hint", "notes-heading-hide-label", "notes-heading-is-tight");
 
   const main = heading.querySelector(".notes-heading-main");
   if (!main) return;
 
-  const styles = window.getComputedStyle(heading);
-  const gap = parseFloat(styles.columnGap || styles.gap) || 0;
-  const horizontalPadding = (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
-  const children = Array.from(heading.children);
-  const requiredWidth = children.reduce((total, child) => total + child.scrollWidth, 0)
-    + Math.max(0, children.length - 1) * gap;
-  const availableWidth = heading.clientWidth - horizontalPadding;
-
-  heading.classList.toggle("notes-heading-hide-label", requiredWidth > availableWidth);
-
-  const mainIsClipped = main.scrollWidth > main.clientWidth + 1;
-  heading.classList.toggle("notes-heading-is-tight", mainIsClipped);
+  void heading.offsetWidth;
+  if (notesHeadingNeedsCompaction(heading, { includeHint: true })) {
+    heading.classList.add("notes-heading-hide-hint");
+    void heading.offsetWidth;
+  }
+  if (notesHeadingNeedsCompaction(heading, { includeHint: false })) {
+    heading.classList.add("notes-heading-hide-label");
+    void heading.offsetWidth;
+  }
+  if (notesHeadingNeedsCompaction(heading, { includeHint: false, includeLabel: false })) {
+    heading.classList.add("notes-heading-is-tight");
+    void heading.offsetWidth;
+  }
 }
 
 function updateAllNotesHeadingDensity() {
   els.pageCanvas
     ?.querySelectorAll(".notes-toggle-heading")
     .forEach(updateNotesHeadingDensity);
+}
+
+function observeNotesHeadingDensity() {
+  if (!("ResizeObserver" in window) || !els.pageCanvas) return;
+  if (!notesHeadingResizeObserver) {
+    notesHeadingResizeObserver = new ResizeObserver(queueNotesHeadingDensityUpdate);
+  }
+  notesHeadingResizeObserver.disconnect();
+  els.pageCanvas
+    .querySelectorAll(".notes-toggle-heading")
+    .forEach(heading => notesHeadingResizeObserver.observe(heading));
+}
+
+const textMeasureCanvas = document.createElement("canvas");
+const textMeasureContext = textMeasureCanvas.getContext("2d");
+
+function measuredTextWidth(text, element) {
+  if (!textMeasureContext || !element) return 0;
+  const styles = window.getComputedStyle(element);
+  textMeasureContext.font = `${styles.fontStyle} ${styles.fontVariant} ${styles.fontWeight} ${styles.fontSize} ${styles.fontFamily}`;
+  const baseWidth = textMeasureContext.measureText(String(text || "")).width;
+  const letterSpacing = parseFloat(styles.letterSpacing);
+  return Number.isFinite(letterSpacing)
+    ? baseWidth + Math.max(0, String(text || "").length - 1) * letterSpacing
+    : baseWidth;
+}
+
+function horizontalPaddingWidth(element) {
+  const styles = window.getComputedStyle(element);
+  return (parseFloat(styles.paddingLeft) || 0) + (parseFloat(styles.paddingRight) || 0);
+}
+
+function formatPickerLabelWidthStyle(field, values) {
+  if (field !== "fontFamily" || !textMeasureContext) return "";
+  const styles = window.getComputedStyle(document.documentElement);
+  const fontFamily = styles.getPropertyValue("--font-ui").trim() || "Segoe UI, Arial, sans-serif";
+  textMeasureContext.font = `12.5px ${fontFamily}`;
+  const labelWidth = Math.ceil(Math.max(...values.map(value => textMeasureContext.measureText(String(value)).width)));
+  return ` style="--picker-label-width: ${labelWidth}px;"`;
+}
+
+function updateCompactTitleLabels(root = document) {
+  matchingElements(root, ".compact-title").forEach(title => {
+    title.classList.remove("use-short-title");
+    const full = title.querySelector(".compact-title-full");
+    if (!full) return;
+    const availableWidth = title.parentElement?.clientWidth || title.clientWidth || 0;
+    if (availableWidth && measuredTextWidth(full.textContent, full) > availableWidth + 1) {
+      title.classList.add("use-short-title");
+    }
+  });
+
+  updateAllDraftHeadingDensity(root);
 }
 
 function scrollTabsToEnd() {
@@ -3568,6 +4792,7 @@ function scrollTabsToEnd() {
 
 function formatPickerHtml(field, label, values, className) {
   const defaultValue = DEFAULT_FORMAT[field];
+  const pickerStyle = formatPickerLabelWidthStyle(field, values);
   const options = values.map(value => `
     <button
       class="fr-picker-option"
@@ -3579,7 +4804,7 @@ function formatPickerHtml(field, label, values, className) {
   `).join("");
 
   return `
-    <div class="fr-picker ${className}" data-page-format-picker="${escapeHtml(field)}" data-value="${escapeHtml(defaultValue)}">
+    <div class="fr-picker ${className}" data-page-format-picker="${escapeHtml(field)}" data-value="${escapeHtml(defaultValue)}"${pickerStyle}>
       <button
         class="fr-picker-button"
         type="button"
@@ -3599,6 +4824,10 @@ function formatPickerHtml(field, label, values, className) {
 }
 
 function formatRibbonHtml(pageKey, label, options = {}) {
+  const parsedPageKey = parseDraftPageKey(pageKey);
+  const versionHistoryButton = parsedPageKey?.type === "content" || parsedPageKey?.type === "story"
+    ? `<button class="fr-btn" type="button" data-version-history="${escapeHtml(pageKey)}" title="Version history" aria-label="Version history">${toolbarIcons.history}</button>`
+    : "";
   return `
     <div
       id="format-ribbon-${escapeHtml(pageKey)}"
@@ -3613,6 +4842,8 @@ function formatRibbonHtml(pageKey, label, options = {}) {
         ${formatPickerHtml("lineHeight", "Line spacing", LINE_HEIGHT_OPTIONS, "line-height")}
       </div>
       <div class="fr-group">
+        <button class="fr-btn" type="button" data-search-page="${escapeHtml(pageKey)}" title="Search this page" aria-label="Search this page">${toolbarIcons.search}</button>
+        ${versionHistoryButton}
         <button class="fr-btn" type="button" data-command="undo" title="Undo" aria-label="Undo">${toolbarIcons.undo}</button>
         <button class="fr-btn" type="button" data-command="redo" title="Redo" aria-label="Redo">${toolbarIcons.redo}</button>
       </div>
@@ -3656,18 +4887,21 @@ function editorPanelHtml(item, options = {}) {
   const headerDateText = item.type === "draft" ? `Created: ${createdDateText}` : createdDateText;
   const hasToolbar = !options.collapsed;
   const ribbonId = `format-ribbon-${item.key}`;
+  const shortDraftTitle = item.editableTitle ? draftShortNumber(item.draft) : "";
   const titleRow = item.editableTitle
     ? `
-      <div class="panel-title-row">
+      <div class="panel-title-row draft-title-row">
         <input
           id="title-${escapeHtml(item.key)}"
           class="draft-title-input"
           data-title-draft-id="${escapeHtml(item.draft.id)}"
+          data-short-title="${escapeHtml(shortDraftTitle)}"
           type="text"
           autocomplete="off"
           aria-label="${escapeHtml(item.kicker)} title"
           value="${escapeHtml(item.draft.title)}"
         >
+        <span class="draft-title-short-display" aria-hidden="true">${escapeHtml(shortDraftTitle)}</span>
       </div>
     `
     : `
@@ -3727,10 +4961,12 @@ function editorPanelHtml(item, options = {}) {
         ${notesCaret}
         ${headingContent}
       </div>
-      ${notesHint}
-      ${formatButton}
-      ${detachButton}
-      ${notesHeaderStats}
+      <div class="notes-heading-actions">
+        ${formatButton}
+        ${notesHint}
+        ${detachButton}
+        ${notesHeaderStats}
+      </div>
     `
     : `
       ${headingContent}
@@ -3744,6 +4980,7 @@ function editorPanelHtml(item, options = {}) {
   const pageToolbar = hasToolbar
     ? formatRibbonHtml(item.key, item.title, options)
     : "";
+  const pageStyle = options.pageStyle ? ` style="${escapeHtml(options.pageStyle)}"` : "";
   const ribbonRegion = `
     <div class="editor-ribbon-region" data-ribbon-region="${escapeHtml(item.key)}">
       <div class="${headingClass}"${headingAttributes}>
@@ -3755,6 +4992,12 @@ function editorPanelHtml(item, options = {}) {
   const editorShell = options.collapsed
     ? ""
     : `
+      <div class="page-search-bar" data-search-bar-for="${escapeHtml(item.key)}" hidden>
+        <span class="page-search-count" data-search-count>No matches</span>
+        <span class="page-search-position" data-search-position></span>
+        <button type="button" data-search-page-prev="${escapeHtml(item.key)}" aria-label="Previous match in ${escapeHtml(item.title)}">Prev</button>
+        <button type="button" data-search-page-next="${escapeHtml(item.key)}" aria-label="Next match in ${escapeHtml(item.title)}">Next</button>
+      </div>
       <div class="rich-editor-shell">
         <div
           class="rich-editor"
@@ -3770,7 +5013,7 @@ function editorPanelHtml(item, options = {}) {
     `;
 
   return `
-    <section class="editor-panel${standaloneClass} ${escapeHtml(item.type)}-display-page${collapsedClass}" data-page-key="${escapeHtml(item.key)}" aria-label="${escapeHtml(item.ariaLabel)}">
+    <section class="editor-panel${standaloneClass} ${escapeHtml(item.type)}-display-page${collapsedClass}" data-page-key="${escapeHtml(item.key)}"${pageStyle} aria-label="${escapeHtml(item.ariaLabel)}">
       ${ribbonRegion}
       ${editorShell}
     </section>
@@ -3803,15 +5046,30 @@ function visibleEditorItems() {
   return items.filter(Boolean);
 }
 
+function pageWidthResizerHtml(beforeKey, afterKey) {
+  return `
+    <div
+      class="page-width-resizer"
+      data-resize-page-before="${escapeHtml(beforeKey)}"
+      data-resize-page-after="${escapeHtml(afterKey)}"
+      role="separator"
+      aria-orientation="vertical"
+      aria-label="Resize page panels"
+      tabindex="0"
+    ></div>
+  `;
+}
+
 function draftStackHtml(draft) {
   if (detachedUnitKeys.has(draftUnitKey(draft.id))) return "";
 
   const draftItem = pageItemForKey(draftContentKey(draft.id));
   const notesItem = pageItemForKey(draftNotesKey(draft.id));
   const collapsed = collapsedNotesIds.has(draft.id);
+  const paneKey = topLevelPageKeyForDraft(draft.id);
 
   return `
-    <section class="draft-stack-page display-page${collapsed ? " notes-are-collapsed" : ""}" data-draft-stack-id="${escapeHtml(draft.id)}" style="--draft-pane-height: ${getNotesPanePercent(draft.id)}%;" aria-label="${escapeHtml(draft.title)}">
+    <section class="draft-stack-page display-page${collapsed ? " notes-are-collapsed" : ""}" data-draft-stack-id="${escapeHtml(draft.id)}" data-page-key="${escapeHtml(paneKey)}" style="${escapeHtml(pagePaneStyle(paneKey, `--draft-pane-height: ${getNotesPanePercent(draft.id)}%;`))}" aria-label="${escapeHtml(draft.title)}">
       ${editorPanelHtml(draftItem, {
         standalone: false,
         detachUnitKey: draftUnitKey(draft.id),
@@ -3838,17 +5096,40 @@ function draftStackHtml(draft) {
 
 function renderEditor() {
   ensurePageFields(state.initialNotes);
+  ensureProjectNotesVersionHistory();
   state.drafts.forEach(draft => {
     ensurePageFields(draft);
+    ensureDraftVersionHistory(draft);
     ensurePageFields(draft.notes);
   });
 
   const selectedDrafts = state.drafts.filter(draft => displayedPageKeys.has(draftContentKey(draft.id)));
   const hasStory = displayedPageKeys.has(STORY_KEY) && !detachedUnitKeys.has(STORY_KEY);
-  const pageHtml = [
-    hasStory ? editorPanelHtml(pageItemForKey(STORY_KEY), { detachUnitKey: STORY_KEY, detachTitle: PROJECT_NOTES_TITLE }) : "",
-    ...selectedDrafts.map(draftStackHtml)
+  const topLevelKeys = topLevelDisplayPageKeys();
+  normalizePagePanePercentsForLayout(topLevelKeys);
+  const pageEntries = [
+    hasStory
+      ? {
+          key: STORY_KEY,
+          html: editorPanelHtml(pageItemForKey(STORY_KEY), {
+            detachUnitKey: STORY_KEY,
+            detachTitle: PROJECT_NOTES_TITLE,
+            pageStyle: pagePaneStyle(STORY_KEY)
+          })
+        }
+      : null,
+    ...selectedDrafts
+      .filter(draft => !detachedUnitKeys.has(draftUnitKey(draft.id)))
+      .map(draft => ({
+        key: topLevelPageKeyForDraft(draft.id),
+        html: draftStackHtml(draft)
+      }))
   ].filter(Boolean);
+  const pageHtml = pageEntries.flatMap((entry, index) => {
+    if (index >= pageEntries.length - 1) return [entry.html];
+    const nextEntry = pageEntries[index + 1];
+    return [entry.html, pageWidthResizerHtml(entry.key, nextEntry.key)];
+  });
 
   els.pageCanvas.classList.toggle("empty-page-canvas", !pageHtml.length);
   els.pageCanvas.innerHTML = pageHtml.length
@@ -3856,7 +5137,67 @@ function renderEditor() {
     : `<p class="empty-state page-empty-state">No pages selected.</p>`;
 
   hydrateVisibleEditors(visibleEditorItems());
-  window.requestAnimationFrame(updateAllNotesHeadingDensity);
+  observeNotesHeadingDensity();
+  observeDraftHeadingDensity();
+  queueNotesHeadingDensityUpdate();
+  queueDraftHeadingDensityUpdate();
+  window.requestAnimationFrame(() => refreshSearchResults({ allowRender: false }));
+}
+
+function refreshDraftNoteStats(draft, panel = null) {
+  if (!draft?.id) return;
+
+  const notesPanel = panel || pagePanelForKey(draftNotesKey(draft.id));
+  if (!notesPanel) return;
+
+  const draftWordCount = notesPanel.querySelector("[data-draft-word-count]");
+  if (draftWordCount) {
+    draftWordCount.textContent = formatWordCount(pageWordCount(draft));
+  }
+
+  const draftLastEdited = notesPanel.querySelector("[data-draft-last-edited]");
+  if (draftLastEdited) {
+    draftLastEdited.textContent = `Last edited: ${formatDate(draft.updatedAt || draft.createdAt)}`;
+  }
+
+  const heading = notesPanel.querySelector(".notes-toggle-heading");
+  window.requestAnimationFrame(() => updateNotesHeadingDensity(heading));
+}
+
+function refreshDraftNoteStatsForEditor(editorEl) {
+  const parsed = parseDraftPageKey(editorEl?.dataset.editorKey);
+  if (parsed?.type !== "content") return;
+
+  const draft = draftById(parsed.draftId);
+  if (!draft) return;
+
+  const notesPanel = pagePanelForKey(draftNotesKey(draft.id));
+  if (!notesPanel) return;
+
+  const draftWordCount = notesPanel.querySelector("[data-draft-word-count]");
+  if (draftWordCount) {
+    const page = pageForEditorKey(editorEl.dataset.editorKey);
+    draftWordCount.textContent = formatWordCount(wordCountForText(page?.content ?? editorPlainText(editorEl)));
+  }
+
+  const draftLastEdited = notesPanel.querySelector("[data-draft-last-edited]");
+  if (draftLastEdited) {
+    draftLastEdited.textContent = `Last edited: ${formatDate(draft.updatedAt || nowIso())}`;
+  }
+
+  const heading = notesPanel.querySelector(".notes-toggle-heading");
+  window.requestAnimationFrame(() => updateNotesHeadingDensity(heading));
+}
+
+function queueDraftNoteStatsRefresh(editorEl, delay = WORD_COUNT_REFRESH_DELAY_MS) {
+  const editorKey = editorEl?.dataset.editorKey;
+  if (!editorKey) return;
+
+  window.clearTimeout(draftNoteStatsTimers.get(editorKey));
+  draftNoteStatsTimers.set(editorKey, window.setTimeout(() => {
+    draftNoteStatsTimers.delete(editorKey);
+    refreshDraftNoteStatsForEditor(editorEl);
+  }, delay));
 }
 
 function refreshRenderedPageLabels() {
@@ -3874,15 +5215,7 @@ function refreshRenderedPageLabels() {
     const toolbar = toolbarForEditor(item.key);
     if (toolbar) toolbar.setAttribute("aria-label", `${item.title} formatting`);
 
-    const draftWordCount = panel.querySelector("[data-draft-word-count]");
-    if (draftWordCount && item.type === "notes" && item.draft) {
-      draftWordCount.textContent = formatWordCount(pageWordCount(item.draft));
-    }
-
-    const draftLastEdited = panel.querySelector("[data-draft-last-edited]");
-    if (draftLastEdited && item.type === "notes" && item.draft) {
-      draftLastEdited.textContent = `Last edited: ${formatDate(item.draft.updatedAt || item.draft.createdAt)}`;
-    }
+    if (item.type === "notes" && item.draft) refreshDraftNoteStats(item.draft, panel);
   });
   window.requestAnimationFrame(updateAllNotesHeadingDensity);
 }
@@ -3941,7 +5274,7 @@ function comparePageContentHtml(page) {
     return `<div class="compare-text empty-line">No draft text yet.</div>`;
   }
 
-  const tokens = semanticTokensFromHtml(page.contentHtml)
+  const tokens = diffBlocksForPage(page).tokens
     .map((token, index) => renderComparePageToken(token, index))
     .join("");
   return `<div class="compare-text">${tokens}</div>`;
@@ -3978,7 +5311,7 @@ function baseComparePageHtml(draft, subtitle = "BASELINE") {
       <div class="compare-page-header">
         <div class="kicker">${escapeHtml(subtitle)}</div>
         <div class="title-row">
-          <div class="title">${escapeHtml(draft.title)}</div>
+          <div class="title">${compactTitleHtml(draft.title, draftShortNumber(draft))}</div>
         </div>
         <div class="meta">Created: ${formatDate(draft.createdAt)}</div>
       </div>
@@ -3989,7 +5322,25 @@ function baseComparePageHtml(draft, subtitle = "BASELINE") {
   `;
 }
 
-function markedLaterPageHtml(pair, diff = diffRichPages(pair.before, pair.after)) {
+function normalizedDiffResult(diffResult) {
+  return Array.isArray(diffResult)
+    ? { parts: diffResult, hasChanges: diffResult.some(DiffCore.isChangedDiffPart) }
+    : diffResult;
+}
+
+function compareStatsHtml(diffResult) {
+  const stats = diffSegmentStats(diffResult.parts);
+  return `
+    <div class="compare-stats">
+      <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
+      <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
+    </div>
+  `;
+}
+
+function markedLaterPageHtml(pair, diffResult = diffRichPagesResult(pair.before, pair.after)) {
+  const result = normalizedDiffResult(diffResult);
+  const diff = result.parts;
   if (!diff.length) {
     return `<div class="compare-text empty-line">No draft text yet.</div>`;
   }
@@ -3999,30 +5350,392 @@ function markedLaterPageHtml(pair, diff = diffRichPages(pair.before, pair.after)
 }
 
 function markedComparePageHtml(pair) {
-  const diff = diffRichPages(pair.before, pair.after);
-  const stats = diffTokenStats(diff);
+  const diffResult = diffRichPagesResult(pair.before, pair.after);
 
   return `
     <article class="compare-page later-page" data-compare-page-id="${escapeHtml(pair.after.id)}">
       <div class="compare-page-header">
         <div class="kicker">CHANGES</div>
         <div class="title-row">
-          <div class="title">${escapeHtml(pair.after.title)}</div>
-          <div class="vs">vs ${escapeHtml(pair.before.title)}</div>
+          <div class="title">${compactTitleHtml(pair.after.title, draftShortNumber(pair.after))}</div>
+          <div class="vs">${compactTitleHtml(`vs ${pair.before.title}`, `vs ${draftShortNumber(pair.before)}`)}</div>
         </div>
         <div class="meta">
           <div>Created: ${formatDate(pair.after.createdAt)}</div>
-          <div class="compare-stats">
-            <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
-            <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
-          </div>
+          ${compareStatsHtml(diffResult)}
         </div>
       </div>
       <div class="compare-page-body" style="${fontStyle(pair.after.format)}">
-        ${markedLaterPageHtml(pair, diff)}
+        ${markedLaterPageHtml(pair, diffResult)}
       </div>
     </article>
   `;
+}
+
+function draftVersionNumber(draft, index) {
+  const draftIndex = state.drafts.findIndex(item => item.id === draft.id);
+  return `${Math.max(0, draftIndex) + 1}.${index + 1}`;
+}
+
+function draftShortNumber(draft) {
+  const draftIndex = state.drafts.findIndex(item => item.id === draft?.id);
+  return String(Math.max(0, draftIndex) + 1);
+}
+
+function draftVersionPage(draft, version, index) {
+  const number = draftVersionNumber(draft, index);
+  const label = `Draft ${number}`;
+  return {
+    id: version.id,
+    title: label,
+    shortTitle: number,
+    createdAt: version.createdAt,
+    updatedAt: version.createdAt,
+    content: version.content || "",
+    contentHtml: version.contentHtml || textToHtml(version.content || ""),
+    format: normalizeFormat(version.format || draft.format)
+  };
+}
+
+function projectNotesVersionNumber(index) {
+  return String(index + 1);
+}
+
+function projectNotesVersionPage(version, index) {
+  const number = projectNotesVersionNumber(index);
+  const page = state.initialNotes || {};
+  return {
+    id: version.id,
+    title: `Project notes ${number}`,
+    shortTitle: `PN ${number}`,
+    createdAt: version.createdAt,
+    updatedAt: version.createdAt,
+    content: version.content || "",
+    contentHtml: version.contentHtml || textToHtml(version.content || ""),
+    format: normalizeFormat(version.format || page.format)
+  };
+}
+
+function versionDiffSideTokenWindow(parts, side) {
+  const indexKey = side === "after" ? "afterIndex" : "beforeIndex";
+  const changedIndexes = [];
+  const tokenIndexes = [];
+
+  parts.forEach((part, index) => {
+    if (!DiffCore.isChangedDiffPart(part)) return;
+    changedIndexes.push(index);
+    if (Number.isInteger(part[indexKey])) tokenIndexes.push(part[indexKey]);
+  });
+
+  if (!changedIndexes.length) return null;
+  if (tokenIndexes.length) {
+    return {
+      start: Math.min(...tokenIndexes),
+      end: Math.max(...tokenIndexes) + 1
+    };
+  }
+
+  const firstChangedIndex = changedIndexes[0];
+  const lastChangedIndex = changedIndexes[changedIndexes.length - 1];
+  let beforeAnchor = null;
+  let afterAnchor = null;
+
+  for (let index = firstChangedIndex - 1; index >= 0; index -= 1) {
+    if (Number.isInteger(parts[index][indexKey])) {
+      beforeAnchor = parts[index][indexKey] + 1;
+      break;
+    }
+  }
+
+  for (let index = lastChangedIndex + 1; index < parts.length; index += 1) {
+    if (Number.isInteger(parts[index][indexKey])) {
+      afterAnchor = parts[index][indexKey];
+      break;
+    }
+  }
+
+  const anchor = Number.isInteger(beforeAnchor) ? beforeAnchor : (Number.isInteger(afterAnchor) ? afterAnchor : 0);
+  return { start: anchor, end: anchor };
+}
+
+function versionTokenWindowGap(left, right) {
+  if (!left || !right) return Infinity;
+  if (left.end < right.start) return right.start - left.end;
+  if (right.end < left.start) return left.start - right.end;
+  return 0;
+}
+
+function versionTokensBetweenWindows(tokens, left, right) {
+  const start = Math.min(left.end, right.end);
+  const end = Math.max(left.start, right.start);
+  return tokens.slice(start, end).map(token => token.text || "").join("");
+}
+
+function versionWindowsTouchSamePhrase(sharedPage, left, right) {
+  const gap = versionTokenWindowGap(left, right);
+  if (!Number.isFinite(gap)) return false;
+  if (gap <= 4) return true;
+  if (gap > 24) return false;
+
+  const tokens = diffBlocksForPage(sharedPage).tokens;
+  const between = versionTokensBetweenWindows(tokens, left, right);
+  return !/[.!?\n]/u.test(between);
+}
+
+function versionTransitionInfo(versions, pageForVersion, beforeIndex) {
+  const before = pageForVersion(versions[beforeIndex], beforeIndex);
+  const after = pageForVersion(versions[beforeIndex + 1], beforeIndex + 1);
+  const diffResult = diffRichPagesResult(before, after);
+  if (!diffResult.hasChanges) return null;
+
+  return {
+    before,
+    after,
+    beforeIndex,
+    afterIndex: beforeIndex + 1,
+    beforeWindow: versionDiffSideTokenWindow(diffResult.parts, "before"),
+    afterWindow: versionDiffSideTokenWindow(diffResult.parts, "after")
+  };
+}
+
+function shouldMergeVersionTransitions(previous, next, sharedPage) {
+  return versionWindowsTouchSamePhrase(sharedPage, previous.afterWindow, next.beforeWindow);
+}
+
+function coalescedVersionRuns(versions, pageForVersion) {
+  const runs = [];
+  let run = null;
+
+  const flushRun = () => {
+    if (!run) return;
+    runs.push({
+      beforeIndex: run.beforeIndex,
+      afterIndex: run.afterIndex,
+      beforeVersion: versions[run.beforeIndex],
+      afterVersion: versions[run.afterIndex],
+      coalescedVersionCount: run.afterIndex - run.beforeIndex
+    });
+    run = null;
+  };
+
+  for (let index = 0; index < versions.length - 1; index += 1) {
+    const info = versionTransitionInfo(versions, pageForVersion, index);
+    if (!info) continue;
+
+    if (
+      run &&
+      run.afterIndex === info.beforeIndex &&
+      shouldMergeVersionTransitions(run.lastInfo, info, pageForVersion(versions[info.beforeIndex], info.beforeIndex))
+    ) {
+      run.afterIndex = info.afterIndex;
+      run.lastInfo = info;
+      continue;
+    }
+
+    flushRun();
+    run = {
+      beforeIndex: info.beforeIndex,
+      afterIndex: info.afterIndex,
+      lastInfo: info
+    };
+  }
+
+  flushRun();
+  return runs;
+}
+
+function coalescedDraftVersionRuns(draft) {
+  const versions = ensureDraftVersionHistory(draft);
+  return coalescedVersionRuns(versions, (version, index) => draftVersionPage(draft, version, index));
+}
+
+function coalescedProjectNotesVersionRuns() {
+  const versions = ensureProjectNotesVersionHistory();
+  return coalescedVersionRuns(versions, projectNotesVersionPage);
+}
+
+function versionCoalescedMetaHtml(count) {
+  if (!(count > 1)) return "";
+  return `<div>${Number(count).toLocaleString("en-GB")} autosaves coalesced</div>`;
+}
+
+function baseVersionPageHtml(draft, version, index) {
+  const page = draftVersionPage(draft, version, index);
+  const versionLabel = draftVersionNumber(draft, index);
+  const recordedText = formatVersionDate(page.createdAt);
+  const fullRecordedText = formatDate(page.createdAt);
+  return `
+    <article class="compare-page is-baseline version-page" data-compare-page-id="${escapeHtml(page.id)}">
+      <div class="compare-page-header version-page-header">
+        <div class="kicker">VERSION</div>
+        <div class="title-row version-page-title-row">
+          <div class="title">${compactTitleHtml(page.title, page.shortTitle)}</div>
+        </div>
+        <div class="meta version-page-meta">
+          <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+        </div>
+        <button
+          class="version-restore-button"
+          type="button"
+          data-restore-draft-id="${escapeHtml(draft.id)}"
+          data-restore-version-id="${escapeHtml(version.id)}"
+          title="Restore Draft ${escapeHtml(versionLabel)}"
+          aria-label="Restore Draft ${escapeHtml(versionLabel)}"
+        >Restore</button>
+      </div>
+      <div class="compare-page-body" style="${fontStyle(page.format)}">
+        ${comparePageContentHtml(page)}
+      </div>
+    </article>
+  `;
+}
+
+function baseProjectNotesVersionPageHtml(version, index) {
+  const page = projectNotesVersionPage(version, index);
+  const versionLabel = projectNotesVersionNumber(index);
+  const recordedText = formatVersionDate(page.createdAt);
+  const fullRecordedText = formatDate(page.createdAt);
+  return `
+    <article class="compare-page is-baseline version-page" data-compare-page-id="${escapeHtml(page.id)}">
+      <div class="compare-page-header version-page-header">
+        <div class="kicker">VERSION</div>
+        <div class="title-row version-page-title-row">
+          <div class="title">${compactTitleHtml(page.title, page.shortTitle)}</div>
+        </div>
+        <div class="meta version-page-meta">
+          <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+        </div>
+        <button
+          class="version-restore-button"
+          type="button"
+          data-restore-project-notes-version-id="${escapeHtml(version.id)}"
+          title="Restore Project notes ${escapeHtml(versionLabel)}"
+          aria-label="Restore Project notes ${escapeHtml(versionLabel)}"
+        >Restore</button>
+      </div>
+      <div class="compare-page-body" style="${fontStyle(page.format)}">
+        ${comparePageContentHtml(page)}
+      </div>
+    </article>
+  `;
+}
+
+function versionComparePageHtml(draft, version, index, previousVersion = null, previousIndex = index - 1, options = {}) {
+  const page = draftVersionPage(draft, version, index);
+  if (!previousVersion) return baseVersionPageHtml(draft, version, index);
+
+  const versionLabel = draftVersionNumber(draft, index);
+  const previousPage = draftVersionPage(draft, previousVersion, previousIndex);
+  const pair = {
+    before: previousPage,
+    after: page,
+    label: `${page.title} compared to ${previousPage.title}`
+  };
+  const diffResult = diffRichPagesResult(previousPage, page);
+  const recordedText = formatVersionDate(page.createdAt);
+  const fullRecordedText = formatDate(page.createdAt);
+
+  return `
+    <article class="compare-page later-page version-page" data-compare-page-id="${escapeHtml(page.id)}">
+      <div class="compare-page-header version-page-header">
+        <div class="kicker">VERSION</div>
+        <div class="title-row version-page-title-row">
+          <div class="title">${compactTitleHtml(page.title, page.shortTitle)}</div>
+          <div class="vs">${compactTitleHtml(`vs ${previousPage.title}`, `vs ${previousPage.shortTitle}`)}</div>
+        </div>
+        <div class="meta version-page-meta">
+          <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+          ${versionCoalescedMetaHtml(options.coalescedVersionCount)}
+          ${compareStatsHtml(diffResult)}
+        </div>
+        <button
+          class="version-restore-button"
+          type="button"
+          data-restore-draft-id="${escapeHtml(draft.id)}"
+          data-restore-version-id="${escapeHtml(version.id)}"
+          title="Restore Draft ${escapeHtml(versionLabel)}"
+          aria-label="Restore Draft ${escapeHtml(versionLabel)}"
+        >Restore</button>
+      </div>
+      <div class="compare-page-body" style="${fontStyle(page.format)}">
+        ${markedLaterPageHtml(pair, diffResult)}
+      </div>
+    </article>
+  `;
+}
+
+function projectNotesVersionComparePageHtml(version, index, previousVersion = null, previousIndex = index - 1, options = {}) {
+  const page = projectNotesVersionPage(version, index);
+  if (!previousVersion) return baseProjectNotesVersionPageHtml(version, index);
+
+  const versionLabel = projectNotesVersionNumber(index);
+  const previousPage = projectNotesVersionPage(previousVersion, previousIndex);
+  const pair = {
+    before: previousPage,
+    after: page,
+    label: `${page.title} compared to ${previousPage.title}`
+  };
+  const diffResult = diffRichPagesResult(previousPage, page);
+  const recordedText = formatVersionDate(page.createdAt);
+  const fullRecordedText = formatDate(page.createdAt);
+
+  return `
+    <article class="compare-page later-page version-page" data-compare-page-id="${escapeHtml(page.id)}">
+      <div class="compare-page-header version-page-header">
+        <div class="kicker">VERSION</div>
+        <div class="title-row version-page-title-row">
+          <div class="title">${compactTitleHtml(page.title, page.shortTitle)}</div>
+          <div class="vs">${compactTitleHtml(`vs ${previousPage.title}`, `vs ${previousPage.shortTitle}`)}</div>
+        </div>
+        <div class="meta version-page-meta">
+          <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+          ${versionCoalescedMetaHtml(options.coalescedVersionCount)}
+          ${compareStatsHtml(diffResult)}
+        </div>
+        <button
+          class="version-restore-button"
+          type="button"
+          data-restore-project-notes-version-id="${escapeHtml(version.id)}"
+          title="Restore Project notes ${escapeHtml(versionLabel)}"
+          aria-label="Restore Project notes ${escapeHtml(versionLabel)}"
+        >Restore</button>
+      </div>
+      <div class="compare-page-body" style="${fontStyle(page.format)}">
+        ${markedLaterPageHtml(pair, diffResult)}
+      </div>
+    </article>
+  `;
+}
+
+function renderDraftVersionHistoryStrip(draft) {
+  const versions = ensureDraftVersionHistory(draft);
+  const pages = versions.length ? [baseVersionPageHtml(draft, versions[0], 0)] : [];
+  coalescedDraftVersionRuns(draft).forEach(run => {
+    pages.push(versionComparePageHtml(
+      draft,
+      run.afterVersion,
+      run.afterIndex,
+      run.beforeVersion,
+      run.beforeIndex,
+      { coalescedVersionCount: run.coalescedVersionCount }
+    ));
+  });
+  return compareStripHtml(pages, "version-history-strip");
+}
+
+function renderProjectNotesVersionHistoryStrip() {
+  const versions = ensureProjectNotesVersionHistory();
+  const pages = versions.length ? [baseProjectNotesVersionPageHtml(versions[0], 0)] : [];
+  coalescedProjectNotesVersionRuns().forEach(run => {
+    pages.push(projectNotesVersionComparePageHtml(
+      run.afterVersion,
+      run.afterIndex,
+      run.beforeVersion,
+      run.beforeIndex,
+      { coalescedVersionCount: run.coalescedVersionCount }
+    ));
+  });
+  return compareStripHtml(pages, "version-history-strip");
 }
 
 function selectedCompareIndexes() {
@@ -4033,6 +5746,18 @@ function selectedCompareIndexes() {
 
 function beforeIndexForSelectedDraft(indexes, position) {
   return els.compareMode.value === "first" ? indexes[0] : indexes[position - 1];
+}
+
+function compareVisiblePageCount(pageCount) {
+  return Math.max(1, Math.min(normalizePagesOnScreenForSelection(pagesOnScreen), Number(pageCount) || 1));
+}
+
+function compareStripHtml(pages, className = "") {
+  const visiblePages = compareVisiblePageCount(pages.length);
+  const gapTotal = 0;
+  const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: ${gapTotal}px;`;
+  const classes = ["compare-strip", className].filter(Boolean).join(" ");
+  return `<div class="${classes}" style="${style}">${pages.join("")}</div>`;
 }
 
 function renderComparisonStrip(indexes) {
@@ -4046,10 +5771,11 @@ function renderComparisonStrip(indexes) {
     pages.push(markedComparePageHtml(pair));
   });
 
-  const visiblePages = Math.min(4, Math.max(1, pages.length));
-  const gapTotal = 0;
-  const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: ${gapTotal}px;`;
-  return `<div class="compare-strip" style="${style}">${pages.join("")}</div>`;
+  return compareStripHtml(pages);
+}
+
+function changesPanelIsOpen() {
+  return showChanges || Boolean(versionHistoryDraftId);
 }
 
 function cssEscape(value) {
@@ -4087,6 +5813,13 @@ function scrollCompareTargetIntoView(target, sourceToken) {
   }
 }
 
+function revealComparePage(pageId, behavior = "smooth") {
+  window.requestAnimationFrame(() => {
+    const page = els.diffOutput.querySelector(`[data-compare-page-id="${cssEscape(pageId)}"]`);
+    page?.scrollIntoView({ block: "nearest", inline: "start", behavior });
+  });
+}
+
 function highlightCompareTarget(target) {
   clearCompareTargetHighlight();
   target.classList.add("compare-target-highlight");
@@ -4105,12 +5838,32 @@ function jumpToComparedToken(sourceToken) {
 }
 
 function renderDiff() {
+  diffRenderToken += 1;
+  const compareKicker = els.changesPanel?.querySelector(".compare-kicker");
+  if (versionHistoryDraftId) {
+    if (compareKicker) compareKicker.textContent = "VERSION HISTORY";
+    if (versionHistoryDraftId === STORY_KEY) {
+      els.compareSubtitle.textContent = "Version history for Project notes";
+      els.diffOutput.innerHTML = renderProjectNotesVersionHistoryStrip();
+      return;
+    }
+
+    const draft = draftById(versionHistoryDraftId);
+    els.compareSubtitle.textContent = draft ? `Version history for ${draft.title}` : "Version history";
+    els.diffOutput.innerHTML = draft
+      ? renderDraftVersionHistoryStrip(draft)
+      : `<p class="empty-state">Draft not found.</p>`;
+    return;
+  }
+
   if (!showChanges) {
+    if (compareKicker) compareKicker.textContent = "DRAFT COMPARISON";
     els.diffOutput.innerHTML = "";
     els.compareSubtitle.textContent = "";
     return;
   }
 
+  if (compareKicker) compareKicker.textContent = "DRAFT COMPARISON";
   const indexes = selectedCompareIndexes();
 
   const baseline = state.drafts[indexes[0]];
@@ -4123,16 +5876,338 @@ function renderDiff() {
     : `<p class="empty-state">No draft pages selected.</p>`;
 }
 
-function renderChangesVisibility() {
-  els.editorSurface.classList.toggle("compare-open", showChanges);
-  els.changesPanel.hidden = !showChanges;
-  els.toggleChanges.setAttribute("aria-pressed", String(showChanges));
-  const label = els.toggleChanges.querySelector(".toggle-changes-label");
-  if (label) {
-    label.textContent = showChanges ? "Hide changes" : "Show changes";
-  } else {
-    els.toggleChanges.textContent = showChanges ? "Hide changes" : "Show changes";
+function nextDiffProgressFrame() {
+  return new Promise(resolve => {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(resolve, DIFF_PROGRESS_FRAME_DELAY_MS);
+    });
+  });
+}
+
+function diffRenderIsCurrent(token) {
+  return token === diffRenderToken && changesPanelIsOpen();
+}
+
+function progressUnitText(unit, count) {
+  const text = String(unit || "item");
+  if (Number(count) === 1 || text.endsWith("s")) return text;
+  return `${text}s`;
+}
+
+function renderDiffLoading(progress = "Loading changes") {
+  const options = typeof progress === "string" ? { label: progress } : (progress || {});
+  const label = options.label || "Loading changes";
+  const total = Math.max(0, Number(options.total) || 0);
+  const completed = total ? Math.max(0, Math.min(total, Number(options.completed) || 0)) : 0;
+  const percent = total ? Math.round((completed / total) * 100) : 0;
+  const unit = progressUnitText(options.unit || "item", total);
+  const verb = options.verb || "loaded";
+  const meta = options.meta || (total
+    ? `${completed.toLocaleString("en-GB")} of ${total.toLocaleString("en-GB")} ${unit} ${verb}`
+    : "Preparing...");
+  const detail = options.detail
+    ? `<span class="diff-loading-detail">${escapeHtml(options.detail)}</span>`
+    : "";
+  const trackClass = total ? "diff-loading-track" : "diff-loading-track is-indeterminate";
+  const barStyle = total ? ` style="width: ${percent}%"` : "";
+
+  els.diffOutput.innerHTML = `
+    <div class="diff-loading" role="status" aria-live="polite">
+      <span class="diff-loading-title">${escapeHtml(label)}</span>
+      <div class="${trackClass}" aria-hidden="true"><span${barStyle}></span></div>
+      <span class="diff-loading-meta">${escapeHtml(meta)}</span>
+      ${detail}
+    </div>
+  `;
+}
+
+async function renderComparisonStripProgressively(indexes, token, label = "Loading changes") {
+  const total = indexes.length;
+  if (!total) {
+    if (diffRenderIsCurrent(token)) els.diffOutput.innerHTML = `<p class="empty-state">No draft pages selected.</p>`;
+    return;
   }
+
+  const pages = [];
+  const renderProgress = (completed, detail) => {
+    if (!diffRenderIsCurrent(token)) return;
+    renderDiffLoading({
+      label,
+      completed,
+      total,
+      unit: "draft page",
+      verb: "loaded",
+      detail
+    });
+  };
+
+  renderProgress(0, "Preparing comparison");
+  await nextDiffProgressFrame();
+  if (!diffRenderIsCurrent(token)) return;
+
+  pages.push(baseComparePageHtml(state.drafts[indexes[0]], "BASELINE"));
+  renderProgress(1, indexes.length > 1
+    ? `Comparing ${state.drafts[indexes[1]]?.title || "next draft"}`
+    : "Loaded baseline");
+  await nextDiffProgressFrame();
+
+  for (let position = 1; position < indexes.length; position += 1) {
+    if (!diffRenderIsCurrent(token)) return;
+
+    const draftIndex = indexes[position];
+    const beforeIndex = beforeIndexForSelectedDraft(indexes, position);
+    const pair = pairForIndexes(beforeIndex, draftIndex);
+    pages.push(markedComparePageHtml(pair));
+
+    const nextDraft = state.drafts[indexes[position + 1]];
+    renderProgress(position + 1, nextDraft
+      ? `Comparing ${nextDraft.title || "next draft"}`
+      : "Building comparison view");
+    await nextDiffProgressFrame();
+  }
+
+  if (!diffRenderIsCurrent(token)) return;
+  els.diffOutput.innerHTML = compareStripHtml(pages);
+}
+
+async function renderVersionHistoryStripProgressively(options) {
+  const {
+    token,
+    label,
+    versions,
+    pageForVersion,
+    basePageHtml,
+    comparePageHtml,
+    versionLabel,
+    emptyHtml = `<p class="empty-state">No version history to show.</p>`
+  } = options;
+  const total = versions.length;
+
+  if (!total) {
+    if (diffRenderIsCurrent(token)) els.diffOutput.innerHTML = emptyHtml;
+    return;
+  }
+
+  const pages = [];
+  const renderScanProgress = (completed, detail) => {
+    if (!diffRenderIsCurrent(token)) return;
+    renderDiffLoading({
+      label,
+      completed,
+      total,
+      unit: "version",
+      verb: "checked",
+      detail
+    });
+  };
+
+  renderScanProgress(0, "Preparing version history");
+  await nextDiffProgressFrame();
+  if (!diffRenderIsCurrent(token)) return;
+
+  pages.push(basePageHtml(versions[0], 0));
+  renderScanProgress(1, total > 1 ? `Checking ${versionLabel(1)}` : "Loaded first version");
+  await nextDiffProgressFrame();
+
+  const runs = [];
+  let run = null;
+  const flushRun = () => {
+    if (!run) return;
+    runs.push({
+      beforeIndex: run.beforeIndex,
+      afterIndex: run.afterIndex,
+      beforeVersion: versions[run.beforeIndex],
+      afterVersion: versions[run.afterIndex],
+      coalescedVersionCount: run.afterIndex - run.beforeIndex
+    });
+    run = null;
+  };
+
+  for (let index = 0; index < versions.length - 1; index += 1) {
+    if (!diffRenderIsCurrent(token)) return;
+
+    const info = versionTransitionInfo(versions, pageForVersion, index);
+    if (info) {
+      if (
+        run &&
+        run.afterIndex === info.beforeIndex &&
+        shouldMergeVersionTransitions(run.lastInfo, info, pageForVersion(versions[info.beforeIndex], info.beforeIndex))
+      ) {
+        run.afterIndex = info.afterIndex;
+        run.lastInfo = info;
+      } else {
+        flushRun();
+        run = {
+          beforeIndex: info.beforeIndex,
+          afterIndex: info.afterIndex,
+          lastInfo: info
+        };
+      }
+    }
+
+    const completed = index + 2;
+    renderScanProgress(completed, completed < total
+      ? `Checking ${versionLabel(completed)}`
+      : "Preparing changed version groups");
+    await nextDiffProgressFrame();
+  }
+
+  flushRun();
+  if (!diffRenderIsCurrent(token)) return;
+
+  if (runs.length) {
+    const pageTotal = 1 + runs.length;
+    const renderPageProgress = (completed, detail) => {
+      if (!diffRenderIsCurrent(token)) return;
+      renderDiffLoading({
+        label,
+        completed,
+        total: pageTotal,
+        unit: "history page",
+        verb: "rendered",
+        detail
+      });
+    };
+
+    renderPageProgress(1, `Rendering ${versionLabel(runs[0].afterIndex)}`);
+    await nextDiffProgressFrame();
+
+    for (let index = 0; index < runs.length; index += 1) {
+      if (!diffRenderIsCurrent(token)) return;
+      const currentRun = runs[index];
+      pages.push(comparePageHtml(currentRun));
+      const nextRun = runs[index + 1];
+      renderPageProgress(index + 2, nextRun
+        ? `Rendering ${versionLabel(nextRun.afterIndex)}`
+        : "Building history view");
+      await nextDiffProgressFrame();
+    }
+  }
+
+  if (!diffRenderIsCurrent(token)) return;
+  els.diffOutput.innerHTML = compareStripHtml(pages, "version-history-strip");
+}
+
+function renderDraftVersionHistoryProgressively(draft, token, label) {
+  const versions = ensureDraftVersionHistory(draft);
+  return renderVersionHistoryStripProgressively({
+    token,
+    label,
+    versions,
+    pageForVersion: (version, index) => draftVersionPage(draft, version, index),
+    basePageHtml: (version, index) => baseVersionPageHtml(draft, version, index),
+    comparePageHtml: run => versionComparePageHtml(
+      draft,
+      run.afterVersion,
+      run.afterIndex,
+      run.beforeVersion,
+      run.beforeIndex,
+      { coalescedVersionCount: run.coalescedVersionCount }
+    ),
+    versionLabel: index => `Draft ${draftVersionNumber(draft, index)}`
+  });
+}
+
+function renderProjectNotesVersionHistoryProgressively(token, label) {
+  const versions = ensureProjectNotesVersionHistory();
+  return renderVersionHistoryStripProgressively({
+    token,
+    label,
+    versions,
+    pageForVersion: projectNotesVersionPage,
+    basePageHtml: baseProjectNotesVersionPageHtml,
+    comparePageHtml: run => projectNotesVersionComparePageHtml(
+      run.afterVersion,
+      run.afterIndex,
+      run.beforeVersion,
+      run.beforeIndex,
+      { coalescedVersionCount: run.coalescedVersionCount }
+    ),
+    versionLabel: index => `Project notes ${projectNotesVersionNumber(index)}`
+  });
+}
+
+async function renderDiffProgressively(token, label = "Loading changes") {
+  const compareKicker = els.changesPanel?.querySelector(".compare-kicker");
+  if (versionHistoryDraftId) {
+    if (compareKicker) compareKicker.textContent = "VERSION HISTORY";
+    const historyLabel = label || "Loading version history";
+
+    if (versionHistoryDraftId === STORY_KEY) {
+      els.compareSubtitle.textContent = "Version history for Project notes";
+      await renderProjectNotesVersionHistoryProgressively(token, historyLabel);
+      return;
+    }
+
+    const draft = draftById(versionHistoryDraftId);
+    els.compareSubtitle.textContent = draft ? `Version history for ${draft.title}` : "Version history";
+    if (!draft) {
+      if (diffRenderIsCurrent(token)) els.diffOutput.innerHTML = `<p class="empty-state">Draft not found.</p>`;
+      return;
+    }
+
+    await renderDraftVersionHistoryProgressively(draft, token, historyLabel);
+    return;
+  }
+
+  if (!showChanges) {
+    if (compareKicker) compareKicker.textContent = "DRAFT COMPARISON";
+    if (diffRenderIsCurrent(token)) {
+      els.diffOutput.innerHTML = "";
+      els.compareSubtitle.textContent = "";
+    }
+    return;
+  }
+
+  if (compareKicker) compareKicker.textContent = "DRAFT COMPARISON";
+  const indexes = selectedCompareIndexes();
+  const baseline = state.drafts[indexes[0]];
+  els.compareSubtitle.textContent = els.compareMode.value === "first"
+    ? (baseline ? `Against ${baseline.title}` : "No baseline")
+    : "Consecutive";
+  await renderComparisonStripProgressively(indexes, token, label || "Loading changes");
+}
+
+function renderDiffSoon(label = "Loading changes") {
+  if (!changesPanelIsOpen()) {
+    renderDiff();
+    return;
+  }
+
+  const token = diffRenderToken + 1;
+  diffRenderToken = token;
+  const progressLabel = versionHistoryDraftId && label === "Loading changes"
+    ? "Loading version history"
+    : label;
+  renderDiffLoading({ label: progressLabel, detail: "Preparing..." });
+
+  void (async () => {
+    await nextDiffProgressFrame();
+    if (!diffRenderIsCurrent(token)) return;
+    await renderDiffProgressively(token, progressLabel);
+    if (diffRenderIsCurrent(token)) {
+      window.requestAnimationFrame(() => updateCompactTitleLabels(els.diffOutput));
+    }
+  })();
+}
+
+function renderChangesVisibility() {
+  const panelOpen = changesPanelIsOpen();
+  els.editorSurface.classList.toggle("compare-open", panelOpen);
+  els.changesPanel.hidden = !panelOpen;
+  els.changesPanel.classList.toggle("version-history-open", Boolean(versionHistoryDraftId));
+  els.toggleChanges.setAttribute("aria-pressed", String(panelOpen));
+  const label = els.toggleChanges.querySelector(".toggle-changes-label");
+  const buttonLabel = versionHistoryDraftId
+    ? "Hide history"
+    : (showChanges ? "Hide changes" : "Show changes");
+  els.toggleChanges.setAttribute("aria-label", buttonLabel);
+  if (label) {
+    label.textContent = buttonLabel;
+  } else {
+    els.toggleChanges.textContent = buttonLabel;
+  }
+  syncPagesOnScreenToDisplaySelection();
 }
 
 function render() {
@@ -4142,8 +6217,9 @@ function render() {
   renderDraftTabs();
   renderEditor();
   renderChangesVisibility();
-  renderDiff();
+  renderDiffSoon();
   syncGlobalFormatControls();
+  window.requestAnimationFrame(() => updateCompactTitleLabels());
 }
 
 function syncFromInputs() {
@@ -4152,14 +6228,7 @@ function syncFromInputs() {
   saveVisibleEditorScrollPositions();
 
   els.pageCanvas.querySelectorAll("[data-title-draft-id]").forEach(input => {
-    const draft = draftById(input.dataset.titleDraftId);
-    if (!draft) return;
-    const nextTitle = input.value || "Untitled draft";
-    if (draft.title !== nextTitle) {
-      draft.title = nextTitle;
-      draft.updatedAt = nowIso();
-    }
-    draft.notes.title = `${draft.title} Notes`;
+    syncDraftTitleInput(input);
   });
 
   els.pageCanvas.querySelectorAll("[data-editor-key]").forEach(editorEl => {
@@ -4168,17 +6237,91 @@ function syncFromInputs() {
   });
 }
 
-function scheduleSave() {
+function syncPageFromDom(pageKey) {
+  if (!state || !pageKey) return;
+  syncViewStateFromDom();
+
+  const parsed = parseDraftPageKey(pageKey);
+  if (parsed?.type === "content") {
+    const titleInput = els.pageCanvas.querySelector(`[data-title-draft-id="${cssEscape(parsed.draftId)}"]`);
+    if (titleInput) syncDraftTitleInput(titleInput);
+  }
+
+  const editorEl = editorElementForKey(pageKey);
+  const page = editorEl ? pageForEditorKey(pageKey) : null;
+  if (page && editorEl) syncRichPage(page, editorEl);
+}
+
+function syncViewStateFromDom() {
+  if (!state) return;
+  saveCurrentEditorViewState();
+  saveVisibleEditorScrollPositions();
+}
+
+function syncDetachedUnitFromDom(unitKey) {
+  const parsed = parseDetachedUnitKey(unitKey);
+  if (!parsed) return;
+
+  if (parsed.type === "story") {
+    syncPageFromDom(STORY_KEY);
+    return;
+  }
+
+  syncPageFromDom(draftContentKey(parsed.draftId));
+  syncPageFromDom(draftNotesKey(parsed.draftId));
+}
+
+function scheduleSearchRefresh(delay = 250) {
+  if (!searchState.open) return;
+  window.clearTimeout(searchRefreshTimer);
+  searchRefreshTimer = window.setTimeout(() => {
+    refreshSearchResults({ allowRender: false });
+  }, delay);
+}
+
+function scheduleSave(options = {}) {
   markStateChanged();
   saveRetryCount = 0;
-  syncFromInputs();
-  saveCurrentViewState();
-  rememberLinkedProjectState();
-  renderDraftTabs();
-  refreshRenderedPageLabels();
-  renderDiff();
+  if (options.syncInputs === false) {
+    if (options.updateViewState !== false) saveCurrentEditorViewState();
+  } else {
+    syncFromInputs();
+  }
+  if (options.updateViewState !== false) saveCurrentViewState();
+  if (options.cacheLinkedState !== false) rememberLinkedProjectState();
+  if (options.refreshUi !== false) {
+    renderDraftTabs();
+    refreshRenderedPageLabels();
+  }
+  if (showChanges && options.refreshDiff !== false) renderDiffSoon();
+  scheduleSearchRefresh();
   setStatus(isSaving ? "Saving..." : "Unsaved changes");
-  queueSave();
+  queueSave(options.saveDelay);
+}
+
+function schedulePageSave(pageKey, options = {}) {
+  if (!state || !pageKey) {
+    scheduleSave(options);
+    return;
+  }
+
+  markStateChanged();
+  saveRetryCount = 0;
+  if (options.updateViewState !== false) {
+    saveCurrentEditorViewState();
+    saveCurrentViewState();
+  }
+  if (options.cacheLinkedState !== false) rememberLinkedProjectState();
+  if (options.refreshUi !== false) {
+    renderDraftTabs();
+    refreshRenderedPageLabels();
+  }
+  if (showChanges && options.refreshDiff !== false) renderDiffSoon();
+  scheduleSearchRefresh();
+  setStatus(isSaving ? "Saving..." : "Unsaved changes");
+  queuePageSave(pageKey, options.saveDelay, {
+    includeVersionHistory: Boolean(options.includeVersionHistory)
+  });
 }
 
 function resetViewStateForProject() {
@@ -4190,6 +6333,7 @@ function resetViewStateForProject() {
   displayedPageKeys = new Set(defaultDisplayKeys());
   collapsedNotesIds = new Set();
   notesPanePercents = {};
+  pagePanePercents = {};
   pagesOnScreen = DEFAULT_PAGES_ON_SCREEN;
   els.compareMode.value = "first";
   saveCurrentViewState();
@@ -4205,6 +6349,9 @@ function readableSaveFailure(message = "") {
   if (/linked text file write failed|EACCES|EPERM|access is denied|denied/i.test(text)) {
     return "Save failed: linked text file blocked";
   }
+  if (/backup folder missing/i.test(text)) {
+    return "Save paused: backup folder missing";
+  }
   if (/Unexpected token|JSON|payload|state/i.test(text)) {
     return "Save failed: project data was rejected";
   }
@@ -4217,15 +6364,30 @@ function readableSaveFailure(message = "") {
 async function responseSaveFailure(response) {
   try {
     const payload = await response.json();
+    if (payload?.code === "BACKUP_FOLDER_MISSING") {
+      backupFolderMissing = true;
+      backupFolderPath = payload.folderPath || backupFolderPath;
+      versionHistoryFolderPath = payload.folderPath || versionHistoryFolderPath;
+      syncBackupMenu();
+      window.setTimeout(promptForMissingBackupFolder, 0);
+      return {
+        message: "Save paused: backup folder missing",
+        retry: false
+      };
+    }
     return readableSaveFailure(payload?.error);
   } catch {
     return readableSaveFailure(response.statusText || `HTTP ${response.status}`);
   }
 }
 
-function handleSaveFailure(message) {
+function handleSaveFailure(failure) {
+  const message = typeof failure === "object" && failure
+    ? failure.message
+    : failure;
+  const retry = !(typeof failure === "object" && failure && failure.retry === false);
   isSaving = false;
-  if (saveRetryCount < MAX_SAVE_RETRIES) {
+  if (retry && saveRetryCount < MAX_SAVE_RETRIES) {
     saveRetryCount += 1;
     setStatus(`${message}; retrying`);
     queueSave(Math.min(1500 * saveRetryCount, 6000));
@@ -4233,6 +6395,27 @@ function handleSaveFailure(message) {
   }
 
   setStatus(message);
+}
+
+function projectRecoveryStatusText(recovery) {
+  const backupPath = String(recovery?.backupPath || "");
+  const backupName = fileNameFromPath(backupPath) || "a .broken backup";
+  return `Recovered corrupt project.json; broken file backed up as ${backupName}`;
+}
+
+function acknowledgeProjectRecoveryNotice() {
+  fetch("/api/project-recovery/ack", { method: "POST" }).catch(error => {
+    console.warn(error);
+  });
+}
+
+function showProjectRecoveryNotice(recovery) {
+  if (!recovery) return;
+  setStatus(projectRecoveryStatusText(recovery));
+  if (els.saveStatus && recovery.backupPath) {
+    els.saveStatus.title = `Recovered corrupt project.json. Broken file backup: ${recovery.backupPath}`;
+  }
+  acknowledgeProjectRecoveryNotice();
 }
 
 function downloadExportText(fileName) {
@@ -4247,8 +6430,80 @@ function downloadExportText(fileName) {
   window.setTimeout(() => URL.revokeObjectURL(url), 0);
 }
 
+function updateStoragePathsFromPayload(payload = {}) {
+  exportPath = payload.exportPath || exportPath;
+  linkedTextPath = payload.linkedTextPath || linkedTextPath || "";
+  if (Object.prototype.hasOwnProperty.call(payload, "versionHistoryFolderPath")) {
+    versionHistoryFolderPath = payload.versionHistoryFolderPath || "";
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "versionHistoryPath")) {
+    versionHistoryPath = payload.versionHistoryPath || "";
+  }
+  if (
+    Object.prototype.hasOwnProperty.call(payload, "backupFolderMissing")
+    || Object.prototype.hasOwnProperty.call(payload, "versionHistoryFolderMissing")
+  ) {
+    backupFolderMissing = Boolean(payload.backupFolderMissing || payload.versionHistoryFolderMissing);
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "backupFolderPath")) {
+    backupFolderPath = payload.backupFolderPath || payload.versionHistoryFolderPath || "";
+  }
+  if (payload.linkedTextFileName) projectFileName = payload.linkedTextFileName;
+  syncBackupMenu();
+}
+
+async function applyExternalVersionHistory(projectState, options = {}) {
+  try {
+    const response = await fetch("/api/version-history/apply", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        state: projectState,
+        filePath: options.filePath || linkedTextPath || "",
+        fileName: options.fileName || projectFileName || "draft-history.txt"
+      })
+    });
+    if (!response.ok) throw new Error(await response.text());
+
+    const payload = await response.json();
+    updateStoragePathsFromPayload(payload);
+    return {
+      state: migrateLegacyDefaultFonts(payload.state),
+      loaded: Boolean(payload.loaded)
+    };
+  } catch (error) {
+    console.error(error);
+    return { state: projectState, loaded: false };
+  }
+}
+
+async function promptForMissingBackupFolder() {
+  if (!backupFolderMissing || isPromptingForBackupFolder) return;
+  isPromptingForBackupFolder = true;
+
+  try {
+    const missingPath = backupFolderPath || versionHistoryFolderPath || "the selected backup folder";
+    const chooseNow = window.confirm(
+      `Backup folder not found:\n\n${missingPath}\n\nChoose the moved folder now?`
+    );
+    if (!chooseNow) {
+      setStatus("Backup folder missing; saves paused until you choose the moved folder");
+      return;
+    }
+
+    await selectVersionHistoryFolder();
+  } finally {
+    isPromptingForBackupFolder = false;
+  }
+}
+
 async function applyTextProject(text, fileName, options = {}) {
   state = stateFromExportText(text, options.preserveFormatsFrom || null);
+  const historyResult = await applyExternalVersionHistory(state, {
+    filePath: options.filePath || "",
+    fileName
+  });
+  state = historyResult.state;
   markStateChanged();
   saveQueued = false;
   editorSelections = {};
@@ -4258,7 +6513,8 @@ async function applyTextProject(text, fileName, options = {}) {
   render();
   const savedToLinkedFile = await saveNow();
   resetHistory();
-  setStatus(savedToLinkedFile ? `Opened ${projectFileName}; autosave linked` : "Opened; saved companion");
+  const historyText = historyResult.loaded ? "; version history loaded" : "";
+  setStatus(savedToLinkedFile ? `Opened ${projectFileName}${historyText}; autosave linked` : `Opened${historyText}; saved companion`);
   focusPageEditor(activeEditorKey);
 }
 
@@ -4286,6 +6542,10 @@ async function saveAsTextProject(stateOverride = null, suggestedFileName = null)
   );
 
   try {
+    if (!stateOverride && state) {
+      setStatus("Saving backup...");
+      await writeProjectBackupNow();
+    }
     setStatus("Choose a save location...");
     const response = await fetch("/api/save-as-text-file", {
       method: "POST",
@@ -4310,7 +6570,7 @@ async function saveAsTextProject(stateOverride = null, suggestedFileName = null)
     state = payload.state;
     markStateChanged();
     saveQueued = false;
-    exportPath = payload.exportPath || exportPath;
+    updateStoragePathsFromPayload(payload);
     projectFileName = payload.fileName || projectFileName;
     linkedTextPath = payload.filePath || linkedTextPath || "";
     rememberLinkedProjectState();
@@ -4329,6 +6589,7 @@ async function newTextProject() {
   closeFileMenu();
 
   try {
+    if (state) await prepareCurrentProjectForOpen();
     const nextState = createDefaultState();
     const saved = await saveAsTextProject(nextState, "draft-history.txt");
     if (!saved) return;
@@ -4345,39 +6606,151 @@ async function newTextProject() {
   }
 }
 
+function recentFileLabel(filePath) {
+  return fileNameFromPath(filePath) || "Untitled";
+}
+
+function recentFileDirectory(filePath) {
+  const parts = String(filePath || "").split(/[\\/]/);
+  parts.pop();
+  return parts.join("\\");
+}
+
+function renderRecentFilesMenu(files = []) {
+  if (!els.fileOpenRecentMenu) return;
+
+  if (!files.length) {
+    els.fileOpenRecentMenu.innerHTML = '<button type="button" disabled><span class="menu-check" aria-hidden="true"></span><span>No recent files</span><span class="menu-shortcut" aria-hidden="true"></span></button>';
+    return;
+  }
+
+  els.fileOpenRecentMenu.innerHTML = files.map(file => `
+    <button class="recent-file-button" type="button" data-recent-file-path="${escapeHtml(file.filePath || "")}" title="${escapeHtml(file.filePath || "")}">
+      <span class="menu-check" aria-hidden="true"></span>
+      <span class="recent-file-text">
+        <span class="recent-file-name">${escapeHtml(file.fileName || recentFileLabel(file.filePath))}</span>
+        <span class="recent-file-path">${escapeHtml(recentFileDirectory(file.filePath))}</span>
+      </span>
+      <span class="menu-shortcut" aria-hidden="true"></span>
+    </button>
+  `).join("");
+}
+
+async function refreshRecentFilesMenu() {
+  if (!els.fileOpenRecentMenu) return;
+
+  try {
+    let payload;
+    try {
+      const response = await fetch("/api/recent-text-files", { cache: "no-store" });
+      if (!response.ok) throw new Error("Recent files unavailable");
+      payload = await response.json();
+    } catch (error) {
+      if (!window.draftDiffDesktop?.recentTextFiles) throw error;
+      payload = await window.draftDiffDesktop.recentTextFiles();
+    }
+    renderRecentFilesMenu(Array.isArray(payload.files) ? payload.files : []);
+  } catch {
+    els.fileOpenRecentMenu.innerHTML = '<button type="button" disabled><span class="menu-check" aria-hidden="true"></span><span>Recent files unavailable</span><span class="menu-shortcut" aria-hidden="true"></span></button>';
+  }
+}
+
+async function openRecentFilesSubmenu() {
+  if (!els.fileMenu || !els.fileOpenRecentMenu) return;
+
+  closeTopMenus(els.fileMenu);
+  els.fileMenu.open = true;
+  setRecentSubmenuOpen(true);
+  await refreshRecentFilesMenu();
+  const firstRecent = els.fileOpenRecentMenu.querySelector("[data-recent-file-path]");
+  if (firstRecent) firstRecent.focus();
+  else els.fileOpenRecentButton?.focus();
+}
+
+async function prepareCurrentProjectForOpen() {
+  if (!state) return null;
+
+  syncFromInputs();
+  saveCurrentViewState();
+  rememberLinkedProjectState();
+  await cacheLinkedProjectStateOnServer();
+  window.clearTimeout(saveTimer);
+  await saveNow();
+  setStatus("Saving backup...");
+  await writeProjectBackupNow();
+  return projectStateFromSnapshot(serializeProjectState());
+}
+
+async function applyOpenedTextFilePayload(payload, previousLinkedTextPath = "", previousState = null) {
+  linkedTextPath = payload.filePath || "";
+  const storedState = cachedProjectStateForPath(linkedTextPath) || payload.storedState;
+  updateStoragePathsFromPayload(payload);
+  await applyTextProject(payload.text || "", payload.fileName || "draft-history.txt", {
+    preserveFormatsFrom: storedState || (filePathsMatch(previousLinkedTextPath, linkedTextPath) ? previousState : null),
+    filePath: linkedTextPath
+  });
+}
+
 async function openTextProject() {
   closeFileMenu();
 
   try {
-    if (state) {
-      syncFromInputs();
-      saveCurrentViewState();
-      rememberLinkedProjectState();
-      await cacheLinkedProjectStateOnServer();
-      window.clearTimeout(saveTimer);
-      await saveNow();
+    const previousLinkedTextPath = linkedTextPath;
+    const previousState = await prepareCurrentProjectForOpen();
+    let payload = null;
+    try {
+      const response = await fetch("/api/open-text-file", { method: "POST" });
+      if (response.ok) {
+        payload = await response.json();
+      } else {
+        els.fileOpenInput.click();
+        return;
+      }
+    } catch (error) {
+      if (!window.draftDiffDesktop?.openTextFile) throw error;
+      payload = await window.draftDiffDesktop.openTextFile();
     }
 
-    const previousLinkedTextPath = linkedTextPath;
-    const previousState = state ? projectStateFromSnapshot(serializeProjectState()) : null;
-    const response = await fetch("/api/open-text-file", { method: "POST" });
-    if (response.ok) {
-      const payload = await response.json();
+    if (payload) {
       if (payload.cancelled) return;
 
-      linkedTextPath = payload.filePath || "";
-      const storedState = cachedProjectStateForPath(linkedTextPath) || payload.storedState;
-      await applyTextProject(payload.text || "", payload.fileName || "draft-history.txt", {
-        preserveFormatsFrom: storedState || (filePathsMatch(previousLinkedTextPath, linkedTextPath) ? previousState : null)
-      });
+      await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState);
       return;
     }
-
-    els.fileOpenInput.click();
   } catch (error) {
     if (isAbortError(error)) return;
     console.error(error);
     setStatus("Open failed");
+  }
+}
+
+async function openRecentTextProject(filePath) {
+  closeFileMenu();
+
+  try {
+    const previousLinkedTextPath = linkedTextPath;
+    const previousState = await prepareCurrentProjectForOpen();
+    const body = JSON.stringify({ filePath });
+    let payload;
+    try {
+      const response = await fetch("/api/open-recent-text-file", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body
+      });
+      if (!response.ok) throw new Error(await response.text());
+      payload = await response.json();
+    } catch (error) {
+      if (!window.draftDiffDesktop?.openRecentTextFile) throw error;
+      payload = await window.draftDiffDesktop.openRecentTextFile(body);
+      if (payload?.ok === false) throw new Error(payload.error || "Recent file not found");
+    }
+
+    await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState);
+  } catch (error) {
+    if (isAbortError(error)) return;
+    console.error(error);
+    setStatus("Open recent failed");
   }
 }
 
@@ -4402,24 +6775,347 @@ async function openFileLocation() {
   }
 }
 
+async function selectVersionHistoryFolder() {
+  closeFileMenu();
+
+  try {
+    if (!state) return;
+    syncFromInputs();
+    saveCurrentViewState();
+    flushDraftVersionCaptures();
+    rememberLinkedProjectState();
+    window.clearTimeout(saveTimer);
+    setStatus("Choose a backup and version history folder...");
+
+    const response = await fetch("/api/version-history-folder/select", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        state,
+        filePath: linkedTextPath,
+        fileName: projectFileName
+      })
+    });
+    if (!response.ok) throw new Error(await response.text());
+
+    const payload = await response.json();
+    if (payload.cancelled) {
+      setStatus("Backup and version history folder unchanged");
+      return;
+    }
+
+    state = migrateLegacyDefaultFonts(payload.state);
+    updateStoragePathsFromPayload(payload);
+    rememberLinkedProjectState();
+    saveQueued = false;
+    isSaving = false;
+    saveRetryCount = 0;
+    render();
+    if (versionHistoryDraftId) renderDiffSoon("Loading version history");
+    const loadedText = payload.loaded ? "; loaded matching histories" : "";
+    const migratedText = Number(payload.migratedCount) > 0
+      ? `; migrated ${payload.migratedCount} history file${Number(payload.migratedCount) === 1 ? "" : "s"}`
+      : "";
+    setStatus(`Backup and version history folder set${migratedText}${loadedText}`);
+  } catch (error) {
+    if (isAbortError(error)) return;
+    console.error(error);
+    setStatus("Backup and version history folder failed");
+  }
+}
+
+async function toggleBackup() {
+  closeFileMenu();
+
+  try {
+    if (backupFolderMissing) {
+      await selectVersionHistoryFolder();
+      return;
+    }
+
+    if (backupFolderPath) {
+      const response = await fetch("/api/backup/deactivate", { method: "POST" });
+      if (!response.ok) throw new Error(await response.text());
+
+      const payload = await response.json();
+      updateStoragePathsFromPayload(payload);
+      setStatus("Backup deactivated");
+      return;
+    }
+
+    setStatus("Choose a backup and version history folder...");
+    const response = await fetch("/api/backup/activate", { method: "POST" });
+    if (!response.ok) throw new Error(await response.text());
+
+    const payload = await response.json();
+    if (payload.cancelled) {
+      setStatus("Backup and version history folder unchanged");
+      return;
+    }
+
+    updateStoragePathsFromPayload(payload);
+    setStatus("Backup activated");
+  } catch (error) {
+    if (isAbortError(error)) return;
+    console.error(error);
+    setStatus("Backup setup failed");
+  }
+}
+
+function prepareClosePayload(options = {}) {
+  if (!state) return "";
+
+  syncFromInputs();
+  saveCurrentViewState();
+  flushDraftVersionCaptures();
+  rememberLinkedProjectState();
+  return JSON.stringify({
+    state,
+    filePath: linkedTextPath,
+    fileName: projectFileName,
+    waitForSummary: Boolean(options.waitForSummary),
+    skipSummary: Boolean(options.skipSummary)
+  });
+}
+
+async function writeProjectBackupNow(options = {}) {
+  if (!state) return null;
+
+  const body = prepareClosePayload({
+    skipSummary: options.skipSummary !== false
+  });
+  try {
+    const response = await fetch("/api/backup/project", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body
+    });
+    if (!response.ok) {
+      const failure = await responseSaveFailure(response);
+      throw new Error(typeof failure === "object" && failure ? failure.message : failure);
+    }
+    return response.json();
+  } catch (error) {
+    if (!window.draftDiffDesktop?.backupProject) throw error;
+    return window.draftDiffDesktop.backupProject(body);
+  }
+}
+
+function formatElapsedMs(ms = 0) {
+  const totalSeconds = Math.max(0, Math.floor(Number(ms) / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return minutes ? `${minutes}m ${seconds}s` : `${seconds}s`;
+}
+
+function showSummaryProgressOverlay() {
+  window.clearInterval(summaryProgressTimer);
+  latestSummaryReportPath = "";
+  if (els.summaryProgressOverlay) els.summaryProgressOverlay.hidden = false;
+  if (els.summaryProgressActions) els.summaryProgressActions.hidden = true;
+  if (els.summaryProgressOpen) els.summaryProgressOpen.disabled = true;
+  if (els.summaryProgressReveal) els.summaryProgressReveal.disabled = true;
+  if (els.summaryProgressPath) els.summaryProgressPath.textContent = "";
+  updateSummaryProgressOverlay({
+    status: "running",
+    step: "Preparing...",
+    completed: 0,
+    total: 1,
+    elapsedMs: 0
+  });
+}
+
+function hideSummaryProgressOverlay() {
+  window.clearInterval(summaryProgressTimer);
+  summaryProgressTimer = null;
+  if (els.summaryProgressOverlay) els.summaryProgressOverlay.hidden = true;
+}
+
+function updateSummaryProgressOverlay(progress = {}) {
+  const completed = Number(progress.completed) || 0;
+  const total = Math.max(Number(progress.total) || 1, 1);
+  const percent = progress.status === "complete"
+    ? 100
+    : Math.max(0, Math.min(99, Math.round((completed / total) * 100)));
+  if (els.summaryProgressStep) {
+    els.summaryProgressStep.textContent = progress.status === "failed"
+      ? `Failed: ${progress.error || "Summary generation failed"}`
+      : progress.step || "Working...";
+  }
+  if (els.summaryProgressBar) els.summaryProgressBar.style.width = `${percent}%`;
+  if (els.summaryProgressMeta) {
+    els.summaryProgressMeta.textContent = `${Math.min(completed, total).toLocaleString("en-GB")} of ${total.toLocaleString("en-GB")} · ${formatElapsedMs(progress.elapsedMs)}`;
+  }
+  if (els.summaryProgressPath && progress.result?.reportPath) {
+    latestSummaryReportPath = String(progress.result.reportPath || "");
+    els.summaryProgressPath.textContent = latestSummaryReportPath;
+  }
+  const canShowActions = progress.status === "complete" || progress.status === "failed";
+  const canOpenReport = Boolean(latestSummaryReportPath && progress.status === "complete");
+  if (els.summaryProgressActions) els.summaryProgressActions.hidden = !canShowActions;
+  if (els.summaryProgressOpen) {
+    els.summaryProgressOpen.hidden = !canOpenReport;
+    els.summaryProgressOpen.disabled = !canOpenReport || !window.draftDiffDesktop?.openGeneratedReport;
+  }
+  if (els.summaryProgressReveal) {
+    els.summaryProgressReveal.hidden = !canOpenReport;
+    els.summaryProgressReveal.disabled = !canOpenReport || !window.draftDiffDesktop?.showGeneratedReportInFolder;
+  }
+}
+
+async function openGeneratedSummaryReport() {
+  if (!latestSummaryReportPath) return;
+  try {
+    if (!window.draftDiffDesktop?.openGeneratedReport) throw new Error("Desktop file opener unavailable");
+    await window.draftDiffDesktop.openGeneratedReport(latestSummaryReportPath);
+    setStatus("Opened version history summary");
+  } catch (error) {
+    console.error(error);
+    setStatus(`Open failed: ${error?.message || "could not open summary"}`);
+  }
+}
+
+async function revealGeneratedSummaryReport() {
+  if (!latestSummaryReportPath) return;
+  try {
+    if (!window.draftDiffDesktop?.showGeneratedReportInFolder) throw new Error("Desktop folder opener unavailable");
+    await window.draftDiffDesktop.showGeneratedReportInFolder(latestSummaryReportPath);
+    setStatus("Opened summary folder");
+  } catch (error) {
+    console.error(error);
+    setStatus(`Open folder failed: ${error?.message || "could not open folder"}`);
+  }
+}
+
+async function startVersionHistorySummaryJob(body) {
+  try {
+    const response = await fetch("/api/version-history-summary/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  } catch (error) {
+    if (!window.draftDiffDesktop?.startVersionHistorySummary) throw error;
+    return window.draftDiffDesktop.startVersionHistorySummary(body);
+  }
+}
+
+async function fetchVersionHistorySummaryProgress(jobId) {
+  try {
+    const response = await fetch(`/api/version-history-summary/progress?id=${encodeURIComponent(jobId)}`, {
+      cache: "no-store"
+    });
+    if (!response.ok) throw new Error(await response.text());
+    return response.json();
+  } catch (error) {
+    if (!window.draftDiffDesktop?.versionHistorySummaryProgress) throw error;
+    return window.draftDiffDesktop.versionHistorySummaryProgress(jobId);
+  }
+}
+
+async function pollVersionHistorySummary(jobId) {
+  const payload = await fetchVersionHistorySummaryProgress(jobId);
+  if (!payload.ok) throw new Error(payload.error || "Summary progress unavailable");
+  const progress = payload.progress || {};
+  updateSummaryProgressOverlay(progress);
+
+  if (progress.status === "complete") {
+    window.clearInterval(summaryProgressTimer);
+    summaryProgressTimer = null;
+    setStatus("Version history summary generated");
+    return "complete";
+  }
+
+  if (progress.status === "failed") {
+    window.clearInterval(summaryProgressTimer);
+    summaryProgressTimer = null;
+    setStatus("Version history summary failed");
+    return "failed";
+  }
+
+  return progress.status || "running";
+}
+
+async function generateVersionHistorySummary() {
+  closeFileMenu();
+  if (!state) return;
+
+  try {
+    showSummaryProgressOverlay();
+    setStatus("Generating version history summary...");
+    syncFromInputs();
+    saveCurrentViewState();
+    flushDraftVersionCaptures();
+    rememberLinkedProjectState();
+    window.clearTimeout(saveTimer);
+    await saveNow();
+
+    const body = prepareClosePayload({ skipSummary: true });
+    const started = await startVersionHistorySummaryJob(body);
+    const jobId = started.jobId || started.progress?.id;
+    if (!jobId) throw new Error("Summary job did not start");
+    updateSummaryProgressOverlay(started.progress || {});
+
+    const initialStatus = await pollVersionHistorySummary(jobId);
+    if (initialStatus === "complete" || initialStatus === "failed") return;
+    summaryProgressTimer = window.setInterval(() => {
+      pollVersionHistorySummary(jobId).catch(error => {
+        console.error(error);
+        window.clearInterval(summaryProgressTimer);
+        summaryProgressTimer = null;
+        updateSummaryProgressOverlay({
+          status: "failed",
+          step: "Failed",
+          error: error?.message || "Summary progress unavailable",
+          completed: 0,
+          total: 1,
+          elapsedMs: 0
+        });
+        setStatus("Version history summary failed");
+      });
+    }, 400);
+  } catch (error) {
+    console.error(error);
+    updateSummaryProgressOverlay({
+      status: "failed",
+      step: "Failed",
+      error: error?.message || "Summary generation failed",
+      completed: 0,
+      total: 1,
+      elapsedMs: 0
+    });
+    setStatus("Version history summary failed");
+  }
+}
+
 async function closeApp() {
   closeFileMenu();
   window.clearTimeout(saveTimer);
+  window.clearTimeout(pageSaveTimer);
 
   try {
-    if (state) {
-      syncFromInputs();
-      saveCurrentViewState();
-    }
+    const body = prepareClosePayload({ skipSummary: true });
     isClosingApp = true;
     setStatus("Closing...");
+    if (window.draftDiffDesktop?.persistClose) {
+      await window.draftDiffDesktop.hideForClose?.();
+      await window.draftDiffDesktop.persistClose(body);
+      window.close();
+      document.body.innerHTML = '<main class="closed-screen"><h1>Draft Diff Editor closed</h1><p>You can close this tab.</p></main>';
+      return;
+    }
 
     const response = await fetch("/api/shutdown", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: state ? JSON.stringify(state) : ""
+      body
     });
-    if (!response.ok) throw new Error(await response.text());
+    if (!response.ok) {
+      const failure = await responseSaveFailure(response);
+      throw new Error(typeof failure === "object" && failure ? failure.message : failure);
+    }
 
     window.setTimeout(() => {
       window.close();
@@ -4428,7 +7124,87 @@ async function closeApp() {
   } catch (error) {
     console.error(error);
     isClosingApp = false;
+    await window.draftDiffDesktop?.showAfterCloseError?.();
     setStatus(readableSaveFailure(error?.message || "Close failed"));
+  }
+}
+
+async function savePendingPagesNow() {
+  if (!state || !pendingPageSaveKeys.size) return false;
+
+  window.clearTimeout(pageSaveTimer);
+  pageSaveTimer = null;
+
+  if (isSaving) {
+    setStatus("Saving...");
+    queuePendingPageSaves(100);
+    return false;
+  }
+
+  const keys = Array.from(pendingPageSaveKeys);
+  const versionHistoryKeys = new Set(pendingPageVersionHistorySaveKeys);
+  pendingPageSaveKeys.clear();
+  pendingPageVersionHistorySaveKeys.clear();
+  const payloads = keys
+    .map(key => pageSavePayload(key, { includeVersionHistory: versionHistoryKeys.has(key) }))
+    .filter(Boolean);
+  if (!payloads.length) return false;
+
+  const requestRevision = stateRevision;
+  isSaving = true;
+  setStatus("Saving...");
+
+  try {
+    let latestPayload = null;
+    for (const requestBody of payloads) {
+      const response = await fetch("/api/page", {
+        method: "PATCH",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        isSaving = false;
+        handleSaveFailure(await responseSaveFailure(response));
+        return false;
+      }
+
+      latestPayload = await response.json();
+    }
+
+    const responseMatchesCurrentState = requestRevision === stateRevision;
+    if (responseMatchesCurrentState && latestPayload?.state) {
+      state = migrateLegacyDefaultFonts(latestPayload.state);
+    }
+
+    isSaving = false;
+    saveRetryCount = 0;
+
+    if (!responseMatchesCurrentState || saveQueued) {
+      const hasFullSaveQueued = saveQueued || Boolean(saveTimer);
+      saveQueued = false;
+      setStatus("Unsaved changes");
+      if (hasFullSaveQueued || !pendingPageSaveKeys.size) {
+        queueSave(0);
+      } else {
+        queuePendingPageSaves(0);
+      }
+      return true;
+    }
+
+    if (pendingPageSaveKeys.size) {
+      setStatus("Unsaved changes");
+      queuePendingPageSaves(0);
+      return true;
+    }
+
+    setStatus(linkedTextPath ? `Saved ${formatDate(state.updatedAt)}` : "Saved companion; no text file linked");
+    return true;
+  } catch (error) {
+    console.error(error);
+    isSaving = false;
+    handleSaveFailure(readableSaveFailure(error?.message));
+    return false;
   }
 }
 
@@ -4443,32 +7219,46 @@ async function saveNow() {
 
   syncFromInputs();
   saveCurrentViewState();
+  const capturedVersionDraftIds = flushDraftVersionCaptures();
+  if (capturedVersionDraftIds.includes(versionHistoryDraftId)) renderDiffSoon("Loading version history");
   rememberLinkedProjectState();
   const requestRevision = stateRevision;
   isSaving = true;
   setStatus("Saving...");
+  const requestBody = {
+    state,
+    filePath: linkedTextPath,
+    fileName: projectFileName
+  };
 
   try {
-    const response = await fetch("/api/state", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify(state)
-    });
+    let payload;
+    try {
+      const response = await fetch("/api/state", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(requestBody)
+      });
 
-    if (!response.ok) {
-      handleSaveFailure(await responseSaveFailure(response));
-      return false;
+      if (!response.ok) {
+        handleSaveFailure(await responseSaveFailure(response));
+        return false;
+      }
+
+      payload = await response.json();
+    } catch (error) {
+      console.error(error);
+      if (!window.draftDiffDesktop?.saveState) throw error;
+      payload = await window.draftDiffDesktop.saveState(JSON.stringify(requestBody));
     }
 
-    const payload = await response.json();
     const responseMatchesCurrentState = requestRevision === stateRevision;
     if (responseMatchesCurrentState) state = payload.state;
 
-    exportPath = payload.exportPath || exportPath;
-    linkedTextPath = payload.linkedTextPath || linkedTextPath || "";
-    if (payload.linkedTextFileName) projectFileName = payload.linkedTextFileName;
+    updateStoragePathsFromPayload(payload);
     isSaving = false;
     saveRetryCount = 0;
+    if (responseMatchesCurrentState) clearPendingPageSaves();
 
     if (!responseMatchesCurrentState || saveQueued) {
       saveQueued = false;
@@ -4501,13 +7291,23 @@ async function loadState() {
   editorSelections = {};
   exportPath = payload.exportPath || "";
   linkedTextPath = payload.linkedTextPath || "";
+  versionHistoryFolderPath = payload.versionHistoryFolderPath || "";
+  versionHistoryPath = payload.versionHistoryPath || "";
+  backupFolderPath = payload.backupFolderPath || payload.versionHistoryFolderPath || "";
+  backupFolderMissing = Boolean(payload.backupFolderMissing || payload.versionHistoryFolderMissing);
   projectFileName = payload.linkedTextFileName || fileNameFromPath(exportPath) || projectFileName;
   updateProjectTitle();
+  syncBackupMenu();
   restoreViewStateForProject();
   setStatus(linkedTextPath ? `Saved ${formatDate(state.updatedAt)}` : "Saved companion; no text file linked");
   render();
   resetHistory();
   focusPageEditor(activeEditorKey);
+  if (backupFolderMissing) {
+    setStatus("Backup folder missing; choose the moved folder");
+    window.setTimeout(promptForMissingBackupFolder, 0);
+  }
+  showProjectRecoveryNotice(payload.projectRecovery);
 }
 
 function setActiveFromPageKey(pageKey) {
@@ -4517,7 +7317,7 @@ function setActiveFromPageKey(pageKey) {
   if (pageKey === STORY_KEY) {
     activeArea = "story";
     renderDraftTabs();
-    saveCurrentViewState();
+    persistViewStateChange(0);
     return;
   }
 
@@ -4525,11 +7325,11 @@ function setActiveFromPageKey(pageKey) {
     selectedDraftId = parsed.draftId;
     activeArea = "draft";
     renderDraftTabs();
-    saveCurrentViewState();
+    persistViewStateChange(0);
   }
 }
 
-function focusPageEditor(pageKey) {
+function focusPageEditor(pageKey, options = {}) {
   window.requestAnimationFrame(() => {
     const editor = editorElementForKey(pageKey);
     if (editor) {
@@ -4537,7 +7337,7 @@ function focusPageEditor(pageKey) {
       restoreEditorSelection(editor);
       restoreEditorScrollPosition(editor);
     }
-    alignPageInCanvas(pageKey);
+    alignPageInCanvas(pageKey, options.canvasScrollBehavior || "auto");
   });
 }
 
@@ -4598,20 +7398,34 @@ function revealHistoryChange(target) {
 }
 
 function selectDraft(draftId) {
-  syncFromInputs();
+  syncViewStateFromDom();
   selectedDraftId = draftId;
   activeArea = "draft";
   activeEditorKey = draftContentKey(draftId);
   displayPage(activeEditorKey, true);
   render();
-  scheduleSave();
-  focusPageEditor(activeEditorKey);
+  persistViewStateChange(0);
+  focusPageEditor(activeEditorKey, { canvasScrollBehavior: "smooth" });
+}
+
+function selectDraftInChanges(draftId) {
+  if (!draftById(draftId)) return;
+
+  syncViewStateFromDom();
+  selectedDraftId = draftId;
+  activeArea = "draft";
+  activeEditorKey = draftContentKey(draftId);
+  const wasDisplayed = displayedPageKeys.has(activeEditorKey);
+  displayPage(activeEditorKey, true);
+  render();
+  persistViewStateChange(0);
+  revealComparePage(draftId, wasDisplayed ? "smooth" : "auto");
 }
 
 function addDraft(copyFromSelected) {
   syncFromInputs();
-  recordUndoSnapshot();
   const draft = createDraft(copyFromSelected ? getSelectedDraft() : null);
+  recordDraftStructureUndoSnapshot([draft.id]);
   state.drafts.push(draft);
   selectedDraftId = draft.id;
   activeArea = "draft";
@@ -4619,6 +7433,7 @@ function addDraft(copyFromSelected) {
   displayPage(activeEditorKey, true);
   render();
   scheduleSave();
+  queueViewStateSave(0);
   scrollTabsToEnd();
   focusPageEditor(activeEditorKey);
 }
@@ -4650,12 +7465,13 @@ function applyPageFormat(editorKey, field, value) {
     page.format.lineHeight === nextFormat.lineHeight
   ) return;
 
-  recordUndoSnapshot();
+  recordPageUndoSnapshot(editorKey);
   page.format = nextFormat;
   applyEditorFormat(editorEl, page.format);
   syncToolbarValues(editorKey);
   syncGlobalFormatControls();
-  scheduleSave();
+  queueDraftVersionCaptureForEditor(editorEl);
+  schedulePageSave(editorKey);
 }
 
 function applyUniversalFormat(field, value) {
@@ -4685,7 +7501,7 @@ function applyUniversalFormat(field, value) {
     return;
   }
 
-  recordUndoSnapshot();
+  recordProjectFormatUndoSnapshot();
   state.defaultFormat = nextFormat;
   pages.forEach(page => {
     ensurePageFields(page);
@@ -4702,10 +7518,67 @@ function runEditorCommand(editorKey, command) {
   const editorEl = editorElementForKey(editorKey);
   if (!editorEl) return;
   activeEditorKey = editorKey;
-  editorEl.focus();
-  recordUndoSnapshot();
-  document.execCommand(command, false, null);
-  scheduleSave();
+  recordPageUndoSnapshot(editorKey);
+  execRichTextCommand(command, { document, editor: editorEl });
+  queueDraftVersionCaptureForEditor(editorEl);
+  const page = pageForEditorKey(editorKey);
+  if (page) syncRichPage(page, editorEl);
+  schedulePageSave(editorKey);
+}
+
+function openDraftVersionHistoryForDraft(draftId) {
+  const draft = draftById(draftId);
+  if (!draft) return;
+
+  syncPageFromDom(draftContentKey(draft.id));
+  if (flushDraftVersionCapture(draft.id, { markChanged: false })) {
+    scheduleVersionHistoryPageSave(draftContentKey(draft.id), draft.id);
+  }
+  versionHistoryDraftId = draft.id;
+  showChanges = false;
+  activeArea = "draft";
+  selectedDraftId = draft.id;
+  activeEditorKey = draftContentKey(draft.id);
+  displayPage(activeEditorKey, true);
+  persistViewStateChange(0);
+  renderDraftTabs();
+  renderChangesVisibility();
+  renderDiffSoon("Loading version history");
+}
+
+function openProjectNotesVersionHistory() {
+  if (!state?.initialNotes) return;
+
+  syncPageFromDom(STORY_KEY);
+  if (flushProjectNotesVersionCapture({ markChanged: false })) {
+    scheduleVersionHistoryPageSave(STORY_KEY);
+  }
+  versionHistoryDraftId = STORY_KEY;
+  showChanges = false;
+  activeArea = "story";
+  activeEditorKey = STORY_KEY;
+  displayPage(STORY_KEY, true);
+  persistViewStateChange(0);
+  renderDraftTabs();
+  renderChangesVisibility();
+  renderDiffSoon("Loading version history");
+}
+
+function openDraftVersionHistoryForPage(editorKey) {
+  const parsed = parseDraftPageKey(editorKey);
+  if (parsed?.type === "story") {
+    openProjectNotesVersionHistory();
+    return;
+  }
+  if (parsed?.type === "content") openDraftVersionHistoryForDraft(parsed.draftId);
+}
+
+function closeVersionHistory() {
+  if (!versionHistoryDraftId) return;
+  versionHistoryDraftId = null;
+  renderDraftTabs();
+  renderChangesVisibility();
+  renderDiff();
 }
 
 function setRibbonRegionOpen(region, open) {
@@ -4832,7 +7705,7 @@ function chooseFormatOption(option) {
 }
 
 function toggleNotes(draftId) {
-  syncFromInputs();
+  syncViewStateFromDom();
   if (collapsedNotesIds.has(draftId)) {
     collapsedNotesIds.delete(draftId);
   } else {
@@ -4840,7 +7713,7 @@ function toggleNotes(draftId) {
   }
   ensureDisplaySelection();
   render();
-  scheduleSave();
+  persistViewStateChange(0);
 }
 
 function deleteDraft(draftId) {
@@ -4848,10 +7721,12 @@ function deleteDraft(draftId) {
   const draft = draftById(draftId);
   if (!draft || !canDeleteDraft(draft)) return;
 
-  recordUndoSnapshot();
+  recordDraftStructureUndoSnapshot([draftId]);
   state.drafts = state.drafts.filter(item => item.id !== draftId);
   displayedPageKeys.delete(draftContentKey(draftId));
   collapsedNotesIds.delete(draftId);
+  clearDraftVersionTimer(draftId);
+  if (versionHistoryDraftId === draftId) versionHistoryDraftId = null;
   delete editorSelections[draftContentKey(draftId)];
   delete editorSelections[draftNotesKey(draftId)];
 
@@ -4866,6 +7741,7 @@ function deleteDraft(draftId) {
   ensureDisplaySelection();
   render();
   scheduleSave();
+  queueViewStateSave(0);
 }
 
 function resizeNotesPane(draftId, clientY) {
@@ -4880,15 +7756,45 @@ function resizeNotesPane(draftId, clientY) {
 
 els.fileNew.addEventListener("click", newTextProject);
 els.fileOpen.addEventListener("click", openTextProject);
+els.fileMenu?.addEventListener("toggle", () => {
+  if (els.fileMenu.open) refreshRecentFilesMenu();
+  else setRecentSubmenuOpen(false);
+});
+els.fileOpenRecent?.addEventListener("pointerenter", () => {
+  setRecentSubmenuOpen(true);
+  refreshRecentFilesMenu();
+});
+els.fileOpenRecentButton?.addEventListener("click", event => {
+  event.preventDefault();
+  event.stopPropagation();
+  const nextOpen = !els.fileOpenRecent?.classList.contains("is-open");
+  setRecentSubmenuOpen(nextOpen);
+  if (nextOpen) refreshRecentFilesMenu();
+});
+els.fileOpenRecentMenu?.addEventListener("click", event => {
+  const button = event.target.closest("[data-recent-file-path]");
+  if (!button) return;
+  openRecentTextProject(button.dataset.recentFilePath);
+});
 els.fileOpenLocation.addEventListener("click", openFileLocation);
 els.fileSaveAs.addEventListener("click", () => saveAsTextProject());
+els.fileVersionHistoryFolder?.addEventListener("click", selectVersionHistoryFolder);
+els.fileActivateBackup?.addEventListener("click", toggleBackup);
+els.fileGenerateHistorySummary?.addEventListener("click", generateVersionHistorySummary);
 els.fileClose.addEventListener("click", closeApp);
+els.summaryProgressOpen?.addEventListener("click", openGeneratedSummaryReport);
+els.summaryProgressReveal?.addEventListener("click", revealGeneratedSummaryReport);
+els.summaryProgressClose?.addEventListener("click", hideSummaryProgressOverlay);
 els.editUndo.addEventListener("click", () => {
   undoProjectChange();
   closeTopMenus();
 });
 els.editRedo.addEventListener("click", () => {
   redoProjectChange();
+  closeTopMenus();
+});
+els.editSearch?.addEventListener("click", () => {
+  openSearch({ scope: "all" });
   closeTopMenus();
 });
 els.editGlobalFont.addEventListener("change", event => {
@@ -4914,41 +7820,51 @@ els.fileOpenInput.addEventListener("change", async event => {
 
 els.storyTab.addEventListener("click", event => {
   if (!event.target.closest("[data-story-focus]")) return;
+  if (versionHistoryDraftId) {
+    openProjectNotesVersionHistory();
+    return;
+  }
   if (showChanges) return;
-  syncFromInputs();
+  syncViewStateFromDom();
   activeArea = "story";
   activeEditorKey = STORY_KEY;
   renderDraftTabs();
-  saveCurrentViewState();
-  focusPageEditor(STORY_KEY);
+  persistViewStateChange(0);
+  focusPageEditor(STORY_KEY, { canvasScrollBehavior: "smooth" });
 });
 
 els.storyDisplayToggle.addEventListener("change", event => {
-  if (showChanges) {
+  if (showChanges || versionHistoryDraftId) {
     event.target.checked = false;
     return;
   }
 
-  syncFromInputs();
+  syncViewStateFromDom();
   displayPage(STORY_KEY, event.target.checked);
   render();
-  scheduleSave();
+  persistViewStateChange(0);
 });
 
 els.allDraftsTab.addEventListener("click", event => {
   if (event.target === els.allDraftsToggle) return;
   if (!event.target.closest("[data-all-drafts-toggle]")) return;
-  syncFromInputs();
+  if (versionHistoryDraftId) return;
+  syncViewStateFromDom();
   displayAllDrafts(!allDraftsSelected());
   render();
-  scheduleSave();
+  persistViewStateChange(0);
 });
 
 els.allDraftsToggle.addEventListener("change", event => {
-  syncFromInputs();
+  if (versionHistoryDraftId) {
+    renderDraftTabs();
+    return;
+  }
+
+  syncViewStateFromDom();
   displayAllDrafts(event.target.checked);
   render();
-  scheduleSave();
+  persistViewStateChange(0);
 });
 
 els.draftTabs.addEventListener("click", event => {
@@ -4960,16 +7876,31 @@ els.draftTabs.addEventListener("click", event => {
 
   const button = event.target.closest("[data-draft-id]");
   if (!button) return;
+  if (versionHistoryDraftId) {
+    openDraftVersionHistoryForDraft(button.dataset.draftId);
+    return;
+  }
+
+  if (showChanges) {
+    selectDraftInChanges(button.dataset.draftId);
+    return;
+  }
+
   selectDraft(button.dataset.draftId);
 });
 
 els.draftTabs.addEventListener("change", event => {
   const checkbox = event.target.closest("[data-display-draft-id]");
   if (!checkbox) return;
-  syncFromInputs();
+  if (versionHistoryDraftId) {
+    checkbox.checked = displayedPageKeys.has(draftContentKey(checkbox.dataset.displayDraftId));
+    return;
+  }
+
+  syncViewStateFromDom();
   displayPage(draftContentKey(checkbox.dataset.displayDraftId), checkbox.checked);
   render();
-  scheduleSave();
+  persistViewStateChange(0);
 });
 
 els.tabStrip?.addEventListener("scroll", updateTabScrollbar, { passive: true });
@@ -5011,13 +7942,16 @@ els.pageCanvas.addEventListener("focusin", event => {
     activeArea = "draft";
     activeEditorKey = draftContentKey(selectedDraftId);
     renderDraftTabs();
-    saveCurrentViewState();
+    persistViewStateChange(0);
   }
 });
 
 els.pageCanvas.addEventListener("focusout", event => {
   const editorEl = event.target.closest("[data-editor-key]");
-  if (editorEl) saveEditorViewState(editorEl);
+  if (editorEl) {
+    saveEditorViewState(editorEl);
+    queueViewStateSave(250);
+  }
 });
 
 els.pageCanvas.addEventListener("beforeinput", event => {
@@ -5035,38 +7969,71 @@ els.pageCanvas.addEventListener("beforeinput", event => {
     return;
   }
 
-  recordUndoSnapshot();
+  recordUndoSnapshotForInput(event);
 });
 
 els.pageCanvas.addEventListener("input", event => {
-  const editorEl = event.target.closest("[data-editor-key]");
-  const titleInput = event.target.closest("[data-title-draft-id]");
-  if (editorEl) window.requestAnimationFrame(() => saveEditorViewState(editorEl));
+  const editorEl = closestElement(event.target, "[data-editor-key]");
+  const titleInput = closestElement(event.target, "[data-title-draft-id]");
+  if (editorEl) {
+    const page = pageForEditorKey(editorEl.dataset.editorKey);
+    if (page) syncRichPage(page, editorEl);
+    queueDraftVersionCaptureForEditor(editorEl);
+    queueDraftNoteStatsRefresh(editorEl);
+    window.requestAnimationFrame(() => saveEditorViewState(editorEl));
+  }
 
-  if (editorEl || titleInput) {
-    recordUndoSnapshot();
-    scheduleSave();
+  const titlePageKey = titleInput ? syncDraftTitleInput(titleInput) : "";
+  if (titleInput) window.requestAnimationFrame(() => updateCompactTitleLabels(titleInput.closest(".panel-title-row") || document));
+
+  if (editorEl) {
+    schedulePageSave(editorEl.dataset.editorKey, {
+      updateViewState: false,
+      cacheLinkedState: false,
+      refreshUi: false,
+      refreshDiff: false
+    });
+  } else if (titleInput) {
+    if (titlePageKey) {
+      schedulePageSave(titlePageKey);
+    } else {
+      scheduleSave();
+    }
   }
 });
 
 els.pageCanvas.addEventListener("keyup", event => {
-  const editorEl = event.target.closest("[data-editor-key]");
-  if (editorEl) saveEditorViewState(editorEl);
+  const editorEl = closestElement(event.target, "[data-editor-key]");
+  if (editorEl) {
+    saveEditorViewState(editorEl);
+    queueViewStateSave(750);
+  }
 });
 
 els.pageCanvas.addEventListener("pointerup", event => {
-  const editorEl = event.target.closest("[data-editor-key]");
-  if (editorEl) saveEditorViewState(editorEl);
+  const editorEl = closestElement(event.target, "[data-editor-key]");
+  if (editorEl) {
+    saveEditorViewState(editorEl);
+    queueViewStateSave(750);
+  }
 });
 
 els.pageCanvas.addEventListener("scroll", event => {
   const editorEl = event.target.closest?.("[data-editor-key]");
-  if (editorEl) saveEditorScrollPosition(editorEl);
+  if (editorEl) {
+    saveEditorScrollPosition(editorEl);
+    queueViewStateSave(1000);
+  }
 }, true);
 
 els.pageCanvas.addEventListener("wheel", event => {
   const editorEl = event.target.closest?.("[data-editor-key]");
-  if (editorEl) window.requestAnimationFrame(() => saveEditorScrollPosition(editorEl));
+  if (editorEl) {
+    window.requestAnimationFrame(() => {
+      saveEditorScrollPosition(editorEl);
+      queueViewStateSave(1000);
+    });
+  }
 });
 
 els.pageCanvas.addEventListener("keydown", event => {
@@ -5084,25 +8051,93 @@ els.pageCanvas.addEventListener("keydown", event => {
 
   event.preventDefault();
   activeEditorKey = editorEl.dataset.editorKey;
-  recordUndoSnapshot();
-  document.execCommand("insertText", false, "\t");
-  scheduleSave();
+  recordPageUndoSnapshot(editorEl.dataset.editorKey);
+  insertPlainText("\t", { document });
+  const page = pageForEditorKey(editorEl.dataset.editorKey);
+  if (page) syncRichPage(page, editorEl);
+  queueDraftVersionCaptureForEditor(editorEl);
+  queueDraftNoteStatsRefresh(editorEl, 0);
+  schedulePageSave(editorEl.dataset.editorKey, {
+    updateViewState: false,
+    cacheLinkedState: false,
+    refreshUi: false,
+    refreshDiff: false
+  });
 });
 
 els.pageCanvas.addEventListener("paste", event => {
-  const editorEl = event.target.closest("[data-editor-key]");
+  const editorEl = closestElement(event.target, "[data-editor-key]");
   if (!editorEl) return;
 
   event.preventDefault();
   activeEditorKey = editorEl.dataset.editorKey;
-  recordUndoSnapshot();
-  const html = event.clipboardData.getData("text/html");
-  const text = event.clipboardData.getData("text/plain");
-  document.execCommand("insertHTML", false, html ? sanitizeRichHtml(html) : textToHtml(text));
-  scheduleSave();
+  recordPageUndoSnapshot(editorEl.dataset.editorKey);
+  insertClipboardHtml(event.clipboardData, { document, textToHtml });
+  const page = pageForEditorKey(editorEl.dataset.editorKey);
+  if (page) syncRichPage(page, editorEl);
+  queueDraftVersionCaptureForEditor(editorEl);
+  queueDraftNoteStatsRefresh(editorEl, 0);
+  schedulePageSave(editorEl.dataset.editorKey, {
+    updateViewState: false,
+    cacheLinkedState: false,
+    refreshUi: false,
+    refreshDiff: false
+  });
 });
 
 els.pageCanvas.addEventListener("pointerdown", event => {
+  const pageResizer = event.target.closest("[data-resize-page-before][data-resize-page-after]");
+  if (pageResizer) {
+    event.preventDefault();
+    const beforeKey = pageResizer.dataset.resizePageBefore;
+    const afterKey = pageResizer.dataset.resizePageAfter;
+    const viewportWidth = document.documentElement.clientWidth || window.innerWidth || els.pageCanvas.getBoundingClientRect().width;
+    if (!beforeKey || !afterKey || !viewportWidth) return;
+
+    pageDividerDrag = {
+      beforeKey,
+      afterKey,
+      startX: event.clientX,
+      startBefore: pagePanePercent(beforeKey),
+      startAfter: pagePanePercent(afterKey),
+      viewportWidth
+    };
+    pageResizer.classList.add("is-active");
+    els.pageCanvas.classList.add("is-page-resizing");
+
+    const onMove = moveEvent => {
+      if (!pageDividerDrag) return;
+      const deltaPercent = ((moveEvent.clientX - pageDividerDrag.startX) / pageDividerDrag.viewportWidth) * 100;
+      const pairTotal = pageDividerDrag.startBefore + pageDividerDrag.startAfter;
+      const minimum = Math.min(MIN_PAGE_PANE_PERCENT, pairTotal / 2);
+      const nextBeforeValue = Math.min(
+        pairTotal - minimum,
+        Math.max(minimum, pageDividerDrag.startBefore + deltaPercent)
+      );
+      setAdjacentPagePanePercents(
+        pageDividerDrag.beforeKey,
+        pageDividerDrag.afterKey,
+        nextBeforeValue,
+        pairTotal - nextBeforeValue
+      );
+    };
+    const onUp = () => {
+      pageResizer.classList.remove("is-active");
+      els.pageCanvas.classList.remove("is-page-resizing");
+      pageDividerDrag = null;
+      window.removeEventListener("pointermove", onMove);
+      window.removeEventListener("pointerup", onUp);
+      window.removeEventListener("pointercancel", onUp);
+      savePagePanePercents();
+      queueViewStateSave(250);
+    };
+
+    window.addEventListener("pointermove", onMove);
+    window.addEventListener("pointerup", onUp);
+    window.addEventListener("pointercancel", onUp);
+    return;
+  }
+
   const resizer = event.target.closest("[data-resize-notes]");
   if (!resizer) return;
 
@@ -5116,14 +8151,37 @@ els.pageCanvas.addEventListener("pointerdown", event => {
     resizingDraftId = null;
     window.removeEventListener("pointermove", onMove);
     window.removeEventListener("pointerup", onUp);
+    window.removeEventListener("pointercancel", onUp);
+    queueViewStateSave(250);
   };
 
   window.addEventListener("pointermove", onMove);
   window.addEventListener("pointerup", onUp);
+  window.addEventListener("pointercancel", onUp);
 });
 
 els.pageCanvas.addEventListener("mousedown", event => {
   if (event.target.closest(".editor-format-ribbon button")) event.preventDefault();
+});
+
+els.pageCanvas.addEventListener("contextmenu", event => {
+  handleEditorContextMenu(event);
+});
+
+els.pageCanvas.addEventListener("dblclick", event => {
+  const pageResizer = event.target.closest("[data-resize-page-before][data-resize-page-after]");
+  if (pageResizer) {
+    event.preventDefault();
+    resetPagePanePercents();
+    return;
+  }
+
+  const notesResizer = event.target.closest("[data-resize-notes]");
+  if (notesResizer) {
+    event.preventDefault();
+    setNotesPanePercent(notesResizer.dataset.resizeNotes, 58);
+    queueViewStateSave(250);
+  }
 });
 
 els.pageCanvas.addEventListener("click", event => {
@@ -5157,6 +8215,30 @@ els.pageCanvas.addEventListener("click", event => {
     return;
   }
 
+  const searchPageButton = event.target.closest("[data-search-page]");
+  if (searchPageButton) {
+    openSearch({ pageKey: searchPageButton.dataset.searchPage });
+    return;
+  }
+
+  const versionHistoryButton = event.target.closest("[data-version-history]");
+  if (versionHistoryButton) {
+    openDraftVersionHistoryForPage(versionHistoryButton.dataset.versionHistory);
+    return;
+  }
+
+  const searchPrevButton = event.target.closest("[data-search-page-prev]");
+  if (searchPrevButton) {
+    cycleSearchPage(searchPrevButton.dataset.searchPagePrev, -1);
+    return;
+  }
+
+  const searchNextButton = event.target.closest("[data-search-page-next]");
+  if (searchNextButton) {
+    cycleSearchPage(searchNextButton.dataset.searchPageNext, 1);
+    return;
+  }
+
   const button = event.target.closest("[data-command]");
   if (!button) return;
   const toolbar = button.closest("[data-toolbar-for]");
@@ -5171,23 +8253,43 @@ els.pageCanvas.addEventListener("change", event => {
 });
 
 els.pageCanvas.addEventListener("keydown", event => {
+  const pageResizer = event.target.closest("[data-resize-page-before][data-resize-page-after]");
+  if (pageResizer) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+
+    event.preventDefault();
+    const beforeKey = pageResizer.dataset.resizePageBefore;
+    const afterKey = pageResizer.dataset.resizePageAfter;
+    const step = event.shiftKey ? 8 : 3;
+    applyAdjacentPagePaneResize(
+      beforeKey,
+      afterKey,
+      pagePanePercent(beforeKey) + (event.key === "ArrowRight" ? step : -step)
+    );
+    savePagePanePercents();
+    queueViewStateSave(250);
+    return;
+  }
+
   const resizer = event.target.closest("[data-resize-notes]");
   if (!resizer) return;
 
   if (event.key === "ArrowUp") {
     event.preventDefault();
     setNotesPanePercent(resizer.dataset.resizeNotes, getNotesPanePercent(resizer.dataset.resizeNotes) - 4);
+    queueViewStateSave(250);
   }
 
   if (event.key === "ArrowDown") {
     event.preventDefault();
     setNotesPanePercent(resizer.dataset.resizeNotes, getNotesPanePercent(resizer.dataset.resizeNotes) + 4);
+    queueViewStateSave(250);
   }
 });
 
 els.compareMode.addEventListener("change", () => {
-  saveCurrentViewState();
-  renderDiff();
+  persistViewStateChange(0);
+  renderDiffSoon("Loading changes");
 });
 
 els.diffOutput.addEventListener("dblclick", event => {
@@ -5200,13 +8302,61 @@ els.diffOutput.addEventListener("dblclick", event => {
   jumpToComparedToken(sourceToken);
 });
 
+els.diffOutput.addEventListener("click", event => {
+  if (!(event.target instanceof Element)) return;
+
+  const projectNotesRestoreButton = event.target.closest("[data-restore-project-notes-version-id]");
+  if (projectNotesRestoreButton && els.diffOutput.contains(projectNotesRestoreButton)) {
+    event.preventDefault();
+    restoreProjectNotesVersion(projectNotesRestoreButton.dataset.restoreProjectNotesVersionId);
+    return;
+  }
+
+  const restoreButton = event.target.closest("[data-restore-draft-id][data-restore-version-id]");
+  if (!restoreButton || !els.diffOutput.contains(restoreButton)) return;
+
+  event.preventDefault();
+  restoreDraftVersion(restoreButton.dataset.restoreDraftId, restoreButton.dataset.restoreVersionId);
+});
+
 els.toggleChanges.addEventListener("click", () => {
-  syncFromInputs();
+  syncViewStateFromDom();
+  if (versionHistoryDraftId) {
+    closeVersionHistory();
+    return;
+  }
+
+  versionHistoryDraftId = null;
   showChanges = !showChanges;
-  saveCurrentViewState();
+  persistViewStateChange(0);
   renderDraftTabs();
   renderChangesVisibility();
-  renderDiff();
+  renderDiffSoon();
+});
+
+els.searchInput?.addEventListener("input", event => {
+  setSearchQuery(event.target.value);
+});
+
+els.searchScopeToggle?.addEventListener("click", event => {
+  event.preventDefault();
+  toggleSearchScopeMenu();
+});
+
+els.searchScopeMenu?.addEventListener("change", event => {
+  setSearchScopeFromControl(event.target);
+});
+
+els.searchPrev?.addEventListener("click", () => {
+  cycleSearch(-1);
+});
+
+els.searchNext?.addEventListener("click", () => {
+  cycleSearch(1);
+});
+
+els.searchClose?.addEventListener("click", () => {
+  closeSearch();
 });
 
 detachedPanelChannel?.addEventListener("message", event => {
@@ -5223,12 +8373,21 @@ detachedPanelChannel?.addEventListener("message", event => {
     return;
   }
 
+  if (message.type === "version-history:open") {
+    openDraftVersionHistoryForPage(message.pageKey);
+    return;
+  }
+
   if (message.type === "unit:closed") {
     reattachDetachedUnit(message.key);
   }
 });
 
 document.addEventListener("click", event => {
+  if (spellcheckMenu && event.target instanceof Element && !event.target.closest(".spellcheck-menu")) {
+    closeSpellcheckMenu();
+  }
+
   const topMenu =
     event.target instanceof Element ? event.target.closest("#file-menu, #edit-menu, #view-menu") : null;
   if (topMenu) {
@@ -5238,6 +8397,14 @@ document.addEventListener("click", event => {
   }
 
   closeRibbonsOutsidePanel(event.target);
+
+  if (
+    els.searchScopeMenu &&
+    event.target instanceof Element &&
+    !event.target.closest(".search-scope-dropdown")
+  ) {
+    toggleSearchScopeMenu(false);
+  }
 
   if (event.target instanceof Element && event.target.closest(".fr-picker")) return;
   closeFormatPickers();
@@ -5249,6 +8416,10 @@ document.addEventListener("keydown", event => {
   if (handleGlobalShortcut(event)) return;
 
   if (event.key === "Escape") {
+    closeSpellcheckMenu();
+    toggleSearchScopeMenu(false);
+    if (searchState.open) closeSearch();
+    if (versionHistoryDraftId) closeVersionHistory();
     closeTopMenus();
     closeFormatPickers();
   }
@@ -5258,18 +8429,40 @@ document.addEventListener("scroll", positionOpenFormatPickers, true);
 window.addEventListener("resize", positionOpenFormatPickers);
 window.addEventListener("resize", updateTabDensity);
 window.addEventListener("resize", updateAllNotesHeadingDensity);
+window.addEventListener("resize", () => window.requestAnimationFrame(() => updateCompactTitleLabels()));
 
 window.addEventListener("beforeunload", () => {
   if (!state || isClosingApp) return;
-  syncFromInputs();
-  saveCurrentViewState();
-  const blob = new Blob([JSON.stringify(state)], { type: "application/json" });
+  sendViewStateBeacon();
+  const blob = new Blob([prepareClosePayload({ skipSummary: true })], { type: "application/json" });
   navigator.sendBeacon("/api/close", blob);
 });
+
+window.draftDiffPersistBeforeClose = async () => {
+  if (!state) return true;
+  if (isClosingApp) return true;
+  window.clearTimeout(viewStateSaveTimer);
+  const body = prepareClosePayload({ skipSummary: true });
+  setStatus("Closing...");
+  if (window.draftDiffDesktop?.persistClose) {
+    await window.draftDiffDesktop.persistClose(body);
+    isClosingApp = true;
+    return true;
+  }
+  const response = await fetch("/api/close", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body
+  });
+  if (!response.ok) throw new Error(await response.text());
+  isClosingApp = true;
+  return true;
+};
 
 populateGlobalFormatControls();
 updateMenuShortcutLabels();
 syncPanelDragMenu();
+syncBackupMenu();
 pingServer();
 window.setInterval(pingServer, 5_000);
 

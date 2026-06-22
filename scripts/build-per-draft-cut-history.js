@@ -3,7 +3,8 @@
 
 const fs = require("node:fs");
 const path = require("node:path");
-const vm = require("node:vm");
+const { diffText: diffReportTexts } = require("../public/diff-core");
+const { wordCountForText } = require("../public/state-core");
 
 function usage() {
   console.error("Usage: node scripts/build-per-draft-cut-history.js <version-history.json> <live-draft-diff.txt> <output.html>");
@@ -12,37 +13,6 @@ function usage() {
 
 const [jsonPathArg, liveTextPathArg, outputPathArg] = process.argv.slice(2);
 if (!jsonPathArg || !liveTextPathArg || !outputPathArg) usage();
-
-const root = path.resolve(__dirname, "..");
-const serverPath = path.join(root, "server.js");
-const serverCode = `${fs.readFileSync(serverPath, "utf8")}
-
-module.exports.__cutHistoryInternals = {
-  diffReportTexts,
-  wordCountForText
-};
-`;
-
-const sandboxModule = { exports: {} };
-const sandbox = {
-  require,
-  module: sandboxModule,
-  exports: sandboxModule.exports,
-  __dirname: root,
-  __filename: serverPath,
-  process,
-  console,
-  Buffer,
-  URL,
-  setTimeout,
-  clearTimeout,
-  setInterval,
-  clearInterval
-};
-
-vm.runInNewContext(serverCode, sandbox, { filename: serverPath });
-
-const { diffReportTexts, wordCountForText } = sandboxModule.exports.__cutHistoryInternals;
 
 function readText(filePath) {
   return fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/u, "").replace(/\r\n/g, "\n").replace(/\r/g, "\n");

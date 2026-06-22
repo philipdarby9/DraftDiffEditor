@@ -15,3 +15,28 @@ Redesign the tabs and the check boxes in the main page to make them look more wr
 
 
 -A function for tracking all changes within a single document, implemented in a way that won't slow down the typing function. Maybe once the user has started typing it doesn't begin saving the change yet but waits a certain number of miliseconds and then checks if they are sill typing, waits until they've stopped, and if after 2 or 3 seconds they have stopped typing it registers the change and records it. Then add a button to the formatting ribbon for 'Version history' (use an icon) which, when clicked, presents each version of the Draft in the layout used to present the different drafts, which Draft 1.1, then 1.2, tracking each change in the document up that point with each change logged with the date and time, the changes marked in the same way as usual.
+
+
+-maybe it should have the option to transfer version histories and other data that might be needed if someone wants to work on a different computer, it could put them in a zip file at a location of the users choice. and then another option for loading version histories which are then saved in the same location.
+
+-the adjust line should be the colour of highlighted buttons rather than blue
+-the text file should also give the date that each draft was last edited and the word count
+-the open recent menu should go away when the mouse is no longer hovering over the option
+
+-activate backup option, closing copies the text file and version history to a folder, and maybe it could send an email too? and maybe the version history could be saved to a form that's easier to read, and this could apply in general. It could just have a version that has a draft, then underneath it, the words/phrases etc that were added, and the words/phrases that were taken out (surround by the clauses that preceded it/followed it, for context).
+
+and i want to change it so that the version history folder and the backup folder are the same, but the version
+  history jsons go into a json folder, and the backups go into a backup folder. the backup folder contains the original
+  text file, but also a file which contains the version histories of all drafts too. How it works is this; it has
+  project notes, then project notes.2, and underneath pn2, it has a list of all the characters/words/phrases that were
+  added, surrounded by the preceding clause and the following clause (so upon reviewing it the user can place it in
+  context), and then a list of all the characters/words/phrases that were removed, again, each surrounded by the
+  precedong clause and the following clause. And so on for draft 1 using the same format, and so on for draft 2.
+  However, after the final version of Draft 2, as well as having the lists of characters/words/phrases added/subtracted
+  from the final version of Draft 2, it also has a similar list detailing all the changes between the final version of
+  Draft 1 and the final version of Draft 2, in which, again, all the charcaters/words/phrases added or subtracted are
+  listed, each surrounded by their preceding or following clauses to place them in context. And so on, through all the
+  drafts in the document. This file can be a markdown file in which the surrounding context-providing clauses are given
+  in Italics, or something to indicate they are not part of the changed text, just context. So this backup document
+  will provide a full history of the drafts, as well as a full history of each individual draft's changes, with a
+  summary detailing each individual change. Understand?
