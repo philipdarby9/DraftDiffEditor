@@ -1455,6 +1455,29 @@ function versionSummaryPages(state) {
   }));
 }
 
+function reportTextForVersion(version) {
+  return normalizeDiffSource(textForHistoryVersion(version));
+}
+
+function textSignificantVersionEntries(versions) {
+  const entries = [];
+  let previousReportText = null;
+
+  (Array.isArray(versions) ? versions : []).forEach(version => {
+    const reportText = reportTextForVersion(version);
+    if (entries.length && reportText === previousReportText) return;
+
+    const previousEntry = entries[entries.length - 1] || null;
+    entries.push({
+      version,
+      previousVersion: previousEntry?.version || null
+    });
+    previousReportText = reportText;
+  });
+
+  return entries;
+}
+
 function fullSummaryDraftChangeHtml(left, right, index) {
   const anchor = `draft-change-${index + 1}-${index + 2}`;
   const title = `${left.title} to ${right.title}`;
@@ -1498,12 +1521,17 @@ function versionChangeDiffHtml(previousVersion, version) {
 async function fullVersionHistorySummaryHtml(state, options = {}, progress = () => {}) {
   const source = historySourceInfo(options);
   const sourceName = source.fileName || "draft-history.txt";
-  const pages = versionSummaryPages(state);
+  const pages = versionSummaryPages(state).map(page => ({
+    ...page,
+    reportVersions: textSignificantVersionEntries(page.versions)
+  }));
   const draftAnalyses = (state.drafts || []).map(analyseDraftCutHistory);
   const totalVersions = pages.reduce((sum, page) => sum + page.versions.length, 0);
-  const totalVersionChangeDiffs = pages.reduce((sum, page) => sum + Math.max(page.versions.length - 1, 0), 0);
+  const totalReportVersions = pages.reduce((sum, page) => sum + page.reportVersions.length, 0);
+  const totalSkippedVersions = totalVersions - totalReportVersions;
+  const totalVersionChangeDiffs = pages.reduce((sum, page) => sum + Math.max(page.reportVersions.length - 1, 0), 0);
   const totalChanges = Math.max(draftAnalyses.length - 1, 0);
-  const totalSteps = Math.max(totalVersions + totalVersionChangeDiffs + totalChanges + 2, 1);
+  const totalSteps = Math.max(totalReportVersions + totalVersionChangeDiffs + totalChanges + 2, 1);
   let completed = 0;
 
   const tick = async step => {
@@ -1520,7 +1548,7 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
   const contentsHtml = [
     '<li><a href="#draft-changes">Draft changes</a></li>',
     '<li><a href="#version-history">Version history</a><ol>',
-    ...pages.map(page => `<li><a href="#${escapeHtml(page.anchor)}">${escapeHtml(page.title)}</a><ol>${page.versions.map((version, index) => `<li><a href="#${escapeHtml(`${page.anchor}-version-${index + 1}`)}">${escapeHtml(versionHeadingLabel(index, page.versions.length))} (${escapeHtml(formatDate(version.createdAt))})</a></li>`).join("")}</ol></li>`),
+    ...pages.map(page => `<li><a href="#${escapeHtml(page.anchor)}">${escapeHtml(page.title)}</a><ol>${page.reportVersions.map((entry, index) => `<li><a href="#${escapeHtml(`${page.anchor}-version-${index + 1}`)}">${escapeHtml(versionHeadingLabel(index, page.reportVersions.length))} (${escapeHtml(formatDate(entry.version.createdAt))})</a></li>`).join("")}</ol></li>`),
     "</ol></li>"
   ].join("");
 
@@ -1534,21 +1562,22 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
   const versionSections = [];
   for (const page of pages) {
     const versionArticles = [];
-    for (let index = 0; index < page.versions.length; index += 1) {
-      const version = page.versions[index];
+    for (let index = 0; index < page.reportVersions.length; index += 1) {
+      const entry = page.reportVersions[index];
+      const version = entry.version;
       let changeHtml = "";
-      if (index > 0) {
-        await tick(`Comparing ${page.title}: ${versionHeadingLabel(index - 1, page.versions.length)} to ${versionHeadingLabel(index, page.versions.length)}`);
-        changeHtml = versionChangeDiffHtml(page.versions[index - 1], version);
+      if (entry.previousVersion) {
+        await tick(`Comparing ${page.title}: ${versionHeadingLabel(index - 1, page.reportVersions.length)} to ${versionHeadingLabel(index, page.reportVersions.length)}`);
+        changeHtml = versionChangeDiffHtml(entry.previousVersion, version);
         completed += 1;
       } else {
         changeHtml = versionChangeDiffHtml(null, version);
       }
-      await tick(`Rendering ${page.title}: ${versionHeadingLabel(index, page.versions.length)}`);
+      await tick(`Rendering ${page.title}: ${versionHeadingLabel(index, page.reportVersions.length)}`);
       versionArticles.push(`
         <article id="${escapeHtml(`${page.anchor}-version-${index + 1}`)}" class="version-entry">
           <header class="version-heading">
-            <h3>${escapeHtml(versionHeadingLabel(index, page.versions.length))}</h3>
+            <h3>${escapeHtml(versionHeadingLabel(index, page.reportVersions.length))}</h3>
             <p class="meta">${escapeHtml(formatDate(version.createdAt))} · ${versionWordCount(version).toLocaleString("en-GB")} ${versionWordCount(version) === 1 ? "word" : "words"}</p>
           </header>
           ${changeHtml}
@@ -1557,10 +1586,17 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
       completed += 1;
     }
 
+    const originalVersionCount = page.versions.length;
+    const skippedVersionCount = originalVersionCount - page.reportVersions.length;
+    const skippedVersionMetaHtml = skippedVersionCount
+      ? `<p class="meta">${skippedVersionCount.toLocaleString("en-GB")} unchanged ${skippedVersionCount === 1 ? "version" : "versions"} skipped.</p>`
+      : "";
+
     versionSections.push(`
       <section id="${escapeHtml(page.anchor)}" class="history-page-section">
         <h2>${escapeHtml(page.title)}</h2>
-        <p class="meta">${escapeHtml(page.type)} · ${page.versions.length.toLocaleString("en-GB")} ${page.versions.length === 1 ? "version" : "versions"}</p>
+        <p class="meta">${escapeHtml(page.type)} · ${page.reportVersions.length.toLocaleString("en-GB")} text-changing ${page.reportVersions.length === 1 ? "version" : "versions"} shown</p>
+        ${skippedVersionMetaHtml}
         ${versionArticles.join("\n")}
       </section>
     `);
@@ -1606,7 +1642,8 @@ h4{font-size:14px;margin:16px 0 8px;color:#403b34}
 <p class="meta">Generated ${escapeHtml(formatDate(nowIso()))}. Source text: ${escapeHtml(source.filePath || "companion draft-history.txt")}.</p>
 <div class="summary-grid">
   <div class="summary-stat"><strong>${(state.drafts || []).length.toLocaleString("en-GB")}</strong> current drafts</div>
-  <div class="summary-stat"><strong>${totalVersions.toLocaleString("en-GB")}</strong> saved/current versions</div>
+  <div class="summary-stat"><strong>${totalReportVersions.toLocaleString("en-GB")}</strong> text-changing versions shown</div>
+  <div class="summary-stat"><strong>${totalSkippedVersions.toLocaleString("en-GB")}</strong> unchanged versions skipped</div>
   <div class="summary-stat"><strong>${totalChanges.toLocaleString("en-GB")}</strong> draft-change sections</div>
 </div>
 <nav class="contents-page" aria-label="Contents">

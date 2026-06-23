@@ -298,6 +298,53 @@ async function run() {
 
     const summaryFolder = path.join(dataDir, "version-history-folder");
     __test.writeVersionHistoryFolderPath(summaryFolder);
+
+    const unchangedVersionState = StateCore.normalizeState({
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:03.000Z",
+      initialNotes: {
+        title: "Project notes",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-01T00:00:03.000Z",
+        content: "Story changed",
+        contentHtml: "Story changed",
+        versionHistory: [
+          {
+            id: "story-v1",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            title: "Project notes",
+            content: "Opening",
+            contentHtml: "Opening"
+          },
+          {
+            id: "story-v2-format-only",
+            createdAt: "2026-01-01T00:00:01.000Z",
+            title: "Project notes",
+            content: "Opening",
+            contentHtml: "<strong>Opening</strong>",
+            format: { fontSize: "20" }
+          },
+          {
+            id: "story-v3",
+            createdAt: "2026-01-01T00:00:02.000Z",
+            title: "Project notes",
+            content: "Story changed",
+            contentHtml: "Story changed"
+          }
+        ]
+      },
+      drafts: []
+    });
+    const unchangedSummaryResult = await writeFullVersionHistorySummaryReport(unchangedVersionState, {
+      fileName: "skip-unchanged-summary.txt",
+      filePath: path.join(dataDir, "skip-unchanged-summary.txt")
+    });
+    const unchangedSummaryHtml = fs.readFileSync(unchangedSummaryResult.reportPath, "utf8");
+    assert.doesNotMatch(unchangedSummaryHtml, /No text changes from the previous version/u);
+    assert.match(unchangedSummaryHtml, /Version 2 \/ current/u);
+    assert.doesNotMatch(unchangedSummaryHtml, /Version 3/u);
+    assert.match(unchangedSummaryHtml, /1 unchanged version skipped/u);
+
     const summaryResult = await writeFullVersionHistorySummaryReport(afterStoryHistory, {
       fileName: "server-page-unit-test.txt",
       filePath: path.join(dataDir, "server-page-unit-test.txt")
