@@ -3434,6 +3434,36 @@ function caretRangeFromPoint(clientX, clientY) {
   return range;
 }
 
+function rangeInsideEditor(range, editorEl) {
+  return Boolean(
+    range &&
+    editorEl &&
+    editorEl.contains(range.startContainer) &&
+    editorEl.contains(range.endContainer)
+  );
+}
+
+function currentEditorSelectionRange(editorEl) {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  return !range.collapsed && rangeInsideEditor(range, editorEl) ? range.cloneRange() : null;
+}
+
+function rangeContainsClientPoint(range, clientX, clientY) {
+  if (!range) return false;
+  return Array.from(range.getClientRects())
+    .some(rect => pointInRect(clientX, clientY, rect, 1));
+}
+
+function selectRange(range) {
+  if (!range) return false;
+  const selection = window.getSelection();
+  selection.removeAllRanges();
+  selection.addRange(range);
+  return true;
+}
+
 function wordRangeAtPoint(editorEl, clientX, clientY) {
   const caretRange = caretRangeFromPoint(clientX, clientY);
   if (!caretRange || !editorEl.contains(caretRange.startContainer)) return null;
@@ -3464,11 +3494,178 @@ function wordRangeAtPoint(editorEl, clientX, clientY) {
 }
 
 function selectSpellcheckRange(range = spellcheckRange) {
-  if (!range) return false;
+  return selectRange(range);
+}
+
+function selectedClipboardPayload(editorEl) {
   const selection = window.getSelection();
+  if (!selection?.rangeCount) return null;
+  const range = selection.getRangeAt(0);
+  if (range.collapsed || !rangeInsideEditor(range, editorEl)) return null;
+
+  const container = document.createElement("div");
+  container.append(range.cloneContents());
+  const html = sanitizeRichHtml(container.innerHTML);
+  const text = selection.toString();
+  if (!html && !text) return null;
+  return { html, text };
+}
+
+async function writeClipboardPayload(payload) {
+  const html = String(payload?.html || "");
+  const text = String(payload?.text || "");
+  const clipboard = navigator.clipboard;
+  if (!clipboard) return false;
+
+  if (html && typeof clipboard.write === "function" && typeof ClipboardItem === "function" && typeof Blob === "function") {
+    try {
+      await clipboard.write([
+        new ClipboardItem({
+          "text/html": new Blob([html], { type: "text/html" }),
+          "text/plain": new Blob([text || plainTextFromHtml(html)], { type: "text/plain" })
+        })
+      ]);
+      return true;
+    } catch {}
+  }
+
+  if (text && typeof clipboard.writeText === "function") {
+    await clipboard.writeText(text);
+    return true;
+  }
+
+  return false;
+}
+
+async function readClipboardItemText(item, type) {
+  if (!item?.types?.includes(type) || typeof item.getType !== "function") return "";
+  const blob = await item.getType(type);
+  return typeof blob?.text === "function" ? blob.text() : "";
+}
+
+async function readClipboardPayload() {
+  const clipboard = navigator.clipboard;
+  if (!clipboard) return null;
+
+  if (typeof clipboard.read === "function") {
+    try {
+      const items = await clipboard.read();
+      for (const item of items || []) {
+        const html = await readClipboardItemText(item, "text/html");
+        const text = await readClipboardItemText(item, "text/plain");
+        if (html || text) return { html, text: text || plainTextFromHtml(html) };
+      }
+    } catch {}
+  }
+
+  if (typeof clipboard.readText === "function") {
+    try {
+      const text = await clipboard.readText();
+      if (text) return { html: "", text };
+    } catch {}
+  }
+
+  return null;
+}
+
+function syncEditorDomMutation(editorEl, beforeEntry = null) {
+  const editorKey = editorEl?.dataset?.editorKey;
+  if (!editorKey) return false;
+
+  const page = pageForEditorKey(editorKey);
+  if (page) syncRichPage(page, editorEl);
+
+  if (beforeEntry) {
+    const currentEntry = pageHistoryEntryForKey(editorKey);
+    if (currentEntry && !historyEntriesMatch(currentEntry, beforeEntry)) pushUndoHistoryEntry(beforeEntry);
+  }
+
+  queueDraftVersionCaptureForEditor(editorEl);
+  queueDraftNoteStatsRefresh(editorEl, 0);
+  saveEditorViewState(editorEl);
+  schedulePageSave(editorKey, {
+    updateViewState: false,
+    cacheLinkedState: false,
+    refreshUi: false,
+    refreshDiff: false
+  });
+  return true;
+}
+
+function deleteSelectedContent(editorEl) {
+  const selection = window.getSelection();
+  if (!selection?.rangeCount) return false;
+  const range = selection.getRangeAt(0);
+  if (range.collapsed || !rangeInsideEditor(range, editorEl)) return false;
+
+  if (execRichTextCommand("delete", { document, editor: editorEl })) return true;
+
+  range.deleteContents();
+  range.collapse(true);
   selection.removeAllRanges();
   selection.addRange(range);
   return true;
+}
+
+async function copyEditorSelection(editorEl, range = null) {
+  if (range && !selectRange(range)) return false;
+  const payload = selectedClipboardPayload(editorEl);
+  if (!payload) return false;
+
+  try {
+    if (await writeClipboardPayload(payload)) return true;
+  } catch {}
+
+  return execRichTextCommand("copy", { document, editor: editorEl });
+}
+
+async function cutEditorSelection(editorEl, range = null) {
+  if (range && !selectRange(range)) return false;
+  const payload = selectedClipboardPayload(editorEl);
+  if (!payload) return false;
+
+  const beforeEntry = pageHistoryEntryForKey(editorEl.dataset.editorKey);
+  try {
+    if (await writeClipboardPayload(payload)) {
+      if (!deleteSelectedContent(editorEl)) return false;
+      syncEditorDomMutation(editorEl, beforeEntry);
+      return true;
+    }
+  } catch {}
+
+  const didCut = execRichTextCommand("cut", { document, editor: editorEl });
+  if (didCut) syncEditorDomMutation(editorEl, beforeEntry);
+  return didCut;
+}
+
+function clipboardPayloadData(payload) {
+  return {
+    getData(type) {
+      if (type === "text/html") return payload?.html || "";
+      if (type === "text/plain") return payload?.text || "";
+      return "";
+    }
+  };
+}
+
+async function pasteIntoEditor(editorEl, range = null) {
+  if (rangeInsideEditor(range, editorEl)) {
+    selectRange(range);
+  } else {
+    editorEl.focus({ preventScroll: true });
+  }
+
+  const beforeEntry = pageHistoryEntryForKey(editorEl.dataset.editorKey);
+  const payload = await readClipboardPayload();
+  if (payload?.html || payload?.text) {
+    insertClipboardHtml(clipboardPayloadData(payload), { document, editor: editorEl, textToHtml });
+    syncEditorDomMutation(editorEl, beforeEntry);
+    return true;
+  }
+
+  const didPaste = execRichTextCommand("paste", { document, editor: editorEl });
+  if (didPaste) syncEditorDomMutation(editorEl, beforeEntry);
+  return didPaste;
 }
 
 function replaceSpellcheckWord(value) {
@@ -3501,12 +3698,23 @@ function menuButtonHtml(label, action, disabled = false) {
   return `<button type="button" data-spellcheck-action="${escapeHtml(action)}"${disabled ? " disabled" : ""}>${escapeHtml(label)}</button>`;
 }
 
-function showSpellcheckMenu({ word, range = null, suggestions = [], misspelled = false, clientX, clientY }) {
+function showSpellcheckMenu({
+  word,
+  range = null,
+  clipboardRange = null,
+  pasteRange = null,
+  editorEl = null,
+  suggestions = [],
+  misspelled = false,
+  clientX,
+  clientY
+}) {
   closeSpellcheckMenu();
   spellcheckRange = range;
   const menu = document.createElement("div");
   menu.className = "spellcheck-menu";
   menu.setAttribute("role", "menu");
+  const canUseClipboardSelection = Boolean(editorEl && clipboardRange);
 
   const suggestionButtons = misspelled
     ? (suggestions.length
@@ -3520,9 +3728,9 @@ function showSpellcheckMenu({ word, range = null, suggestions = [], misspelled =
     ${misspelled ? menuButtonHtml(`Ignore "${word}"`, "ignore") : ""}
     ${misspelled ? menuButtonHtml(`Add "${word}" to dictionary`, "add") : ""}
     <span class="menu-divider" aria-hidden="true"></span>
-    ${menuButtonHtml("Cut", "cut")}
-    ${menuButtonHtml("Copy", "copy")}
-    ${menuButtonHtml("Paste", "paste")}
+    ${menuButtonHtml("Cut", "cut", !canUseClipboardSelection)}
+    ${menuButtonHtml("Copy", "copy", !canUseClipboardSelection)}
+    ${menuButtonHtml("Paste", "paste", !editorEl)}
     <span class="menu-divider" aria-hidden="true"></span>
     ${menuButtonHtml("Select all", "selectAll")}
   `;
@@ -3547,18 +3755,37 @@ function showSpellcheckMenu({ word, range = null, suggestions = [], misspelled =
       return;
     }
     if (action === "selectAll") {
-      const editorEl = spellcheckRange?.startContainer?.parentElement?.closest("[data-editor-key]");
-      if (editorEl) {
+      const selectionEditor = editorEl || spellcheckRange?.startContainer?.parentElement?.closest("[data-editor-key]");
+      if (selectionEditor) {
         const range = document.createRange();
-        range.selectNodeContents(editorEl);
-        selectSpellcheckRange(range);
+        range.selectNodeContents(selectionEditor);
+        selectRange(range);
       }
       closeSpellcheckMenu();
       return;
     }
 
-    selectSpellcheckRange();
-    execRichTextCommand(action, { document });
+    if (action === "cut") {
+      const range = clipboardRange?.cloneRange();
+      closeSpellcheckMenu();
+      if (!await cutEditorSelection(editorEl, range)) setStatus("Cut unavailable");
+      return;
+    }
+
+    if (action === "copy") {
+      const range = clipboardRange?.cloneRange();
+      closeSpellcheckMenu();
+      if (!await copyEditorSelection(editorEl, range)) setStatus("Copy unavailable");
+      return;
+    }
+
+    if (action === "paste") {
+      const range = pasteRange?.cloneRange();
+      closeSpellcheckMenu();
+      if (!await pasteIntoEditor(editorEl, range)) setStatus("Paste unavailable");
+      return;
+    }
+
     closeSpellcheckMenu();
   });
 
@@ -3583,9 +3810,16 @@ async function handleEditorContextMenu(event) {
   const editorEl = target?.closest?.("[data-editor-key]");
   if (!editorEl) return;
 
+  const caretRange = caretRangeFromPoint(event.clientX, event.clientY);
+  const selectionRange = currentEditorSelectionRange(editorEl);
+  const useSelectionAtPoint = selectionRange && rangeContainsClientPoint(selectionRange, event.clientX, event.clientY);
   const wordInfo = wordRangeAtPoint(editorEl, event.clientX, event.clientY);
   event.preventDefault();
   const range = wordInfo?.range?.cloneRange() || null;
+  const clipboardRange = useSelectionAtPoint ? selectionRange : range;
+  const pasteRange = useSelectionAtPoint
+    ? selectionRange
+    : (rangeInsideEditor(caretRange, editorEl) ? caretRange : null);
 
   let misspelled = false;
   let suggestions = [];
@@ -3614,6 +3848,9 @@ async function handleEditorContextMenu(event) {
   showSpellcheckMenu({
     word: wordInfo?.word || "",
     range,
+    clipboardRange,
+    pasteRange,
+    editorEl,
     suggestions,
     misspelled,
     clientX: event.clientX,
@@ -7515,15 +7752,22 @@ function applyUniversalFormat(field, value) {
 }
 
 function runEditorCommand(editorKey, command) {
+  if (command === "undo") {
+    undoProjectChange();
+    return;
+  }
+
+  if (command === "redo") {
+    redoProjectChange();
+    return;
+  }
+
   const editorEl = editorElementForKey(editorKey);
   if (!editorEl) return;
   activeEditorKey = editorKey;
-  recordPageUndoSnapshot(editorKey);
+  const beforeEntry = pageHistoryEntryForKey(editorKey);
   execRichTextCommand(command, { document, editor: editorEl });
-  queueDraftVersionCaptureForEditor(editorEl);
-  const page = pageForEditorKey(editorKey);
-  if (page) syncRichPage(page, editorEl);
-  schedulePageSave(editorKey);
+  syncEditorDomMutation(editorEl, beforeEntry);
 }
 
 function openDraftVersionHistoryForDraft(draftId) {

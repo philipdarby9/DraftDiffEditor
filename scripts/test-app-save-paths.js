@@ -191,6 +191,22 @@ const universalFormatSource = sourceBetween("function applyUniversalFormat", "fu
 assert.match(universalFormatSource, /recordProjectFormatUndoSnapshot\(\)/, "universal format should record compact format undo");
 assert.doesNotMatch(universalFormatSource, /recordUndoSnapshot\(\)/, "universal format should not record full project undo snapshots");
 
+const runEditorCommandSource = sourceBetween("function runEditorCommand", "function openDraftVersionHistoryForDraft");
+assert.match(runEditorCommandSource, /if \(command === "undo"\) \{\s*undoProjectChange\(\);/u, "toolbar undo should use app history");
+assert.match(runEditorCommandSource, /if \(command === "redo"\) \{\s*redoProjectChange\(\);/u, "toolbar redo should use app history");
+assert.match(runEditorCommandSource, /syncEditorDomMutation\(editorEl, beforeEntry\)/u, "toolbar formatting should sync through the app edit path");
+assert.doesNotMatch(runEditorCommandSource, /recordPageUndoSnapshot\(editorKey\);\s*execRichTextCommand\(command/u, "toolbar commands should not pre-record failed native edits");
+
+const contextMenuSource = sourceBetween("function showSpellcheckMenu", "async function handleEditorContextMenu");
+assert.match(contextMenuSource, /cutEditorSelection\(editorEl, range\)/u, "context menu cut should use the app clipboard edit path");
+assert.match(contextMenuSource, /copyEditorSelection\(editorEl, range\)/u, "context menu copy should use the app clipboard path");
+assert.match(contextMenuSource, /pasteIntoEditor\(editorEl, range\)/u, "context menu paste should use clipboard insertion instead of native paste");
+assert.doesNotMatch(contextMenuSource, /execRichTextCommand\(action/u, "context menu clipboard actions should not fall through to raw execCommand");
+
+const contextMenuOpenSource = sourceBetween("async function handleEditorContextMenu", "function displayElementForKey");
+assert.match(contextMenuOpenSource, /const pasteRange = useSelectionAtPoint/u, "context menu paste should only replace an existing selection when right-clicking inside it");
+assert.match(contextMenuOpenSource, /rangeInsideEditor\(caretRange, editorEl\)/u, "context menu paste should otherwise insert at the clicked editor caret");
+
 const deleteDraftSource = sourceBetween("function deleteDraft(draftId)", "function resizeNotesPane");
 assert.match(deleteDraftSource, /recordDraftStructureUndoSnapshot\(\[draftId\]\)/, "deleteDraft should record compact draft-structure undo");
 assert.doesNotMatch(deleteDraftSource, /recordUndoSnapshot\(\)/, "deleteDraft should not record full project undo snapshots");
