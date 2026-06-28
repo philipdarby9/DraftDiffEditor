@@ -204,8 +204,14 @@ assert.match(contextMenuSource, /pasteIntoEditor\(editorEl, range\)/u, "context 
 assert.doesNotMatch(contextMenuSource, /execRichTextCommand\(action/u, "context menu clipboard actions should not fall through to raw execCommand");
 
 const contextMenuOpenSource = sourceBetween("async function handleEditorContextMenu", "function displayElementForKey");
-assert.match(contextMenuOpenSource, /const pasteRange = useSelectionAtPoint/u, "context menu paste should only replace an existing selection when right-clicking inside it");
+assert.match(contextMenuOpenSource, /selectedRangeAtContextPoint\(editorEl, caretRange, event\.clientX, event\.clientY\)/u, "context menu should resolve the full selected range at the right-click point");
+assert.match(contextMenuOpenSource, /const clipboardRange = selectionRange \|\| range/u, "context menu cut/copy should prefer the full selection before falling back to the clicked word");
+assert.match(contextMenuOpenSource, /const pasteRange = selectionRange/u, "context menu paste should only replace an existing selection when right-clicking inside it");
 assert.match(contextMenuOpenSource, /rangeInsideEditor\(caretRange, editorEl\)/u, "context menu paste should otherwise insert at the clicked editor caret");
+
+const selectionRangeSource = sourceBetween("function savedEditorSelectionRange", "function selectRange");
+assert.match(selectionRangeSource, /editorSelections\[editorEl\?\.dataset\?\.editorKey\]/u, "context menu selection fallback should use the last saved editor selection");
+assert.match(selectionRangeSource, /rangeContainsCaretPoint\(range, editorEl, caretRange\)/u, "context menu selection matching should compare text offsets, not only mouse rectangles");
 
 const deleteDraftSource = sourceBetween("function deleteDraft(draftId)", "function resizeNotesPane");
 assert.match(deleteDraftSource, /recordDraftStructureUndoSnapshot\(\[draftId\]\)/, "deleteDraft should record compact draft-structure undo");

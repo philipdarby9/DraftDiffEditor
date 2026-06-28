@@ -128,6 +128,40 @@ assert.equal(
   RichTextCore.insertClipboardHtml(
     {
       getData(type) {
+        return type === "text/html" ? "word" : "word";
+      }
+    },
+    { document: recorder.document }
+  );
+  assert.deepEqual(
+    recorder.calls,
+    [{ command: "insertText", showUi: false, value: "word" }],
+    "plain single-line clipboard HTML should insert as text to avoid contenteditable block breaks"
+  );
+}
+
+{
+  const recorder = commandRecorder();
+  RichTextCore.insertClipboardHtml(
+    {
+      getData(type) {
+        return type === "text/html" ? "<p>word</p>" : "word";
+      }
+    },
+    { document: recorder.document }
+  );
+  assert.deepEqual(
+    recorder.calls,
+    [{ command: "insertText", showUi: false, value: "word" }],
+    "unwrapped plain block clipboard fragments should insert as text"
+  );
+}
+
+{
+  const recorder = commandRecorder();
+  RichTextCore.insertClipboardHtml(
+    {
+      getData(type) {
         return type === "text/html" ? "" : "one\ntwo";
       }
     },
@@ -137,6 +171,23 @@ assert.equal(
     recorder.calls,
     [{ command: "insertHTML", showUi: false, value: "fallback:one<br>two" }],
     "clipboard helper should convert plain clipboard text when rich HTML is absent"
+  );
+}
+
+{
+  const recorder = commandRecorder();
+  RichTextCore.insertClipboardHtml(
+    {
+      getData(type) {
+        return type === "text/html" ? "" : "word";
+      }
+    },
+    { document: recorder.document }
+  );
+  assert.deepEqual(
+    recorder.calls,
+    [{ command: "insertText", showUi: false, value: "word" }],
+    "plain single-line clipboard text should insert with insertText"
   );
 }
 

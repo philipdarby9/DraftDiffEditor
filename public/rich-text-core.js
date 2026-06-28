@@ -172,6 +172,10 @@
     return /[\r\n]/.test(asText(value));
   }
 
+  function hasHtmlTag(value) {
+    return /<[a-z][\s\S]*>/i.test(asText(value));
+  }
+
   function unwrapSingleSimpleClipboardBlockWithTemplate(html, template) {
     template.innerHTML = String(html || "");
     const nodes = Array.from(template.content.childNodes)
@@ -246,7 +250,17 @@
     const html = clipboardText(clipboardData, "text/html");
     const text = clipboardText(clipboardData, "text/plain");
     const textToHtml = typeof options.textToHtml === "function" ? options.textToHtml : defaultTextToHtml;
-    return insertRichTextHtml(html ? clipboardHtmlForInsertion(html, text, options) : textToHtml(text), options);
+    if (html) {
+      const insertionHtml = clipboardHtmlForInsertion(html, text, options);
+      if (!hasLineBreak(text) && !hasHtmlTag(insertionHtml)) {
+        return insertPlainText(text || decodeHtmlText(insertionHtml), options);
+      }
+      return insertRichTextHtml(insertionHtml, options);
+    }
+
+    return hasLineBreak(text)
+      ? insertRichTextHtml(textToHtml(text), options)
+      : insertPlainText(text, options);
   }
 
   return Object.freeze({

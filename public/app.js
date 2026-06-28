@@ -3450,10 +3450,62 @@ function currentEditorSelectionRange(editorEl) {
   return !range.collapsed && rangeInsideEditor(range, editorEl) ? range.cloneRange() : null;
 }
 
+function savedEditorSelectionRange(editorEl) {
+  const saved = editorSelections[editorEl?.dataset?.editorKey];
+  if (!editorEl || !saved) return null;
+  if (saved.startTextOffset === undefined || saved.endTextOffset === undefined) return null;
+
+  const startNode = nodeFromPath(editorEl, saved.startPath);
+  const endNode = nodeFromPath(editorEl, saved.endPath);
+  let range = null;
+
+  if (
+    startNode &&
+    endNode &&
+    saved.startOffset <= nodeOffsetLimit(startNode) &&
+    saved.endOffset <= nodeOffsetLimit(endNode)
+  ) {
+    range = document.createRange();
+    range.setStart(startNode, saved.startOffset);
+    range.setEnd(endNode, saved.endOffset);
+  } else {
+    range = rangeFromTextOffsets(editorEl, saved.startTextOffset, saved.endTextOffset);
+  }
+
+  return range && !range.collapsed && rangeInsideEditor(range, editorEl) ? range : null;
+}
+
 function rangeContainsClientPoint(range, clientX, clientY) {
   if (!range) return false;
   return Array.from(range.getClientRects())
     .some(rect => pointInRect(clientX, clientY, rect, 1));
+}
+
+function rangeTextOffsetBounds(editorEl, range) {
+  if (!rangeInsideEditor(range, editorEl)) return null;
+  const start = textOffsetForRangeBoundary(editorEl, range.startContainer, range.startOffset);
+  const end = textOffsetForRangeBoundary(editorEl, range.endContainer, range.endOffset);
+  return { start: Math.min(start, end), end: Math.max(start, end) };
+}
+
+function rangeContainsCaretPoint(range, editorEl, caretRange) {
+  if (!rangeInsideEditor(caretRange, editorEl)) return false;
+  const bounds = rangeTextOffsetBounds(editorEl, range);
+  if (!bounds || bounds.start === bounds.end) return false;
+  const offset = textOffsetForRangeBoundary(editorEl, caretRange.startContainer, caretRange.startOffset);
+  return offset >= bounds.start && offset <= bounds.end;
+}
+
+function selectedRangeAtContextPoint(editorEl, caretRange, clientX, clientY) {
+  const ranges = [
+    currentEditorSelectionRange(editorEl),
+    savedEditorSelectionRange(editorEl)
+  ];
+
+  return ranges.find(range => (
+    range &&
+    (rangeContainsClientPoint(range, clientX, clientY) || rangeContainsCaretPoint(range, editorEl, caretRange))
+  )) || null;
 }
 
 function selectRange(range) {
@@ -3811,13 +3863,12 @@ async function handleEditorContextMenu(event) {
   if (!editorEl) return;
 
   const caretRange = caretRangeFromPoint(event.clientX, event.clientY);
-  const selectionRange = currentEditorSelectionRange(editorEl);
-  const useSelectionAtPoint = selectionRange && rangeContainsClientPoint(selectionRange, event.clientX, event.clientY);
+  const selectionRange = selectedRangeAtContextPoint(editorEl, caretRange, event.clientX, event.clientY);
   const wordInfo = wordRangeAtPoint(editorEl, event.clientX, event.clientY);
   event.preventDefault();
   const range = wordInfo?.range?.cloneRange() || null;
-  const clipboardRange = useSelectionAtPoint ? selectionRange : range;
-  const pasteRange = useSelectionAtPoint
+  const clipboardRange = selectionRange || range;
+  const pasteRange = selectionRange
     ? selectionRange
     : (rangeInsideEditor(caretRange, editorEl) ? caretRange : null);
 
