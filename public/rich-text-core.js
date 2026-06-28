@@ -10,6 +10,8 @@
   const TEXT_NODE = 3;
   const ELEMENT_NODE = 1;
   const BLOCK_TAGS = new Set(["div", "p", "blockquote", "ul", "ol", "li"]);
+  const SIMPLE_INLINE_CLIPBOARD_BLOCK_TAGS = new Set(["div", "p", "blockquote", "li"]);
+  const INLINE_BREAK_TAG_PATTERN = /<(?:br|div|p|blockquote|ul|ol|li)\b/i;
 
   function asText(value) {
     return typeof value === "string" ? value : "";
@@ -166,6 +168,44 @@
     return template ? sanitizeRichHtmlWithTemplate(html, template) : sanitizeRichHtmlFallback(html);
   }
 
+  function hasLineBreak(value) {
+    return /[\r\n]/.test(asText(value));
+  }
+
+  function unwrapSingleSimpleClipboardBlockWithTemplate(html, template) {
+    template.innerHTML = String(html || "");
+    const nodes = Array.from(template.content.childNodes)
+      .filter(node => node.nodeType !== TEXT_NODE || node.nodeValue.trim());
+    if (nodes.length !== 1) return html;
+
+    const [node] = nodes;
+    if (node.nodeType !== ELEMENT_NODE) return html;
+    const tag = node.tagName.toLowerCase();
+    if (!SIMPLE_INLINE_CLIPBOARD_BLOCK_TAGS.has(tag)) return html;
+
+    const inner = node.innerHTML;
+    return INLINE_BREAK_TAG_PATTERN.test(inner) ? html : inner;
+  }
+
+  function unwrapSingleSimpleClipboardBlockFallback(html) {
+    const trimmed = String(html || "").trim();
+    const match = /^<(div|p|blockquote|li)>([\s\S]*)<\/\1>$/i.exec(trimmed);
+    if (!match) return html;
+    return INLINE_BREAK_TAG_PATTERN.test(match[2]) ? html : match[2];
+  }
+
+  function clipboardHtmlForInsertion(html, text = "", options = {}) {
+    const sanitized = sanitizeRichHtml(html, options);
+    if (hasLineBreak(text)) return sanitized;
+
+    const template = typeof options.createTemplate === "function"
+      ? options.createTemplate()
+      : (options.document || (typeof document !== "undefined" ? document : null))?.createElement?.("template");
+    return template
+      ? unwrapSingleSimpleClipboardBlockWithTemplate(sanitized, template)
+      : unwrapSingleSimpleClipboardBlockFallback(sanitized);
+  }
+
   function documentFromOptions(options = {}) {
     return options.document || (typeof document !== "undefined" ? document : null);
   }
@@ -206,10 +246,11 @@
     const html = clipboardText(clipboardData, "text/html");
     const text = clipboardText(clipboardData, "text/plain");
     const textToHtml = typeof options.textToHtml === "function" ? options.textToHtml : defaultTextToHtml;
-    return insertRichTextHtml(html ? html : textToHtml(text), options);
+    return insertRichTextHtml(html ? clipboardHtmlForInsertion(html, text, options) : textToHtml(text), options);
   }
 
   return Object.freeze({
+    clipboardHtmlForInsertion,
     execRichTextCommand,
     insertClipboardHtml,
     insertPlainText,

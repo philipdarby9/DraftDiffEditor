@@ -10,6 +10,7 @@ const RichTextCore = require(path.join(root, "public", "rich-text-core.js"));
 assert.equal(typeof RichTextCore.sanitizeRichHtml, "function", "rich-text core should export sanitizeRichHtml");
 assert.equal(typeof RichTextCore.sanitizeRichHtmlFallback, "function", "rich-text core should export sanitizeRichHtmlFallback");
 assert.equal(typeof RichTextCore.sanitizeStyleMarks, "function", "rich-text core should export sanitizeStyleMarks");
+assert.equal(typeof RichTextCore.clipboardHtmlForInsertion, "function", "rich-text core should export clipboard insertion normalizer");
 assert.equal(typeof RichTextCore.execRichTextCommand, "function", "rich-text core should export command helper");
 assert.equal(typeof RichTextCore.insertClipboardHtml, "function", "rich-text core should export clipboard insertion helper");
 assert.equal(typeof RichTextCore.insertPlainText, "function", "rich-text core should export plain-text insertion helper");
@@ -58,6 +59,24 @@ assert.equal(
   "Node fallback should escape plain text and decode common entities once"
 );
 
+assert.equal(
+  RichTextCore.clipboardHtmlForInsertion("<div>word</div>", "word"),
+  "word",
+  "single-line block clipboard fragments should paste inline"
+);
+
+assert.equal(
+  RichTextCore.clipboardHtmlForInsertion("<p><strong>word</strong></p>", "word"),
+  "<strong>word</strong>",
+  "single-line block clipboard fragments should preserve inline marks"
+);
+
+assert.equal(
+  RichTextCore.clipboardHtmlForInsertion("<p>one</p><p>two</p>", "one\ntwo"),
+  "<p>one</p><p>two</p>",
+  "multi-line block clipboard fragments should keep paragraph structure"
+);
+
 {
   let focused = false;
   const recorder = commandRecorder();
@@ -99,8 +118,8 @@ assert.equal(
   );
   assert.deepEqual(
     recorder.calls,
-    [{ command: "insertHTML", showUi: false, value: "<p>Hello <strong>bold</strong></p>" }],
-    "clipboard helper should sanitize rich clipboard HTML before insertion"
+    [{ command: "insertHTML", showUi: false, value: "Hello <strong>bold</strong>" }],
+    "clipboard helper should sanitize and inline simple rich clipboard HTML before insertion"
   );
 }
 
