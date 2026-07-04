@@ -18,6 +18,7 @@
     "desktop": "electron .",
     "desktop:dev": "electron .",
     "package:win": "electron-builder --win --x64",
+    "package:mac": "node scripts/package-mac.js",
     "package:linux": "electron-builder --linux tar.gz --x64",
     "package:linux:deb": "electron-builder --linux deb --x64",
     "package:linux:appimage": "electron-builder --linux AppImage --x64"

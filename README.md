@@ -50,6 +50,14 @@ To create a Windows build:
 npm run package:win
 ```
 
+To create a macOS build:
+
+```sh
+npm run package:mac
+```
+
+This creates `dist/Draft Diff Editor-0.1.0.dmg` and `dist/Draft Diff Editor-0.1.0-mac.zip`. Build this package from macOS. See `MAC_BUILD_NOTES.md` for the backup-folder picker verification and DMG fallback steps.
+
 To create a Linux build:
 
 ```sh

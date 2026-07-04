@@ -16,6 +16,16 @@ const {
   __test
 } = require("../server");
 
+assert.deepEqual(__test.macFolderDialogScript(), [
+  "on run argv",
+  "set initialPath to item 1 of argv",
+  "set promptText to item 2 of argv",
+  "set initialFolder to POSIX file initialPath as alias",
+  "set selectedFolder to choose folder with prompt promptText default location initialFolder",
+  "return POSIX path of selectedFolder",
+  "end run"
+]);
+
 async function readJson(response) {
   const text = await response.text();
   return text ? JSON.parse(text) : null;

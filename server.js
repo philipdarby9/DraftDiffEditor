@@ -4331,12 +4331,7 @@ function applyUsbTransferFolder(folderPath) {
 
 async function chooseUsbTransferFolder(description) {
   const initialDirectory = existingDirectory(readTextFileLink() || EXPORT_FILE);
-
-  if (process.platform === "win32") {
-    return runPowerShell(windowsFolderDialogCommand(initialDirectory, description));
-  }
-
-  throw new Error("USB transfer folder selection is only available in the desktop Windows dialog right now.");
+  return chooseFolderWithNativeDialog(initialDirectory, description);
 }
 
 async function exportUsbTransferFromRequestBody(body) {
@@ -4842,6 +4837,37 @@ function runPowerShell(command) {
   });
 }
 
+function runOsascript(scriptLines, args = []) {
+  return new Promise((resolve, reject) => {
+    const commandArgs = scriptLines.flatMap(line => ["-e", line]).concat(args);
+    const child = spawn("osascript", commandArgs);
+
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", chunk => {
+      stdout += chunk;
+    });
+    child.stderr.on("data", chunk => {
+      stderr += chunk;
+    });
+    child.once("error", reject);
+    child.once("close", code => {
+      if (code === 0) {
+        resolve(stdout.trim());
+        return;
+      }
+
+      const message = stderr.trim();
+      if (/user canceled/i.test(message) || /-128/.test(message)) {
+        resolve("");
+        return;
+      }
+
+      reject(new Error(message || `osascript exited with code ${code}.`));
+    });
+  });
+}
+
 function existingDirectory(filePath) {
   const directoryPath = path.dirname(filePath);
   return fs.existsSync(directoryPath) ? directoryPath : DATA_DIR;
@@ -4924,24 +4950,38 @@ function windowsFolderDialogCommand(initialDirectory, description) {
   ].join("; ");
 }
 
-async function chooseVersionHistoryFolder() {
-  const initialDirectory = readVersionHistoryFolderPath() || existingDirectory(readTextFileLink() || EXPORT_FILE);
+function macFolderDialogScript() {
+  return [
+    "on run argv",
+    "set initialPath to item 1 of argv",
+    "set promptText to item 2 of argv",
+    "set initialFolder to POSIX file initialPath as alias",
+    "set selectedFolder to choose folder with prompt promptText default location initialFolder",
+    "return POSIX path of selectedFolder",
+    "end run"
+  ];
+}
 
+async function chooseFolderWithNativeDialog(initialDirectory, description) {
   if (process.platform === "win32") {
-    return runPowerShell(windowsFolderDialogCommand(initialDirectory, "Select the backup and version history folder"));
+    return runPowerShell(windowsFolderDialogCommand(initialDirectory, description));
   }
 
-  throw new Error("Version history folder selection is only available in the desktop Windows dialog right now.");
+  if (process.platform === "darwin") {
+    return runOsascript(macFolderDialogScript(), [initialDirectory, description]);
+  }
+
+  throw new Error("Folder selection is only available in the desktop app on Windows and macOS right now.");
+}
+
+async function chooseVersionHistoryFolder() {
+  const initialDirectory = readVersionHistoryFolderPath() || existingDirectory(readTextFileLink() || EXPORT_FILE);
+  return chooseFolderWithNativeDialog(initialDirectory, "Select the backup and version history folder");
 }
 
 async function chooseBackupFolder() {
   const initialDirectory = readVersionHistoryFolderPath() || existingDirectory(readTextFileLink() || EXPORT_FILE);
-
-  if (process.platform === "win32") {
-    return runPowerShell(windowsFolderDialogCommand(initialDirectory, "Select the backup and version history folder"));
-  }
-
-  throw new Error("Backup folder selection is only available in the desktop Windows dialog right now.");
+  return chooseFolderWithNativeDialog(initialDirectory, "Select the backup and version history folder");
 }
 
 function openFileLocation(filePath) {
@@ -5533,6 +5573,7 @@ module.exports = {
     writeAll,
     writeTextFileLink,
     writeVersionHistoryFolderPath,
+    macFolderDialogScript,
     createUsbTransferPackage,
     reviewUsbTransferFolder,
     applyUsbTransferFolder,
