@@ -609,6 +609,11 @@
         }, { upgradeLegacyDefaultFont, defaultFormat })
       };
       normalized.versionHistory = normalizeDraftVersionHistory(draft?.versionHistory, normalized);
+      normalized.notes.versionHistory = normalizePageVersionHistory(
+        draft?.notes?.versionHistory,
+        normalized.notes,
+        normalized.notes.title || `${normalized.title || `Draft ${draftNumber}`} Notes`
+      );
       return normalized;
     });
 
@@ -676,6 +681,13 @@
     };
   }
 
+  function draftNotesBlockMetadata(notes) {
+    return {
+      updatedAt: notes.updatedAt || notes.createdAt,
+      wordCount: wordCountForText(notes.content)
+    };
+  }
+
   function formatExport(state) {
     const pages = [
       pageBlock(
@@ -689,7 +701,7 @@
     state.drafts.forEach((draft, index) => {
       const title = draft.title || `Draft ${index + 1}`;
       pages.push(pageBlock(title, draft.createdAt, draft.content, draftBlockMetadata(draft)));
-      pages.push(pageBlock(`${title} Notes`, draft.notes.createdAt, draft.notes.content));
+      pages.push(pageBlock(`${title} Notes`, draft.notes.createdAt, draft.notes.content, draftNotesBlockMetadata(draft.notes)));
     });
 
     return `${pages.join("\n\n---\n\n")}\n`;
@@ -704,7 +716,12 @@
       initialNotes,
       drafts: (state.drafts || []).map(draft => {
         const { versionHistory, ...rest } = draft;
-        return rest;
+        const notes = { ...(rest.notes || {}) };
+        delete notes.versionHistory;
+        return {
+          ...rest,
+          notes
+        };
       })
     };
   }

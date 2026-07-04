@@ -662,16 +662,25 @@ function mergePageVersionHistories(existingHistory, incomingHistory, page, fallb
 
   const merged = [];
   const seenIds = new Set();
-  const seenSignatures = new Set();
+  const signatureIndexes = new Map();
 
   const addEntries = entries => {
     entries.forEach(entry => {
       const idValue = asText(entry?.id);
       const signature = versionHistorySignature(entry);
       if (idValue && seenIds.has(idValue)) return;
-      if (seenSignatures.has(signature)) return;
+      if (signatureIndexes.has(signature)) {
+        const existingIndex = signatureIndexes.get(signature);
+        const existingTime = versionHistoryTime(merged[existingIndex]);
+        const incomingTime = versionHistoryTime(entry);
+        if (incomingTime !== null && (existingTime === null || incomingTime > existingTime)) {
+          merged[existingIndex] = entry;
+          if (idValue) seenIds.add(idValue);
+        }
+        return;
+      }
       if (idValue) seenIds.add(idValue);
-      seenSignatures.add(signature);
+      signatureIndexes.set(signature, merged.length);
       merged.push(entry);
     });
   };
@@ -684,6 +693,14 @@ function mergePageVersionHistories(existingHistory, incomingHistory, page, fallb
 
 function normalizeHistoryTitle(value) {
   return asText(value).trim().toLowerCase();
+}
+
+function draftNotesHistoryFromPayloadEntry(entry) {
+  if (Array.isArray(entry?.notes?.history)) return entry.notes.history;
+  if (Array.isArray(entry?.notes?.versionHistory)) return entry.notes.versionHistory;
+  if (Array.isArray(entry?.notesHistory)) return entry.notesHistory;
+  if (Array.isArray(entry?.draftNotesHistory)) return entry.draftNotesHistory;
+  return null;
 }
 
 function applyVersionHistoryPayloadToState(state, payload) {
@@ -711,7 +728,8 @@ function applyVersionHistoryPayloadToState(state, payload) {
 
   incomingDrafts.forEach((entry, index) => {
     const history = Array.isArray(entry?.history) ? entry.history : entry?.versionHistory;
-    if (!Array.isArray(history)) return;
+    const notesHistory = draftNotesHistoryFromPayloadEntry(entry);
+    if (!Array.isArray(history) && !Array.isArray(notesHistory)) return;
 
     const idValue = asText(entry.id || entry.draftId);
     if (idValue) byId.set(idValue, entry);
@@ -733,15 +751,27 @@ function applyVersionHistoryPayloadToState(state, payload) {
     const history = Array.isArray(matchingDraft?.history)
       ? matchingDraft.history
       : matchingDraft?.versionHistory;
-    if (!Array.isArray(history)) return;
+    if (Array.isArray(history)) {
+      draft.versionHistory = mergePageVersionHistories(
+        draft.versionHistory,
+        history,
+        draft,
+        draft.title || "Untitled draft"
+      );
+      promotePageToNewestHistoryVersion(draft, draft.title || "Untitled draft");
+    }
 
-    draft.versionHistory = mergePageVersionHistories(
-      draft.versionHistory,
-      history,
-      draft,
-      draft.title || "Untitled draft"
-    );
-    promotePageToNewestHistoryVersion(draft, draft.title || "Untitled draft");
+    const notesHistory = draftNotesHistoryFromPayloadEntry(matchingDraft);
+    if (draft.notes && Array.isArray(notesHistory)) {
+      const notesTitle = draft.notes.title || `${draft.title || "Untitled draft"} Notes`;
+      draft.notes.versionHistory = mergePageVersionHistories(
+        draft.notes.versionHistory,
+        notesHistory,
+        draft.notes,
+        notesTitle
+      );
+      promotePageToNewestHistoryVersion(draft.notes, notesTitle);
+    }
   });
 
   return true;
@@ -775,7 +805,13 @@ function versionHistoryPayloadFromState(state, options = {}) {
       index,
       title: draft.title || `Draft ${index + 1}`,
       createdAt: draft.createdAt || null,
-      history: draft.versionHistory || []
+      history: draft.versionHistory || [],
+      notes: {
+        id: draft.notes?.id || null,
+        title: draft.notes?.title || `${draft.title || `Draft ${index + 1}`} Notes`,
+        createdAt: draft.notes?.createdAt || null,
+        history: draft.notes?.versionHistory || []
+      }
     }))
   };
 }
@@ -972,6 +1008,9 @@ function stateFromExportText(text, previousState = null, options = {}) {
     const notesPage = pageFromTransferBlock(notesBlock, `${draftPage.title} Notes`, previousDraft?.notes, options);
     notesPage.id = previousDraft?.notes?.id || id("notes");
     notesPage.title = `${draftPage.title} Notes`;
+    notesPage.versionHistory = Array.isArray(previousDraft?.notes?.versionHistory)
+      ? previousDraft.notes.versionHistory
+      : [];
 
     drafts.push({
       ...draftPage,
@@ -1039,12 +1078,22 @@ function findVersionHistoryPayloadForText(fileName, backupFolderPath) {
   return null;
 }
 
-function versionCountForDraft(historyPayload, index, title) {
+function matchingDraftHistoryPayloadEntry(historyPayload, index, title) {
   const drafts = Array.isArray(historyPayload?.drafts) ? historyPayload.drafts : [];
   const titleKey = normalizeHistoryTitle(title);
-  const match = drafts.find(draft => Number(draft?.index) === index)
+  return drafts.find(draft => Number(draft?.index) === index)
     || drafts.find(draft => normalizeHistoryTitle(draft?.title) === titleKey);
+}
+
+function versionCountForDraft(historyPayload, index, title) {
+  const match = matchingDraftHistoryPayloadEntry(historyPayload, index, title);
   const history = Array.isArray(match?.history) ? match.history : match?.versionHistory;
+  return Array.isArray(history) ? history.length : 0;
+}
+
+function versionCountForDraftNotes(historyPayload, index, title) {
+  const match = matchingDraftHistoryPayloadEntry(historyPayload, index, title);
+  const history = draftNotesHistoryFromPayloadEntry(match);
   return Array.isArray(history) ? history.length : 0;
 }
 
@@ -1071,7 +1120,8 @@ function storySummaryFromPages(pages, historyPayload = null) {
       contentHash: textHash(draft.content),
       notesWordCount: wordCountForText(draft.notesContent),
       notesHash: textHash(draft.notesContent),
-      versionCount: versionCountForDraft(historyPayload, index, draft.title)
+      versionCount: versionCountForDraft(historyPayload, index, draft.title),
+      notesVersionCount: versionCountForDraftNotes(historyPayload, index, draft.title)
     }))
   };
 }
@@ -1136,12 +1186,16 @@ function compareStorySummaries(baseline, usb) {
         newVersions
       });
     }
-    if (before.notesHash !== after.notesHash || before.notesWordCount !== after.notesWordCount) {
+    const notesNewVersions = Math.max(0, Number(after.notesVersionCount || 0) - Number(before.notesVersionCount || 0));
+    if (before.notesHash !== after.notesHash || before.notesWordCount !== after.notesWordCount || notesNewVersions > 0) {
       changedDraftNotes.push({
         number: after.number,
         title: `${after.title} Notes`,
         wordCount: after.notesWordCount,
-        previousWordCount: before.notesWordCount
+        previousWordCount: before.notesWordCount,
+        versionCount: after.notesVersionCount,
+        previousVersionCount: before.notesVersionCount,
+        newVersions: notesNewVersions
       });
     }
   });
@@ -1453,6 +1507,8 @@ function historyReportInputCharacters(state) {
   (state?.drafts || []).forEach(draft => {
     total += asText(draft?.content).length;
     addHistory(draft?.versionHistory);
+    total += asText(draft?.notes?.content).length;
+    addHistory(draft?.notes?.versionHistory);
   });
   return total;
 }
@@ -1493,6 +1549,15 @@ function backupHistoryReport(state, options = {}) {
       actualTitle: draftTitle,
       includeChangeSummaries
     });
+
+    if (draft.notes) {
+      const notesTitle = draft.notes.title || `${draftTitle || draftLabel} Notes`;
+      const notesHistory = historyWithCurrentVersion(draft.notes, notesTitle);
+      appendPageHistoryReport(lines, `${sectionTitle} Notes`, `${draftLabel} Notes`, notesHistory, {
+        actualTitle: notesTitle,
+        includeChangeSummaries
+      });
+    }
 
     const finalText = textForHistoryVersion(history[history.length - 1]) || asText(draft.content);
     if (previousDraftFinalText !== null && includeChangeSummaries) {
@@ -1996,6 +2061,16 @@ function versionSummaryPages(state) {
       anchor: `draft-${index + 1}-${summaryAnchor(title)}`,
       page: draft
     });
+    if (draft.notes) {
+      const notesTitle = draft.notes.title || `${title} Notes`;
+      pages.push({
+        key: draft.notes.id || `draft-${index + 1}-notes`,
+        title: notesTitle,
+        type: "Draft notes",
+        anchor: `draft-${index + 1}-${summaryAnchor(title)}-notes`,
+        page: draft.notes
+      });
+    }
   });
 
   return pages.map(page => ({
@@ -2029,7 +2104,10 @@ function textSignificantVersionEntries(versions) {
 
 function fullSummaryDraftChangeHtml(left, right, index) {
   const anchor = `draft-change-${index + 1}-${index + 2}`;
-  const title = `${left.title} to ${right.title}`;
+  const numberedTitle = `Draft ${index + 1} to Draft ${index + 2}`;
+  const title = left.title === `Draft ${index + 1}` && right.title === `Draft ${index + 2}`
+    ? numberedTitle
+    : `${numberedTitle}: ${left.title} to ${right.title}`;
   const parts = diffReportTexts(left.currentText, right.currentText);
   const stats = finalDraftDiffWordStats(parts);
   const changed = parts.some(part => part.type === "added" || part.type === "removed");
@@ -2045,6 +2123,10 @@ function fullSummaryDraftChangeHtml(left, right, index) {
     title,
     html: `<article id="${escapeHtml(anchor)}" class="draft-change"><h3>${escapeHtml(title)}</h3><p class="meta">${escapeHtml(meta)}</p>${body}</article>`
   };
+}
+
+function contentsCountText(count, singular, plural = `${singular}s`) {
+  return `${count.toLocaleString("en-GB")} ${count === 1 ? singular : plural}`;
 }
 
 function versionChangeDiffHtml(previousVersion, version) {
@@ -2094,19 +2176,45 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
 
   await tick("Preparing contents");
 
-  const contentsHtml = [
-    '<li><a href="#draft-changes">Draft changes</a></li>',
-    '<li><a href="#version-history">Version history</a><ol>',
-    ...pages.map(page => `<li><a href="#${escapeHtml(page.anchor)}">${escapeHtml(page.title)}</a><ol>${page.reportVersions.map((entry, index) => `<li><a href="#${escapeHtml(`${page.anchor}-version-${index + 1}`)}">${escapeHtml(versionHeadingLabel(index, page.reportVersions.length))} (${escapeHtml(formatDate(entry.version.createdAt))})</a></li>`).join("")}</ol></li>`),
-    "</ol></li>"
-  ].join("");
-
   const draftChanges = [];
   for (let index = 0; index < draftAnalyses.length - 1; index += 1) {
     await tick(`Comparing ${draftAnalyses[index].title} to ${draftAnalyses[index + 1].title}`);
     draftChanges.push(fullSummaryDraftChangeHtml(draftAnalyses[index], draftAnalyses[index + 1], index));
     completed += 1;
   }
+
+  const draftChangeLinksHtml = draftChanges.length
+    ? `<ul>${draftChanges.map(change => `<li><a href="#${escapeHtml(change.anchor)}">${escapeHtml(change.title)}</a></li>`).join("")}</ul>`
+    : '<p class="contents-empty">No draft-to-draft changes.</p>';
+  const versionPageLinksHtml = pages.map(page => {
+    const versionLinksHtml = page.reportVersions.length
+      ? `<ul>${page.reportVersions.map((entry, index) => `<li><a href="#${escapeHtml(`${page.anchor}-version-${index + 1}`)}">${escapeHtml(versionHeadingLabel(index, page.reportVersions.length))} (${escapeHtml(formatDate(entry.version.createdAt))})</a></li>`).join("")}</ul>`
+      : '<p class="contents-empty">No text-changing versions.</p>';
+    return `
+      <li>
+        <details class="contents-group" data-collapsible>
+          <summary><a href="#${escapeHtml(page.anchor)}">${escapeHtml(page.title)}</a><span class="contents-count">${escapeHtml(contentsCountText(page.reportVersions.length, "version"))}</span></summary>
+          ${versionLinksHtml}
+        </details>
+      </li>
+    `;
+  }).join("");
+  const contentsHtml = `
+    <ul class="contents-list">
+      <li>
+        <details class="contents-group" data-collapsible>
+          <summary><a href="#draft-changes">Draft changes</a><span class="contents-count">${escapeHtml(contentsCountText(draftChanges.length, "comparison"))}</span></summary>
+          ${draftChangeLinksHtml}
+        </details>
+      </li>
+      <li>
+        <details class="contents-group" data-collapsible>
+          <summary><a href="#version-history">Version history</a><span class="contents-count">${escapeHtml(contentsCountText(pages.length, "page"))}</span></summary>
+          <ul>${versionPageLinksHtml}</ul>
+        </details>
+      </li>
+    </ul>
+  `;
 
   const versionSections = [];
   for (const page of pages) {
@@ -2142,12 +2250,14 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
       : "";
 
     versionSections.push(`
-      <section id="${escapeHtml(page.anchor)}" class="history-page-section">
-        <h2>${escapeHtml(page.title)}</h2>
-        <p class="meta">${escapeHtml(page.type)} · ${page.reportVersions.length.toLocaleString("en-GB")} text-changing ${page.reportVersions.length === 1 ? "version" : "versions"} shown</p>
+      <details id="${escapeHtml(page.anchor)}" class="history-page-section" data-collapsible>
+        <summary>
+          <span class="section-title">${escapeHtml(page.title)}</span>
+          <span class="section-summary-meta">${escapeHtml(page.type)} · ${page.reportVersions.length.toLocaleString("en-GB")} text-changing ${page.reportVersions.length === 1 ? "version" : "versions"} shown</span>
+        </summary>
         ${skippedVersionMetaHtml}
         ${versionArticles.join("\n")}
-      </section>
+      </details>
     `);
   }
 
@@ -2169,20 +2279,34 @@ h3{font-size:17px;margin:0}
 h4{font-size:14px;margin:16px 0 8px;color:#403b34}
 .meta{color:#6d675e;font-size:13px;margin:4px 0 12px}
 .contents-page{background:#fff;border:1px solid #d8d3ca;padding:18px 22px;margin:24px 0}
-.contents-page ol{margin:8px 0 0 22px;padding:0}
+.summary-actions{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 14px}
+.summary-button{appearance:none;border:1px solid #b8b0a4;background:#f8f7f4;color:#24211d;cursor:pointer;font:600 13px/1 system-ui,-apple-system,Segoe UI,sans-serif;padding:7px 10px}
+.summary-button:hover,.summary-button:focus{background:#ece7dd}
+.contents-page ul{margin:8px 0 0 22px;padding:0}
+.contents-page li{margin:5px 0}
+.contents-group{margin:6px 0}
+.contents-group>summary{cursor:pointer;font-weight:700}
+.contents-count{color:#6d675e;font-size:12px;font-weight:400;margin-left:6px}
+.contents-empty{color:#6d675e;font-size:13px;margin:6px 0 0 22px}
 .contents-page a{color:#17456f;text-decoration:none}
 .contents-page a:hover,.contents-page a:focus{text-decoration:underline}
 .summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:22px 0}
 .summary-stat{background:#fff;border:1px solid #d8d3ca;padding:12px}
 .summary-stat strong{display:block;font:700 20px/1.2 system-ui,-apple-system,Segoe UI,sans-serif}
 .draft-change,.version-entry{background:#fff;border:1px solid #d8d3ca;margin:14px 0;padding:14px 16px;break-inside:avoid}
+.report-section,.history-page-section{border-top:1px solid #d8d3ca;margin:36px 0 0;padding-top:18px}
+.report-section>summary,.history-page-section>summary{cursor:pointer;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
+.report-section[open]>summary,.history-page-section[open]>summary{margin-bottom:12px}
+.section-title{display:inline;font-size:22px;font-weight:700;line-height:1.25}
+.history-page-section .section-title{font-size:19px}
+.section-summary-meta{display:block;color:#6d675e;font-size:13px;margin:4px 0 0 20px}
 .final-draft-diff-text,.version-change-diff{white-space:pre-wrap;font:15px/1.62 Georgia,'Times New Roman',serif}
 .version-change{border-bottom:1px solid #ece7dd;margin:0 0 14px;padding:0 0 12px}
 .compare-token{border-radius:2px;padding:0 1px}
 .compare-token.added{background:#dff5df;color:#17602b;text-decoration:none}
 .compare-token.removed{background:#ffe1d6;color:#9b1c1c;text-decoration:line-through}
 .version-heading{border-bottom:1px solid #ece7dd;margin-bottom:12px;padding-bottom:8px}
-@media print{body{background:#fff}.contents-page,.draft-change,.version-entry{break-inside:avoid}}
+@media print{body{background:#fff}.contents-page,.draft-change,.version-entry{break-inside:avoid}details[data-collapsible]:not([open])>:not(summary){display:block}details[data-collapsible]>summary{list-style:none}}
 </style>
 </head>
 <body>
@@ -2197,17 +2321,79 @@ h4{font-size:14px;margin:16px 0 8px;color:#403b34}
 </div>
 <nav class="contents-page" aria-label="Contents">
 <h2>Contents</h2>
-<ol>${contentsHtml}</ol>
+<div class="summary-actions" aria-label="Summary controls">
+  <button class="summary-button" type="button" data-summary-action="expand">Expand all</button>
+  <button class="summary-button" type="button" data-summary-action="collapse">Collapse all</button>
+</div>
+${contentsHtml}
 </nav>
-<section id="draft-changes">
-<h2>Draft changes</h2>
+<details id="draft-changes" class="report-section" data-collapsible>
+<summary>
+  <span class="section-title">Draft changes</span>
+  <span class="section-summary-meta">${draftChanges.length.toLocaleString("en-GB")} ${draftChanges.length === 1 ? "comparison" : "comparisons"}</span>
+</summary>
 ${draftChanges.length ? draftChanges.map(change => change.html).join("\n") : "<p>No draft-to-draft changes to show.</p>"}
-</section>
+</details>
 <section id="version-history">
 <h2>Version history</h2>
 ${versionSections.join("\n")}
 </section>
 </main>
+<script>
+(function () {
+  function allCollapsibleDetails() {
+    return Array.prototype.slice.call(document.querySelectorAll("details[data-collapsible]"));
+  }
+
+  function targetForHash(hash) {
+    if (!hash || hash.charAt(0) !== "#") return null;
+    var id = hash.slice(1);
+    try {
+      id = decodeURIComponent(id);
+    } catch (error) {}
+    return document.getElementById(id);
+  }
+
+  function openDetailsForTarget(target) {
+    var node = target;
+    while (node) {
+      if (node.tagName === "DETAILS") node.open = true;
+      node = node.parentElement;
+    }
+  }
+
+  function revealHashTarget(hash) {
+    var target = targetForHash(hash);
+    if (!target) return;
+    openDetailsForTarget(target);
+    window.setTimeout(function () {
+      target.scrollIntoView({ block: "start" });
+    }, 0);
+  }
+
+  document.addEventListener("click", function (event) {
+    var actionButton = event.target.closest("[data-summary-action]");
+    if (actionButton) {
+      var shouldOpen = actionButton.getAttribute("data-summary-action") === "expand";
+      allCollapsibleDetails().forEach(function (details) {
+        details.open = shouldOpen;
+      });
+      return;
+    }
+
+    var link = event.target.closest('a[href^="#"]');
+    if (!link) return;
+    var target = targetForHash(link.getAttribute("href"));
+    if (!target) return;
+    openDetailsForTarget(target);
+  });
+
+  window.addEventListener("hashchange", function () {
+    revealHashTarget(window.location.hash);
+  });
+  revealHashTarget(window.location.hash);
+})();
+</script>
 </body>
 </html>
 `;
@@ -2582,6 +2768,9 @@ function stateFromVersionHistoryPayload(payload, liveText = "") {
         const latest = latestHistoryEntry(history);
         const title = latest.title || draft?.title || `Draft ${index + 1}`;
         const content = liveDrafts.byTitle.get(title) ?? liveDrafts.byIndex[index]?.content ?? latest.content ?? "";
+        const notesHistory = draftNotesHistoryFromPayloadEntry(draft) || [];
+        const latestNotes = latestHistoryEntry(notesHistory);
+        const notesTitle = latestNotes.title || draft?.notes?.title || `${title} Notes`;
         return {
           id: draft?.id || `draft-${index + 1}`,
           title,
@@ -2592,13 +2781,14 @@ function stateFromVersionHistoryPayload(payload, liveText = "") {
           format: normalizeFormat(latest.format || {}),
           versionHistory: history,
           notes: {
-            id: `notes-${draft?.id || index + 1}`,
-            title: `${title} Notes`,
-            createdAt: draft?.createdAt || createdAt,
-            updatedAt: draft?.createdAt || updatedAt,
-            content: "",
-            contentHtml: "",
-            format: { ...DEFAULT_FORMAT }
+            id: draft?.notes?.id || `notes-${draft?.id || index + 1}`,
+            title: notesTitle,
+            createdAt: draft?.notes?.createdAt || latestNotes.createdAt || draft?.createdAt || createdAt,
+            updatedAt: latestNotes.createdAt || draft?.notes?.createdAt || draft?.createdAt || updatedAt,
+            content: latestNotes.content || "",
+            contentHtml: latestNotes.contentHtml || textToHtml(latestNotes.content || ""),
+            format: normalizeFormat(latestNotes.format || {}),
+            versionHistory: notesHistory
           }
         };
       })
@@ -2636,7 +2826,12 @@ function stableVersionHistoryPayloadForHash(payload) {
         index: Number.isInteger(draft?.index) ? draft.index : index,
         title: asText(draft?.title),
         createdAt: asText(draft?.createdAt),
-        history: stableHistoryForHash(historyArrayFromPayloadEntry(draft))
+        history: stableHistoryForHash(historyArrayFromPayloadEntry(draft)),
+        notes: {
+          title: asText(draft?.notes?.title),
+          createdAt: asText(draft?.notes?.createdAt),
+          history: stableHistoryForHash(draftNotesHistoryFromPayloadEntry(draft) || [])
+        }
       }))
   };
 }
@@ -4010,16 +4205,25 @@ function earliestIsoDate(...values) {
 function mergeHistoryEntries(histories) {
   const merged = [];
   const seenIds = new Set();
-  const seenSignatures = new Set();
+  const signatureIndexes = new Map();
 
   histories.flat().forEach(entry => {
     if (!entry || typeof entry !== "object") return;
     const idValue = asText(entry.id);
     const signature = versionHistorySignature(entry);
     if (idValue && seenIds.has(idValue)) return;
-    if (seenSignatures.has(signature)) return;
+    if (signatureIndexes.has(signature)) {
+      const existingIndex = signatureIndexes.get(signature);
+      const existingTime = versionHistoryTime(merged[existingIndex]);
+      const incomingTime = versionHistoryTime(entry);
+      if (incomingTime !== null && (existingTime === null || incomingTime > existingTime)) {
+        merged[existingIndex] = entry;
+        if (idValue) seenIds.add(idValue);
+      }
+      return;
+    }
     if (idValue) seenIds.add(idValue);
-    seenSignatures.add(signature);
+    signatureIndexes.set(signature, merged.length);
     merged.push(entry);
   });
 
@@ -4110,22 +4314,24 @@ function mergeDraftAtIndex(baseDraft, localDraft, usbDraft, index, summary) {
 
   const draft = mergedDraft.page;
   draft.id = localDraft?.id || baseDraft?.id || usbDraft?.id || draft.id || id("draft");
-  draft.notes = mergePlainPage(
+  const notesTitle = `${draft.title || fallbackTitle} Notes`;
+  const mergedNotes = mergeVersionedPage(
     baseDraft?.notes,
     localDraft?.notes,
     usbDraft?.notes,
-    `${draft.title || fallbackTitle} Notes`,
+    notesTitle,
     { fixedId: localDraft?.notes?.id || baseDraft?.notes?.id || usbDraft?.notes?.id || id("notes") }
-  ) || {
+  );
+  draft.notes = mergedNotes?.page || {
     id: localDraft?.notes?.id || baseDraft?.notes?.id || usbDraft?.notes?.id || id("notes"),
-    title: `${draft.title || fallbackTitle} Notes`,
+    title: notesTitle,
     createdAt: draft.createdAt,
     updatedAt: draft.updatedAt,
     content: "",
     contentHtml: "",
     format: { ...normalizeFormat(draft.format || {}) }
   };
-  draft.notes.title = `${draft.title || fallbackTitle} Notes`;
+  draft.notes.title = notesTitle;
 
   if (mergedDraft.source === "usb") summary.currentFromUsb.push(index + 1);
   if (mergedDraft.source === "local") summary.currentFromLocal.push(index + 1);

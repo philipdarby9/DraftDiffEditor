@@ -531,10 +531,12 @@ function mainDisplayPageCount() {
 
 function versionHistoryPageCount() {
   if (!state || !versionHistoryDraftId) return 0;
-  if (versionHistoryDraftId === STORY_KEY) return ensureProjectNotesVersionHistory().length;
+  const pageKey = activeVersionHistoryPageKey();
+  if (!pageKey) return 0;
+  if (pageKey === STORY_KEY) return ensureProjectNotesVersionHistory().length;
 
-  const draft = draftById(versionHistoryDraftId);
-  return draft ? ensureDraftVersionHistory(draft).length : 0;
+  const item = pageItemForKey(pageKey);
+  return item?.page ? ensurePageVersionHistory(item.page, item.title).length : 0;
 }
 
 function currentPagesOnScreenLimit() {
@@ -1104,7 +1106,8 @@ function compactDraftStructureIds(affectedDraftIds = []) {
   if (selectedDraftId) ids.add(selectedDraftId);
   const parsedActive = parseDraftPageKey(activeEditorKey);
   if (parsedActive?.draftId) ids.add(parsedActive.draftId);
-  if (versionHistoryDraftId && versionHistoryDraftId !== STORY_KEY) ids.add(versionHistoryDraftId);
+  const parsedHistory = parseDraftPageKey(activeVersionHistoryPageKey());
+  if (parsedHistory?.draftId) ids.add(parsedHistory.draftId);
   return Array.from(ids);
 }
 
@@ -1321,6 +1324,17 @@ function pageKeyExists(pageKey) {
   if (pageKey === STORY_KEY) return true;
   const parsed = parseDraftPageKey(pageKey);
   return Boolean(parsed?.draftId && draftExists(parsed.draftId));
+}
+
+function normalizedVersionHistoryPageKey(value = versionHistoryDraftId) {
+  if (value === STORY_KEY) return STORY_KEY;
+  if (pageKeyExists(value)) return value;
+  if (draftExists(value)) return draftContentKey(value);
+  return "";
+}
+
+function activeVersionHistoryPageKey() {
+  return normalizedVersionHistoryPageKey(versionHistoryDraftId);
 }
 
 function reconcileViewAfterHistoryRestore() {
@@ -1595,6 +1609,7 @@ function applyDraftStructureHistoryEntry(entry) {
   (state.drafts || []).forEach(draft => {
     if (nextIds.has(draft.id)) return;
     clearDraftVersionTimer(draft.id);
+    clearDraftVersionTimer(draftNotesKey(draft.id));
     delete editorSelections[draftContentKey(draft.id)];
     delete editorSelections[draftNotesKey(draft.id)];
   });
@@ -1605,9 +1620,7 @@ function applyDraftStructureHistoryEntry(entry) {
   activeEditorKey = pageKeyExists(entry.activeEditorKey)
     ? entry.activeEditorKey
     : (activeArea === "story" ? STORY_KEY : draftContentKey(selectedDraftId));
-  versionHistoryDraftId = entry.versionHistoryDraftId === STORY_KEY || draftExists(entry.versionHistoryDraftId)
-    ? entry.versionHistoryDraftId
-    : null;
+  versionHistoryDraftId = normalizedVersionHistoryPageKey(entry.versionHistoryDraftId) || null;
 
   displayedPageKeys = new Set((entry.displayedPageKeys || []).filter(pageKeyExists));
   collapsedNotesIds = new Set((entry.collapsedNotesIds || []).filter(draftExists));
@@ -1889,11 +1902,55 @@ function restoreDraftVersion(draftId, versionId) {
   if (draft.notes) draft.notes.title = `${draft.title} Notes`;
 
   appendDraftVersionIfChanged(draft);
-  versionHistoryDraftId = draft.id;
+  versionHistoryDraftId = pageKey;
   selectedDraftId = draft.id;
   activeArea = "draft";
   activeEditorKey = pageKey;
   displayPage(activeEditorKey, true);
+  schedulePageSave(pageKey, {
+    includeVersionHistory: true,
+    refreshUi: false,
+    refreshDiff: false
+  });
+  render();
+  setStatus(`Restored ${label}; saving...`);
+}
+
+function restoreDraftNotesVersion(draftId, versionId) {
+  const draft = draftById(draftId);
+  if (!draft?.notes) return;
+
+  const pageKey = draftNotesKey(draft.id);
+  syncPageFromDom(pageKey);
+  const notesTitle = draft.notes.title || `${draft.title || "Untitled draft"} Notes`;
+  const history = ensurePageVersionHistory(draft.notes, notesTitle);
+  const versionIndex = history.findIndex(version => version.id === versionId);
+  if (versionIndex < 0) return;
+
+  const version = history[versionIndex];
+  const label = `Draft ${draftNotesVersionNumber(draft, versionIndex)}`;
+  const confirmed = window.confirm(
+    `Restore ${label}?\n\nThis will replace the current draft notes text and formatting. The current draft notes will be kept in version history.`
+  );
+  if (!confirmed) return;
+
+  recordPageUndoSnapshot(pageKey);
+  clearDraftVersionTimer(pageKey);
+  appendPageVersionIfChanged(draft.notes, notesTitle);
+
+  const contentHtml = sanitizeRichHtml(version.contentHtml || textToHtml(version.content || ""));
+  draft.notes.title = notesTitle;
+  draft.notes.contentHtml = contentHtml;
+  draft.notes.content = typeof version.content === "string" ? version.content : plainTextFromHtml(contentHtml);
+  draft.notes.format = normalizeFormat({ ...currentDefaultFormat(state), ...(version.format || {}) });
+  draft.notes.updatedAt = nowIso();
+
+  appendPageVersionIfChanged(draft.notes, notesTitle);
+  versionHistoryDraftId = pageKey;
+  selectedDraftId = draft.id;
+  activeArea = "draft";
+  activeEditorKey = pageKey;
+  displayPage(pageKey, true);
   schedulePageSave(pageKey, {
     includeVersionHistory: true,
     refreshUi: false,
@@ -1943,42 +2000,43 @@ function restoreProjectNotesVersion(versionId) {
   setStatus(`Restored ${label}; saving...`);
 }
 
-function clearDraftVersionTimer(draftId) {
-  window.clearTimeout(draftVersionTimers.get(draftId));
-  draftVersionTimers.delete(draftId);
+function clearDraftVersionTimer(captureKey) {
+  const keys = new Set([captureKey, normalizedVersionHistoryPageKey(captureKey)].filter(Boolean));
+  if (captureKey && captureKey !== STORY_KEY && !parseDraftPageKey(captureKey)) {
+    keys.add(draftContentKey(captureKey));
+    keys.add(draftNotesKey(captureKey));
+  }
+  keys.forEach(key => {
+    window.clearTimeout(draftVersionTimers.get(key));
+    draftVersionTimers.delete(key);
+  });
+}
+
+function flushPageVersionCapture(pageKey, options = {}) {
+  const normalizedKey = normalizedVersionHistoryPageKey(pageKey);
+  const item = normalizedKey ? pageItemForKey(normalizedKey) : null;
+  if (!item?.page) return false;
+
+  clearDraftVersionTimer(normalizedKey);
+  const changed = appendPageVersionIfChanged(item.page, item.title);
+  if (changed && options.markChanged !== false) {
+    markStateChanged();
+    rememberLinkedProjectState();
+    if (activeVersionHistoryPageKey() === normalizedKey) renderDiffSoon("Loading version history");
+  }
+  return changed;
 }
 
 function flushDraftVersionCapture(draftId, options = {}) {
-  const draft = draftById(draftId);
-  if (!draft) return false;
-
-  clearDraftVersionTimer(draftId);
-  const changed = appendDraftVersionIfChanged(draft);
-  if (changed && options.markChanged !== false) {
-    markStateChanged();
-    rememberLinkedProjectState();
-    if (versionHistoryDraftId === draftId) renderDiffSoon("Loading version history");
-  }
-  return changed;
+  return flushPageVersionCapture(draftContentKey(draftId), options);
 }
 
 function flushProjectNotesVersionCapture(options = {}) {
-  if (!state?.initialNotes) return false;
-
-  clearDraftVersionTimer(STORY_KEY);
-  const changed = appendProjectNotesVersionIfChanged();
-  if (changed && options.markChanged !== false) {
-    markStateChanged();
-    rememberLinkedProjectState();
-    if (versionHistoryDraftId === STORY_KEY) renderDiffSoon("Loading version history");
-  }
-  return changed;
+  return flushPageVersionCapture(STORY_KEY, options);
 }
 
 function flushVersionCapture(captureKey, options = {}) {
-  return captureKey === STORY_KEY
-    ? flushProjectNotesVersionCapture(options)
-    : flushDraftVersionCapture(captureKey, options);
+  return flushPageVersionCapture(captureKey, options);
 }
 
 function scheduleVersionHistoryPageSave(pageKey, historyKey = pageKey) {
@@ -1987,7 +2045,7 @@ function scheduleVersionHistoryPageSave(pageKey, historyKey = pageKey) {
     refreshUi: false,
     refreshDiff: false
   });
-  if (versionHistoryDraftId === historyKey) renderDiffSoon("Loading version history");
+  if (activeVersionHistoryPageKey() === normalizedVersionHistoryPageKey(historyKey)) renderDiffSoon("Loading version history");
 }
 
 function flushDraftVersionCaptures() {
@@ -1998,34 +2056,33 @@ function flushDraftVersionCaptures() {
   return changedCaptureKeys;
 }
 
-function queueDraftVersionCapture(draftId) {
-  if (!draftId || isRestoringHistory) return;
+function queuePageVersionCapture(pageKey) {
+  const normalizedKey = normalizedVersionHistoryPageKey(pageKey);
+  if (!normalizedKey || isRestoringHistory) return;
 
-  clearDraftVersionTimer(draftId);
-  draftVersionTimers.set(draftId, window.setTimeout(() => {
-    draftVersionTimers.delete(draftId);
-    if (appendDraftVersionIfChanged(draftById(draftId))) {
-      scheduleVersionHistoryPageSave(draftContentKey(draftId), draftId);
+  clearDraftVersionTimer(normalizedKey);
+  draftVersionTimers.set(normalizedKey, window.setTimeout(() => {
+    draftVersionTimers.delete(normalizedKey);
+    if (flushPageVersionCapture(normalizedKey)) {
+      scheduleVersionHistoryPageSave(normalizedKey);
     }
   }, DRAFT_VERSION_CAPTURE_DELAY_MS));
+}
+
+function queueDraftVersionCapture(draftId) {
+  queuePageVersionCapture(draftContentKey(draftId));
 }
 
 function queueProjectNotesVersionCapture() {
-  if (isRestoringHistory) return;
-
-  clearDraftVersionTimer(STORY_KEY);
-  draftVersionTimers.set(STORY_KEY, window.setTimeout(() => {
-    draftVersionTimers.delete(STORY_KEY);
-    if (appendProjectNotesVersionIfChanged()) {
-      scheduleVersionHistoryPageSave(STORY_KEY);
-    }
-  }, DRAFT_VERSION_CAPTURE_DELAY_MS));
+  queuePageVersionCapture(STORY_KEY);
 }
 
 function queueDraftVersionCaptureForEditor(editorEl) {
-  const parsed = parseDraftPageKey(editorEl?.dataset.editorKey);
-  if (parsed?.type === "story") queueProjectNotesVersionCapture();
-  if (parsed?.type === "content") queueDraftVersionCapture(parsed.draftId);
+  const pageKey = editorEl?.dataset.editorKey;
+  const parsed = parseDraftPageKey(pageKey);
+  if (parsed?.type === "story" || parsed?.type === "content" || parsed?.type === "notes") {
+    queuePageVersionCapture(pageKey);
+  }
 }
 
 function draftVersionHistoriesById(projectState = state) {
@@ -2036,6 +2093,9 @@ function draftVersionHistoriesById(projectState = state) {
   projectState?.drafts?.forEach(draft => {
     if (draft?.id && Array.isArray(draft.versionHistory)) {
       histories.set(draft.id, draft.versionHistory);
+    }
+    if (draft?.id && Array.isArray(draft.notes?.versionHistory)) {
+      histories.set(draftNotesKey(draft.id), draft.notes.versionHistory);
     }
   });
   return histories;
@@ -2051,6 +2111,12 @@ function restoreDraftVersionHistories(projectState, histories) {
     if (histories?.has(draft.id)) draft.versionHistory = histories.get(draft.id);
     ensureDraftVersionHistory(draft);
     promotePageToNewestHistoryVersion(draft, draft.title || "Untitled draft");
+    if (draft.notes) {
+      const notesKey = draftNotesKey(draft.id);
+      if (histories?.has(notesKey)) draft.notes.versionHistory = histories.get(notesKey);
+      ensurePageVersionHistory(draft.notes, draft.notes.title || `${draft.title || "Untitled draft"} Notes`);
+      promotePageToNewestHistoryVersion(draft.notes, draft.notes.title || `${draft.title || "Untitled draft"} Notes`);
+    }
   });
 }
 
@@ -2217,6 +2283,7 @@ function applyPageSnapshot(key, snapshotPage) {
 
   if (parsed.type === "story" && changed) queueProjectNotesVersionCapture();
   if (parsed.type === "content" && changed) queueDraftVersionCapture(parsed.draftId);
+  if (parsed.type === "notes" && changed) queuePageVersionCapture(key);
 
   return true;
 }
@@ -4081,6 +4148,14 @@ function projectNotesExportMetadata(projectState) {
   };
 }
 
+function draftNotesExportMetadata(notes) {
+  ensurePageFields(notes);
+  return {
+    updatedAt: notes.updatedAt || notes.createdAt,
+    wordCount: pageWordCount(notes)
+  };
+}
+
 function formatExportText(projectState) {
   const pages = [
     exportPageBlock(
@@ -4094,7 +4169,7 @@ function formatExportText(projectState) {
   projectState.drafts.forEach((draft, index) => {
     const title = draft.title || `Draft ${index + 1}`;
     pages.push(exportPageBlock(title, draft.createdAt, draft.content, draftExportMetadata(draft)));
-    pages.push(exportPageBlock(`${title} Notes`, draft.notes.createdAt, draft.notes.content));
+    pages.push(exportPageBlock(`${title} Notes`, draft.notes.createdAt, draft.notes.content, draftNotesExportMetadata(draft.notes)));
   });
 
   return `${pages.join("\n\n---\n\n")}\n`;
@@ -4242,6 +4317,9 @@ function stateFromExportText(text, previousState = null) {
     const notes = pageFromImportedBlock(notesBlock, `${draft.title} Notes`, previousDraft?.notes);
     notes.id = previousDraft?.notes?.id || makeId("notes");
     notes.title = `${draft.title} Notes`;
+    if (Array.isArray(previousDraft?.notes?.versionHistory)) {
+      notes.versionHistory = previousDraft.notes.versionHistory;
+    }
     const importedDraft = {
       ...draft,
       id: previousDraft?.id || makeId("draft"),
@@ -4250,6 +4328,9 @@ function stateFromExportText(text, previousState = null) {
     ensureDraftVersionHistory(importedDraft);
     promotePageToNewestHistoryVersion(importedDraft, importedDraft.title || `Draft ${draftNumber}`);
     appendDraftVersionIfChanged(importedDraft);
+    ensurePageVersionHistory(importedDraft.notes, importedDraft.notes.title);
+    promotePageToNewestHistoryVersion(importedDraft.notes, importedDraft.notes.title);
+    appendPageVersionIfChanged(importedDraft.notes, importedDraft.notes.title);
     drafts.push(importedDraft);
   }
 
@@ -4655,7 +4736,7 @@ function draftIndexForId(draftId) {
 
 function renderDraftTabs() {
   const historyMode = Boolean(versionHistoryDraftId);
-  const storyHistoryActive = versionHistoryDraftId === STORY_KEY;
+  const storyHistoryActive = activeVersionHistoryPageKey() === STORY_KEY;
   const storySelectionDisabled = showChanges || historyMode;
   els.tabStrip?.classList.toggle("version-history-tabs", historyMode);
   els.storyTab.classList.toggle("history-tab", historyMode);
@@ -4690,7 +4771,8 @@ function renderDraftTabs() {
   }
 
   els.draftTabs.innerHTML = state.drafts.map((draft, index) => {
-    const activeDraftId = historyMode ? versionHistoryDraftId : selectedDraftId;
+    const activeHistoryDraftId = parseDraftPageKey(activeVersionHistoryPageKey())?.draftId;
+    const activeDraftId = historyMode ? activeHistoryDraftId : selectedDraftId;
     const active = draft.id === activeDraftId && (historyMode || activeArea !== "story") ? " active" : "";
     const checked = displayedPageKeys.has(draftContentKey(draft.id)) ? " checked" : "";
     const disabled = historyMode ? " disabled" : "";
@@ -5142,7 +5224,7 @@ function formatPickerHtml(field, label, values, className) {
 
 function formatRibbonHtml(pageKey, label, options = {}) {
   const parsedPageKey = parseDraftPageKey(pageKey);
-  const versionHistoryButton = parsedPageKey?.type === "content" || parsedPageKey?.type === "story"
+  const versionHistoryButton = parsedPageKey?.type === "content" || parsedPageKey?.type === "notes" || parsedPageKey?.type === "story"
     ? `<button class="fr-btn" type="button" data-version-history="${escapeHtml(pageKey)}" title="Version history" aria-label="Version history">${toolbarIcons.history}</button>`
     : "";
   return `
@@ -5714,6 +5796,26 @@ function draftVersionPage(draft, version, index) {
   };
 }
 
+function draftNotesVersionNumber(draft, index) {
+  return `${draftShortNumber(draft)} notes ${index + 1}`;
+}
+
+function draftNotesVersionPage(draft, version, index) {
+  const number = draftNotesVersionNumber(draft, index);
+  const label = `Draft ${number}`;
+  const notes = draft.notes || {};
+  return {
+    id: version.id,
+    title: label,
+    shortTitle: `Notes ${index + 1}`,
+    createdAt: version.createdAt,
+    updatedAt: version.createdAt,
+    content: version.content || "",
+    contentHtml: version.contentHtml || textToHtml(version.content || ""),
+    format: normalizeFormat(version.format || notes.format)
+  };
+}
+
 function projectNotesVersionNumber(index) {
   return String(index + 1);
 }
@@ -5866,6 +5968,13 @@ function coalescedDraftVersionRuns(draft) {
   return coalescedVersionRuns(versions, (version, index) => draftVersionPage(draft, version, index));
 }
 
+function coalescedDraftNotesVersionRuns(draft) {
+  const notes = draft?.notes;
+  const title = notes?.title || `${draft?.title || "Untitled draft"} Notes`;
+  const versions = ensurePageVersionHistory(notes, title);
+  return coalescedVersionRuns(versions, (version, index) => draftNotesVersionPage(draft, version, index));
+}
+
 function coalescedProjectNotesVersionRuns() {
   const versions = ensureProjectNotesVersionHistory();
   return coalescedVersionRuns(versions, projectNotesVersionPage);
@@ -5895,6 +6004,37 @@ function baseVersionPageHtml(draft, version, index) {
           class="version-restore-button"
           type="button"
           data-restore-draft-id="${escapeHtml(draft.id)}"
+          data-restore-version-id="${escapeHtml(version.id)}"
+          title="Restore Draft ${escapeHtml(versionLabel)}"
+          aria-label="Restore Draft ${escapeHtml(versionLabel)}"
+        >Restore</button>
+      </div>
+      <div class="compare-page-body" style="${fontStyle(page.format)}">
+        ${comparePageContentHtml(page)}
+      </div>
+    </article>
+  `;
+}
+
+function baseDraftNotesVersionPageHtml(draft, version, index) {
+  const page = draftNotesVersionPage(draft, version, index);
+  const versionLabel = draftNotesVersionNumber(draft, index);
+  const recordedText = formatVersionDate(page.createdAt);
+  const fullRecordedText = formatDate(page.createdAt);
+  return `
+    <article class="compare-page is-baseline version-page" data-compare-page-id="${escapeHtml(page.id)}">
+      <div class="compare-page-header version-page-header">
+        <div class="kicker">VERSION</div>
+        <div class="title-row version-page-title-row">
+          <div class="title">${compactTitleHtml(page.title, page.shortTitle)}</div>
+        </div>
+        <div class="meta version-page-meta">
+          <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+        </div>
+        <button
+          class="version-restore-button"
+          type="button"
+          data-restore-draft-notes-id="${escapeHtml(draft.id)}"
           data-restore-version-id="${escapeHtml(version.id)}"
           title="Restore Draft ${escapeHtml(versionLabel)}"
           aria-label="Restore Draft ${escapeHtml(versionLabel)}"
@@ -5981,6 +6121,50 @@ function versionComparePageHtml(draft, version, index, previousVersion = null, p
   `;
 }
 
+function draftNotesVersionComparePageHtml(draft, version, index, previousVersion = null, previousIndex = index - 1, options = {}) {
+  const page = draftNotesVersionPage(draft, version, index);
+  if (!previousVersion) return baseDraftNotesVersionPageHtml(draft, version, index);
+
+  const versionLabel = draftNotesVersionNumber(draft, index);
+  const previousPage = draftNotesVersionPage(draft, previousVersion, previousIndex);
+  const pair = {
+    before: previousPage,
+    after: page,
+    label: `${page.title} compared to ${previousPage.title}`
+  };
+  const diffResult = diffRichPagesResult(previousPage, page);
+  const recordedText = formatVersionDate(page.createdAt);
+  const fullRecordedText = formatDate(page.createdAt);
+
+  return `
+    <article class="compare-page later-page version-page" data-compare-page-id="${escapeHtml(page.id)}">
+      <div class="compare-page-header version-page-header">
+        <div class="kicker">VERSION</div>
+        <div class="title-row version-page-title-row">
+          <div class="title">${compactTitleHtml(page.title, page.shortTitle)}</div>
+          <div class="vs">${compactTitleHtml(`vs ${previousPage.title}`, `vs ${previousPage.shortTitle}`)}</div>
+        </div>
+        <div class="meta version-page-meta">
+          <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
+          ${versionCoalescedMetaHtml(options.coalescedVersionCount)}
+          ${compareStatsHtml(diffResult)}
+        </div>
+        <button
+          class="version-restore-button"
+          type="button"
+          data-restore-draft-notes-id="${escapeHtml(draft.id)}"
+          data-restore-version-id="${escapeHtml(version.id)}"
+          title="Restore Draft ${escapeHtml(versionLabel)}"
+          aria-label="Restore Draft ${escapeHtml(versionLabel)}"
+        >Restore</button>
+      </div>
+      <div class="compare-page-body" style="${fontStyle(page.format)}">
+        ${markedLaterPageHtml(pair, diffResult)}
+      </div>
+    </article>
+  `;
+}
+
 function projectNotesVersionComparePageHtml(version, index, previousVersion = null, previousIndex = index - 1, options = {}) {
   const page = projectNotesVersionPage(version, index);
   if (!previousVersion) return baseProjectNotesVersionPageHtml(version, index);
@@ -6029,6 +6213,23 @@ function renderDraftVersionHistoryStrip(draft) {
   const pages = versions.length ? [baseVersionPageHtml(draft, versions[0], 0)] : [];
   coalescedDraftVersionRuns(draft).forEach(run => {
     pages.push(versionComparePageHtml(
+      draft,
+      run.afterVersion,
+      run.afterIndex,
+      run.beforeVersion,
+      run.beforeIndex,
+      { coalescedVersionCount: run.coalescedVersionCount }
+    ));
+  });
+  return compareStripHtml(pages, "version-history-strip");
+}
+
+function renderDraftNotesVersionHistoryStrip(draft) {
+  const notesTitle = draft.notes?.title || `${draft.title || "Untitled draft"} Notes`;
+  const versions = ensurePageVersionHistory(draft.notes, notesTitle);
+  const pages = versions.length ? [baseDraftNotesVersionPageHtml(draft, versions[0], 0)] : [];
+  coalescedDraftNotesVersionRuns(draft).forEach(run => {
+    pages.push(draftNotesVersionComparePageHtml(
       draft,
       run.afterVersion,
       run.afterIndex,
@@ -6158,17 +6359,22 @@ function renderDiff() {
   diffRenderToken += 1;
   const compareKicker = els.changesPanel?.querySelector(".compare-kicker");
   if (versionHistoryDraftId) {
+    const pageKey = activeVersionHistoryPageKey();
     if (compareKicker) compareKicker.textContent = "VERSION HISTORY";
-    if (versionHistoryDraftId === STORY_KEY) {
+    if (pageKey === STORY_KEY) {
       els.compareSubtitle.textContent = "Version history for Project notes";
       els.diffOutput.innerHTML = renderProjectNotesVersionHistoryStrip();
       return;
     }
 
-    const draft = draftById(versionHistoryDraftId);
-    els.compareSubtitle.textContent = draft ? `Version history for ${draft.title}` : "Version history";
+    const parsed = parseDraftPageKey(pageKey);
+    const draft = draftById(parsed?.draftId);
+    const isNotes = parsed?.type === "notes";
+    els.compareSubtitle.textContent = draft
+      ? `Version history for ${isNotes ? `${draft.title} notes` : draft.title}`
+      : "Version history";
     els.diffOutput.innerHTML = draft
-      ? renderDraftVersionHistoryStrip(draft)
+      ? (isNotes ? renderDraftNotesVersionHistoryStrip(draft) : renderDraftVersionHistoryStrip(draft))
       : `<p class="empty-state">Draft not found.</p>`;
     return;
   }
@@ -6425,6 +6631,27 @@ function renderDraftVersionHistoryProgressively(draft, token, label) {
   });
 }
 
+function renderDraftNotesVersionHistoryProgressively(draft, token, label) {
+  const notesTitle = draft.notes?.title || `${draft.title || "Untitled draft"} Notes`;
+  const versions = ensurePageVersionHistory(draft.notes, notesTitle);
+  return renderVersionHistoryStripProgressively({
+    token,
+    label,
+    versions,
+    pageForVersion: (version, index) => draftNotesVersionPage(draft, version, index),
+    basePageHtml: (version, index) => baseDraftNotesVersionPageHtml(draft, version, index),
+    comparePageHtml: run => draftNotesVersionComparePageHtml(
+      draft,
+      run.afterVersion,
+      run.afterIndex,
+      run.beforeVersion,
+      run.beforeIndex,
+      { coalescedVersionCount: run.coalescedVersionCount }
+    ),
+    versionLabel: index => `Draft ${draftNotesVersionNumber(draft, index)}`
+  });
+}
+
 function renderProjectNotesVersionHistoryProgressively(token, label) {
   const versions = ensureProjectNotesVersionHistory();
   return renderVersionHistoryStripProgressively({
@@ -6447,23 +6674,29 @@ function renderProjectNotesVersionHistoryProgressively(token, label) {
 async function renderDiffProgressively(token, label = "Loading changes") {
   const compareKicker = els.changesPanel?.querySelector(".compare-kicker");
   if (versionHistoryDraftId) {
+    const pageKey = activeVersionHistoryPageKey();
     if (compareKicker) compareKicker.textContent = "VERSION HISTORY";
     const historyLabel = label || "Loading version history";
 
-    if (versionHistoryDraftId === STORY_KEY) {
+    if (pageKey === STORY_KEY) {
       els.compareSubtitle.textContent = "Version history for Project notes";
       await renderProjectNotesVersionHistoryProgressively(token, historyLabel);
       return;
     }
 
-    const draft = draftById(versionHistoryDraftId);
-    els.compareSubtitle.textContent = draft ? `Version history for ${draft.title}` : "Version history";
+    const parsed = parseDraftPageKey(pageKey);
+    const draft = draftById(parsed?.draftId);
+    const isNotes = parsed?.type === "notes";
+    els.compareSubtitle.textContent = draft
+      ? `Version history for ${isNotes ? `${draft.title} notes` : draft.title}`
+      : "Version history";
     if (!draft) {
       if (diffRenderIsCurrent(token)) els.diffOutput.innerHTML = `<p class="empty-state">Draft not found.</p>`;
       return;
     }
 
-    await renderDraftVersionHistoryProgressively(draft, token, historyLabel);
+    if (isNotes) await renderDraftNotesVersionHistoryProgressively(draft, token, historyLabel);
+    else await renderDraftVersionHistoryProgressively(draft, token, historyLabel);
     return;
   }
 
@@ -7588,9 +7821,12 @@ function renderTransferStoryLines(story = {}, options = {}) {
   });
 
   (story.changedDraftNotes || []).forEach(notes => {
+    const newVersionsText = Number(notes.newVersions || 0) > 0
+      ? `, ${countLabel(notes.newVersions, "new saved version")}`
+      : "";
     lines.push({
       title: `Draft ${Number(notes.number || 0)} notes changed`,
-      detail: wordCountChangeText(notes.previousWordCount, notes.wordCount)
+      detail: `${wordCountChangeText(notes.previousWordCount, notes.wordCount)}${newVersionsText}`
     });
   });
 
@@ -7695,7 +7931,7 @@ function transferMergeCopyLabel(source, sentenceStart = false) {
 }
 
 function transferMergeEntryHasVersionHistory(entry = {}) {
-  return entry.type === "draft" || entry.type === "projectNotes";
+  return entry.type === "draft" || entry.type === "draftNotes" || entry.type === "projectNotes";
 }
 
 function transferMergeEntryTime(entry = {}, source) {
@@ -8147,8 +8383,8 @@ async function saveNow() {
 
   syncFromInputs();
   saveCurrentViewState();
-  const capturedVersionDraftIds = flushDraftVersionCaptures();
-  if (capturedVersionDraftIds.includes(versionHistoryDraftId)) renderDiffSoon("Loading version history");
+  const capturedVersionPageKeys = flushDraftVersionCaptures();
+  if (capturedVersionPageKeys.includes(activeVersionHistoryPageKey())) renderDiffSoon("Loading version history");
   rememberLinkedProjectState();
   const requestRevision = stateRevision;
   isSaving = true;
@@ -8467,14 +8703,35 @@ function openDraftVersionHistoryForDraft(draftId) {
 
   syncPageFromDom(draftContentKey(draft.id));
   if (flushDraftVersionCapture(draft.id, { markChanged: false })) {
-    scheduleVersionHistoryPageSave(draftContentKey(draft.id), draft.id);
+    scheduleVersionHistoryPageSave(draftContentKey(draft.id));
   }
-  versionHistoryDraftId = draft.id;
+  versionHistoryDraftId = draftContentKey(draft.id);
   showChanges = false;
   activeArea = "draft";
   selectedDraftId = draft.id;
   activeEditorKey = draftContentKey(draft.id);
   displayPage(activeEditorKey, true);
+  persistViewStateChange(0);
+  renderDraftTabs();
+  renderChangesVisibility();
+  renderDiffSoon("Loading version history");
+}
+
+function openDraftNotesVersionHistory(draftId) {
+  const draft = draftById(draftId);
+  if (!draft?.notes) return;
+
+  const pageKey = draftNotesKey(draft.id);
+  syncPageFromDom(pageKey);
+  if (flushPageVersionCapture(pageKey, { markChanged: false })) {
+    scheduleVersionHistoryPageSave(pageKey);
+  }
+  versionHistoryDraftId = pageKey;
+  showChanges = false;
+  activeArea = "draft";
+  selectedDraftId = draft.id;
+  activeEditorKey = pageKey;
+  displayPage(pageKey, true);
   persistViewStateChange(0);
   renderDraftTabs();
   renderChangesVisibility();
@@ -8506,6 +8763,7 @@ function openDraftVersionHistoryForPage(editorKey) {
     return;
   }
   if (parsed?.type === "content") openDraftVersionHistoryForDraft(parsed.draftId);
+  if (parsed?.type === "notes") openDraftNotesVersionHistory(parsed.draftId);
 }
 
 function closeVersionHistory() {
@@ -8661,7 +8919,8 @@ function deleteDraft(draftId) {
   displayedPageKeys.delete(draftContentKey(draftId));
   collapsedNotesIds.delete(draftId);
   clearDraftVersionTimer(draftId);
-  if (versionHistoryDraftId === draftId) versionHistoryDraftId = null;
+  clearDraftVersionTimer(draftNotesKey(draftId));
+  if (parseDraftPageKey(activeVersionHistoryPageKey())?.draftId === draftId) versionHistoryDraftId = null;
   delete editorSelections[draftContentKey(draftId)];
   delete editorSelections[draftNotesKey(draftId)];
 
@@ -9249,6 +9508,16 @@ els.diffOutput.addEventListener("click", event => {
   if (projectNotesRestoreButton && els.diffOutput.contains(projectNotesRestoreButton)) {
     event.preventDefault();
     restoreProjectNotesVersion(projectNotesRestoreButton.dataset.restoreProjectNotesVersionId);
+    return;
+  }
+
+  const draftNotesRestoreButton = event.target.closest("[data-restore-draft-notes-id][data-restore-version-id]");
+  if (draftNotesRestoreButton && els.diffOutput.contains(draftNotesRestoreButton)) {
+    event.preventDefault();
+    restoreDraftNotesVersion(
+      draftNotesRestoreButton.dataset.restoreDraftNotesId,
+      draftNotesRestoreButton.dataset.restoreVersionId
+    );
     return;
   }
 

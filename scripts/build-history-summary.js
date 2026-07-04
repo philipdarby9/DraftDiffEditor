@@ -28,6 +28,14 @@ function historyArray(entry) {
       : [];
 }
 
+function draftNotesHistoryArray(entry) {
+  if (Array.isArray(entry?.notes?.history)) return entry.notes.history;
+  if (Array.isArray(entry?.notes?.versionHistory)) return entry.notes.versionHistory;
+  if (Array.isArray(entry?.notesHistory)) return entry.notesHistory;
+  if (Array.isArray(entry?.draftNotesHistory)) return entry.draftNotesHistory;
+  return [];
+}
+
 function lastHistoryEntry(history) {
   return history.length ? history[history.length - 1] : {};
 }
@@ -72,11 +80,26 @@ function stateFromPayload(payload) {
         const rightIndex = Number.isInteger(right?.index) ? right.index : 0;
         return leftIndex - rightIndex;
       })
-      .map((draft, index) => currentPageFromHistory(
-        draft,
-        draft?.title || `Draft ${index + 1}`,
-        draft?.id || `draft-${index + 1}`
-      ))
+      .map((draft, index) => {
+        const page = currentPageFromHistory(
+          draft,
+          draft?.title || `Draft ${index + 1}`,
+          draft?.id || `draft-${index + 1}`
+        );
+        const notesHistory = draftNotesHistoryArray(draft);
+        const latestNotes = lastHistoryEntry(notesHistory);
+        page.notes = {
+          id: draft?.notes?.id || `notes-${draft?.id || index + 1}`,
+          title: latestNotes.title || draft?.notes?.title || `${page.title} Notes`,
+          createdAt: draft?.notes?.createdAt || latestNotes.createdAt || page.createdAt,
+          updatedAt: latestNotes.createdAt || draft?.notes?.createdAt || page.updatedAt,
+          content: latestNotes.content || "",
+          contentHtml: latestNotes.contentHtml || "",
+          format: latestNotes.format || {},
+          versionHistory: notesHistory
+        };
+        return page;
+      })
   };
 }
 
@@ -96,7 +119,10 @@ fs.writeFileSync(outputPath, markdown, "utf8");
 
 const draftCount = state.drafts.length;
 const projectHistoryCount = historyArray(payload.story || payload.initialNotes).length;
-const historyCount = state.drafts.reduce((sum, draft) => sum + historyArray(draft).length, projectHistoryCount);
+const historyCount = state.drafts.reduce(
+  (sum, draft) => sum + historyArray(draft).length + historyArray(draft.notes).length,
+  projectHistoryCount
+);
 console.log(`Wrote ${outputPath}`);
 console.log(`Project pages: 1; drafts: ${draftCount}; history entries: ${historyCount}`);
 if (!includeChangeSummaries) {

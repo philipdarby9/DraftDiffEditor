@@ -44,7 +44,11 @@ function run() {
         format: { fontFamily: "Segoe UI", fontSize: "20", lineHeight: "1.8" },
         notes: {
           content: "Note",
-          contentHtml: "Note"
+          contentHtml: "Note",
+          versionHistory: [
+            { createdAt: "2026-01-02T12:00:00.000Z", content: "Note v2" },
+            { createdAt: "2026-01-01T12:00:00.000Z", content: "Note v1" }
+          ]
         },
         versionHistory: [
           { createdAt: "2026-01-03T00:00:00.000Z", content: "Alpha\nBeta" },
@@ -69,6 +73,8 @@ function run() {
     assert.equal(normalized.drafts[0].content, "Alpha\nBeta");
     assert.equal(normalized.drafts[0].versionHistory[0].content, "Alpha");
     assert.equal(normalized.drafts[0].versionHistory[1].content, "Alpha\nBeta");
+    assert.equal(normalized.drafts[0].notes.versionHistory[0].content, "Note v1");
+    assert.equal(normalized.drafts[0].notes.versionHistory[1].content, "Note v2");
     assert.equal(normalized.initialNotes.versionHistory.some(version => version.content === "Later note"), true);
     assert.equal(normalized.viewState.pagesOnScreen, 4);
     assert.equal(normalized.viewState.activeEditorKey, "draft:draft-a:notes");
@@ -84,17 +90,22 @@ function run() {
         title: "Draft B",
         createdAt: "2026-01-02T00:00:00.000Z",
         content: "One two three.",
-        notes: { content: "Private note" },
+        notes: {
+          content: "Private note",
+          versionHistory: [{ content: "Private note older" }]
+        },
         versionHistory: [{ content: "One two." }]
       }]
     });
 
     const storage = StateCore.stateForStorage(normalized);
     assert.equal(storage.drafts[0].versionHistory, undefined);
+    assert.equal(storage.drafts[0].notes.versionHistory, undefined);
     assert.equal(storage.initialNotes.versionHistory, undefined);
 
     const snapshot = StateCore.serializeProjectState(normalized, { includeVersionHistory: false });
     assert.equal(JSON.parse(snapshot).drafts[0].versionHistory, undefined);
+    assert.equal(JSON.parse(snapshot).drafts[0].notes.versionHistory, undefined);
 
     const exportText = StateCore.formatExport(normalized);
     assert.equal(exportText.includes("Project notes"), true);

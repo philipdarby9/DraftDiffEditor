@@ -299,6 +299,39 @@ async function run() {
     assert.equal(afterStoryHistory.initialNotes.versionHistory.some(version => version.content === "Original story"), true);
     assert.equal(afterStoryHistory.initialNotes.versionHistory.some(version => version.content === "Project notes revised"), true);
 
+    const notesHistoryResult = await api(baseUrl, "/api/page", {
+      method: "PATCH",
+      body: JSON.stringify({
+        key: "draft:draft-a:notes",
+        page: {
+          content: "Alpha notes revised",
+          contentHtml: "<p>Alpha notes revised</p>",
+          versionHistory: [
+            {
+              id: "notes-history-original",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              title: "Draft A title only Notes",
+              content: "Alpha notes from unit",
+              contentHtml: "Alpha notes from unit"
+            },
+            {
+              id: "notes-history-revised",
+              createdAt: "2026-01-01T00:00:01.000Z",
+              title: "Draft A title only Notes",
+              content: "Alpha notes revised",
+              contentHtml: "<p>Alpha notes revised</p>"
+            }
+          ]
+        }
+      })
+    });
+    assert.equal(notesHistoryResult.page.content, "Alpha notes revised");
+
+    const afterNotesHistory = (await api(baseUrl, "/api/state")).state;
+    assert.equal(afterNotesHistory.drafts[0].notes.content, "Alpha notes revised");
+    assert.equal(afterNotesHistory.drafts[0].notes.versionHistory.some(version => version.content === "Alpha notes from unit"), true);
+    assert.equal(afterNotesHistory.drafts[0].notes.versionHistory.some(version => version.content === "Alpha notes revised"), true);
+
     const viewResult = await api(baseUrl, "/api/view-state", {
       method: "POST",
       body: JSON.stringify({
@@ -319,7 +352,7 @@ async function run() {
 
     const afterView = (await api(baseUrl, "/api/state")).state;
     assert.equal(afterView.drafts[0].content, "Alpha from unit");
-    assert.equal(afterView.drafts[0].notes.content, "Alpha notes from unit");
+    assert.equal(afterView.drafts[0].notes.content, "Alpha notes revised");
     assert.equal(afterView.drafts[1].content, "Beta");
     assert.equal(afterView.viewState.activeEditorKey, "draft:draft-a:notes");
 
@@ -376,7 +409,7 @@ async function run() {
     assert.doesNotMatch(unchangedSummaryHtml, /Version 3/u);
     assert.match(unchangedSummaryHtml, /1 unchanged version skipped/u);
 
-    const summaryResult = await writeFullVersionHistorySummaryReport(afterStoryHistory, {
+    const summaryResult = await writeFullVersionHistorySummaryReport(afterNotesHistory, {
       fileName: "server-page-unit-test.txt",
       filePath: path.join(dataDir, "server-page-unit-test.txt")
     });
@@ -385,6 +418,19 @@ async function run() {
     assert.match(summaryHtml, /First saved version/u);
     assert.match(summaryHtml, /Baseline text; no changes to compare/u);
     assert.match(summaryHtml, /Original story/u);
+    assert.match(summaryHtml, /Draft A title only Notes/u);
+    assert.equal(
+      summaryHtml.indexOf("Draft A title only Notes") > summaryHtml.indexOf("Draft A title only"),
+      true
+    );
+    assert.match(summaryHtml, /Alpha notes<span class="compare-token added"> from unit<\/span>/u);
+    assert.doesNotMatch(summaryHtml, /<ol[>\s]/u);
+    assert.match(summaryHtml, /<ul class="contents-list">/u);
+    assert.match(summaryHtml, /data-summary-action="expand"/u);
+    assert.match(summaryHtml, /data-summary-action="collapse"/u);
+    assert.match(summaryHtml, /href="#draft-change-1-2"[^>]*>Draft 1 to Draft 2/u);
+    assert.match(summaryHtml, /<details id="draft-changes" class="report-section" data-collapsible>/u);
+    assert.match(summaryHtml, /<details id="draft-1-draft-a-title-only" class="history-page-section" data-collapsible>/u);
 
     await api(baseUrl, "/api/page", {
       method: "PATCH",

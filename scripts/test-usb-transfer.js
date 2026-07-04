@@ -42,8 +42,11 @@ function stateWithDrafts(drafts, projectNotes, projectVersions) {
       notes: {
         id: `notes-${index + 1}`,
         title: `${draft.title} Notes`,
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: draft.notesUpdatedAt || draft.updatedAt || "2026-01-01T00:00:00.000Z",
         content: draft.notes || "",
-        contentHtml: StateCore.textToHtml(draft.notes || "")
+        contentHtml: StateCore.textToHtml(draft.notes || ""),
+        versionHistory: draft.notesVersionHistory
       }
     }))
   });
@@ -66,7 +69,13 @@ function writeVersionHistorySidecar(folderPath, fileName, state) {
       id: draft.id,
       index,
       title: draft.title,
-      history: draft.versionHistory
+      history: draft.versionHistory,
+      notes: {
+        id: draft.notes.id,
+        title: draft.notes.title,
+        createdAt: draft.notes.createdAt,
+        history: draft.notes.versionHistory
+      }
     }))
   }, null, 2)}\n`, "utf8");
 }
@@ -183,8 +192,12 @@ const localState = stateWithDrafts([
     content: "Fourth draft on A",
     notes: "Local fourth notes",
     updatedAt: "2026-01-02T00:00:00.000Z",
+    notesUpdatedAt: "2026-01-02T00:00:00.000Z",
     versionHistory: [
       version("draft-4-local", "Fourth draft on A", "2026-01-02T00:00:00.000Z", "Draft 4")
+    ],
+    notesVersionHistory: [
+      version("notes-4-local", "Local fourth notes", "2026-01-02T00:00:00.000Z", "Draft 4 Notes")
     ]
   }
 ], "Original plan", [
@@ -230,8 +243,12 @@ const usbState = stateWithDrafts([
     content: "Fourth draft from USB",
     notes: "USB fourth notes",
     updatedAt: "2026-01-04T00:00:00.000Z",
+    notesUpdatedAt: "2026-01-04T00:00:00.000Z",
     versionHistory: [
       version("draft-4-usb", "Fourth draft from USB", "2026-01-04T00:00:00.000Z", "Draft 4")
+    ],
+    notesVersionHistory: [
+      version("notes-4-usb", "USB fourth notes", "2026-01-04T00:00:00.000Z", "Draft 4 Notes")
     ]
   }
 ], "Original plan with USB note", [
@@ -282,6 +299,11 @@ assert.equal(draftFourReview.currentSource, "usb");
 assert.equal(draftFourReview.conflict, true);
 assert.equal(draftFourReview.localCurrentAt, "2026-01-02T00:00:00.000Z");
 assert.equal(draftFourReview.usbCurrentAt, "2026-01-04T00:00:00.000Z");
+const draftFourNotesReview = review.merge.bothChanged.find(entry => entry.type === "draftNotes" && entry.number === 4);
+assert.equal(draftFourNotesReview.currentSource, "usb");
+assert.equal(draftFourNotesReview.conflict, true);
+assert.equal(draftFourNotesReview.localCurrentAt, "2026-01-02T00:00:00.000Z");
+assert.equal(draftFourNotesReview.usbCurrentAt, "2026-01-04T00:00:00.000Z");
 assert.equal(review.files.counts.conflicts >= 1, true);
 assert.equal(review.story.projectNotes.changed, true);
 assert.equal(review.story.projectNotes.newVersions, 1);
@@ -310,10 +332,16 @@ assert.equal(
 assert.equal(fs.existsSync(path.join(imported.backup.backupFolderPath, "current", "backup-folder")), true);
 const mergedHistory = JSON.parse(fs.readFileSync(path.join(backupFolder, "json", "story.version-history.json"), "utf8"));
 const draftFourHistory = mergedHistory.drafts.find(draft => draft.index === 3).history;
+const draftFourNotesHistory = mergedHistory.drafts.find(draft => draft.index === 3).notes.history;
 assert.deepEqual(
   draftFourHistory.map(entry => entry.content),
   ["Fourth draft on A", "Fourth draft from USB"],
   "local Draft 4 should be kept as an older saved version before the newer USB Draft 4"
+);
+assert.deepEqual(
+  draftFourNotesHistory.map(entry => entry.content),
+  ["Local fourth notes", "USB fourth notes"],
+  "local Draft 4 notes should be kept as an older saved version before the newer USB Draft 4 notes"
 );
 assert.equal(
   fs.readFileSync(unrelatedHistoryPath, "utf8"),

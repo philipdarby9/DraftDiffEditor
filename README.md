@@ -38,7 +38,7 @@ Packaged desktop shortcut example:
 "C:\Program Files\Draft Diff Editor\Draft Diff Editor.exe" --data-dir="D:\Writing\Draft Diff Editor Data"
 ```
 
-Use `File` -> `Backup folder` to choose or create a shared backup/history folder. Version-history JSON sidecars are written under that folder's `json` subfolder, named like `draft-history.version-history.json`. When a text file is opened, the app looks for a matching sidecar by source path metadata or by filename, then merges those histories into the matching Project notes and draft pages.
+Use `File` -> `Backup folder` to choose or create a shared backup/history folder. Version-history JSON sidecars are written under that folder's `json` subfolder, named like `draft-history.version-history.json`. When a text file is opened, the app looks for a matching sidecar by source path metadata or by filename, then merges those histories into the matching Project notes, draft pages, and draft notes.
 
 Use `File` -> `Activate backup` to choose or create the same shared folder. When backup is active, closing the app or switching to another text file writes the latest companion text file under `original txt` and queues an HTML summary under `version history summaries`. The summary and in-app version history include red/green comparisons with adjacent autosave snapshots coalesced when they touch the same local word or phrase. Summary generation runs in the background and is skipped when the source history and current text have not changed; the skip metadata is kept separately under `version history summary cache`.
 
