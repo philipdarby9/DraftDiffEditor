@@ -143,6 +143,17 @@ try {
   assert.equal(recoveredState.drafts[0].content, "Alpha");
   assert.match(readText(t.EXPORT_FILE), /Alpha/);
 
+  t.writeAll(fixtureState("Gamma"), {
+    filePath: linkedPath,
+    fileName: "linked.txt",
+    allowLinkedTextFileFailure: true,
+    testFailWritePath: linkedPath
+  });
+  assert.match(readText(t.STATE_FILE), /Gamma/, "project state should still save when linked text file is blocked");
+  assert.match(readText(t.EXPORT_FILE), /Gamma/, "local companion export should still save when linked text file is blocked");
+  assert.match(readText(sidecarPath), /Gamma/, "version history sidecar should still save when linked text file is blocked");
+  assert.match(readText(linkedPath), /Alpha/, "blocked linked text file should be left untouched");
+
   console.log("persistence transaction tests passed");
 } finally {
   fs.rmSync(dataDir, { recursive: true, force: true });

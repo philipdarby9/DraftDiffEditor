@@ -711,6 +711,348 @@ textarea,
   color: #fff;
 }
 
+.transfer-review-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 620;
+  display: grid;
+  place-items: center;
+  padding: 22px;
+  background: rgba(32, 29, 25, 0.36);
+  backdrop-filter: blur(2px);
+}
+
+.transfer-review-overlay[hidden] {
+  display: none;
+}
+
+.transfer-review-panel {
+  width: min(1120px, 100%);
+  max-height: min(820px, calc(100vh - 44px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  overflow: hidden;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r);
+  box-shadow: var(--shadow-menu);
+}
+
+.transfer-review-header {
+  min-height: 58px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: var(--surface-alt);
+}
+
+.transfer-review-kicker {
+  margin: 0 0 3px;
+  color: var(--fg-muted);
+  font-size: 10.5px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+}
+
+.transfer-review-header h2 {
+  margin: 0;
+  font-size: 18px;
+  line-height: 1.25;
+}
+
+.transfer-review-close {
+  border-color: var(--border-strong);
+  background: var(--surface);
+}
+
+.transfer-review-content {
+  min-height: 0;
+  overflow: auto;
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.transfer-review-summary {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.transfer-review-summary > div {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-alt);
+}
+
+.transfer-review-number {
+  font-size: 24px;
+  line-height: 1;
+  font-weight: 700;
+  color: var(--accent-deep);
+}
+
+.transfer-review-verdict {
+  display: grid;
+  gap: 4px;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface-alt);
+}
+
+.transfer-review-verdict h3,
+.transfer-review-verdict p {
+  margin: 0;
+}
+
+.transfer-review-verdict h3 {
+  font-size: 17px;
+  line-height: 1.25;
+}
+
+.transfer-review-verdict p {
+  color: var(--fg-muted);
+  line-height: 1.45;
+}
+
+.transfer-review-verdict.needs-check {
+  border-color: oklch(75% 0.08 72);
+  background: oklch(97% 0.025 78);
+}
+
+.transfer-review-verdict.is-ready {
+  border-color: oklch(77% 0.07 145);
+  background: oklch(97% 0.025 145);
+}
+
+.transfer-review-simple-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.transfer-review-simple-grid > div {
+  min-width: 0;
+  display: grid;
+  gap: 4px;
+  align-content: start;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.transfer-review-simple-grid strong,
+.transfer-review-simple-grid p {
+  margin: 0;
+}
+
+.transfer-review-simple-grid p {
+  color: var(--fg-muted);
+  line-height: 1.35;
+}
+
+.transfer-review-meta {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.transfer-review-section {
+  min-width: 0;
+  display: grid;
+  gap: 8px;
+  align-content: start;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.transfer-review-section h3,
+.transfer-review-section h4 {
+  margin: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  font-size: 14px;
+  line-height: 1.2;
+}
+
+.transfer-review-section h4 {
+  font-size: 13px;
+}
+
+.transfer-review-section h3 span,
+.transfer-review-section h4 span {
+  color: var(--fg-muted);
+  font-weight: 400;
+}
+
+.transfer-review-story {
+  background: var(--surface-alt);
+}
+
+.transfer-review-project {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 8px;
+  color: var(--fg-muted);
+}
+
+.transfer-review-project strong {
+  color: var(--fg);
+}
+
+.transfer-review-columns {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 12px;
+}
+
+.transfer-review-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.transfer-review-list li {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 10px;
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.transfer-review-list li:first-child {
+  border-top: 0;
+}
+
+.transfer-review-plain-list,
+.transfer-review-brief-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+}
+
+.transfer-review-plain-list li,
+.transfer-review-brief-list li {
+  min-width: 0;
+  display: grid;
+  gap: 2px;
+  padding: 8px 0;
+  border-top: 1px solid var(--border);
+}
+
+.transfer-review-plain-list li:first-child,
+.transfer-review-brief-list li:first-child {
+  border-top: 0;
+}
+
+.transfer-review-plain-list strong,
+.transfer-review-brief-list span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.transfer-review-plain-list span,
+.transfer-review-brief-list em {
+  color: var(--fg-muted);
+  font-style: normal;
+  line-height: 1.35;
+}
+
+.transfer-review-path {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.transfer-review-status {
+  color: var(--fg-muted);
+  text-align: right;
+  white-space: normal;
+}
+
+.transfer-review-empty,
+.transfer-review-more {
+  margin: 0;
+  color: var(--fg-muted);
+  font-style: italic;
+}
+
+.transfer-review-technical {
+  border: 1px solid var(--border);
+  border-radius: var(--r-sm);
+  background: var(--surface);
+}
+
+.transfer-review-technical summary {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  padding: 0 12px;
+  cursor: pointer;
+  color: var(--fg);
+  font-weight: 700;
+}
+
+.transfer-review-technical > .transfer-review-meta,
+.transfer-review-technical > .transfer-review-columns {
+  margin: 0 12px 12px;
+}
+
+.transfer-review-actions {
+  min-height: 54px;
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding: 10px 16px;
+  border-top: 1px solid var(--border);
+  background: var(--surface-alt);
+}
+
+.transfer-review-action {
+  min-width: 112px;
+  height: 32px;
+  border-color: var(--border-strong);
+  background: var(--surface);
+}
+
+.transfer-review-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: var(--accent-fg);
+}
+
+.transfer-review-primary:hover {
+  background: var(--accent-deep);
+  color: var(--accent-fg);
+}
+
+.transfer-review-action:disabled {
+  opacity: 0.55;
+  cursor: wait;
+}
+
 .zoom-menu-control {
   min-height: 30px;
   display: grid;
@@ -3205,6 +3547,15 @@ textarea {
 }
 
 @media (max-width: 760px) {
+  .transfer-review-summary,
+  .transfer-review-simple-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .transfer-review-panel {
+    max-height: calc(100vh - 24px);
+  }
+
   .search-popover-row {
     grid-template-columns: minmax(0, 1fr) auto auto auto;
   }

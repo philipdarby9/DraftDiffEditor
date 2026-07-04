@@ -1,5 +1,6 @@
 const fs = require("node:fs");
 const http = require("node:http");
+const os = require("node:os");
 const path = require("node:path");
 const crypto = require("node:crypto");
 const { spawn } = require("node:child_process");
@@ -24,6 +25,8 @@ const VERSION_HISTORY_FILE_SUFFIX = ".version-history.json";
 const BACKUP_HISTORY_REPORT_SUFFIX = ".version-history.md";
 const CUT_HISTORY_REPORT_SUFFIX = ".per-draft-cut-history.html";
 const FULL_VERSION_HISTORY_REPORT_SUFFIX = ".version-history-summary.html";
+const USB_TRANSFER_MANIFEST_FILE = "draftdiff-transfer-manifest.json";
+const USB_TRANSFER_FILES_DIR = "draftdiff-transfer-files";
 const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.DRAFT_DIFF_HOST || process.env.HOST || "127.0.0.1";
 const ALLOW_REMOTE_API = process.env.DRAFT_DIFF_ALLOW_REMOTE === "1";
@@ -322,6 +325,159 @@ function safeBackupFileName(sourceName, fallbackName = "draft-history.txt") {
   return cleaned || fallback;
 }
 
+function safeFolderName(sourceName, fallbackName = "draft-history") {
+  const rawName = asText(sourceName) || fallbackName;
+  const cleaned = rawName
+    .replace(/[<>:"/\\|?*\x00-\x1f]/g, "_")
+    .replace(/^[.\s]+|[.\s]+$/g, "")
+    .slice(0, 120);
+  return cleaned || fallbackName;
+}
+
+function portablePath(...parts) {
+  return parts
+    .flatMap(part => asText(part).split(/[\\/]+/u))
+    .filter(Boolean)
+    .join("/");
+}
+
+function pathFromPortable(rootFolderPath, portableRelativePath) {
+  const parts = asText(portableRelativePath).split(/[\\/]+/u).filter(Boolean);
+  return path.join(rootFolderPath, ...parts);
+}
+
+function sha256File(filePath) {
+  return crypto.createHash("sha256").update(fs.readFileSync(filePath)).digest("hex");
+}
+
+function fileSnapshot(filePath) {
+  const resolvedPath = filePath ? path.resolve(filePath) : "";
+  if (!resolvedPath) return { exists: false };
+
+  try {
+    const stats = fs.statSync(resolvedPath);
+    if (!stats.isFile()) {
+      return {
+        exists: false,
+        path: resolvedPath,
+        type: stats.isDirectory() ? "directory" : "other"
+      };
+    }
+
+    return {
+      exists: true,
+      path: resolvedPath,
+      size: stats.size,
+      mtimeMs: Math.round(stats.mtimeMs),
+      sha256: sha256File(resolvedPath)
+    };
+  } catch {
+    return {
+      exists: false,
+      path: resolvedPath
+    };
+  }
+}
+
+function walkDirectoryFiles(folderPath, rootFolderPath = folderPath, files = []) {
+  const entries = fs.readdirSync(folderPath, { withFileTypes: true })
+    .sort((left, right) => left.name.localeCompare(right.name));
+
+  entries.forEach(entry => {
+    const filePath = path.join(folderPath, entry.name);
+    if (entry.isDirectory()) {
+      walkDirectoryFiles(filePath, rootFolderPath, files);
+      return;
+    }
+    if (!entry.isFile()) return;
+
+    files.push({
+      relativePath: portablePath(path.relative(rootFolderPath, filePath)),
+      snapshot: fileSnapshot(filePath)
+    });
+  });
+
+  return files;
+}
+
+function directorySnapshot(folderPath) {
+  const resolvedPath = folderPath ? path.resolve(folderPath) : "";
+  if (!resolvedPath || !directoryExists(resolvedPath)) {
+    return {
+      exists: false,
+      path: resolvedPath,
+      files: []
+    };
+  }
+
+  return {
+    exists: true,
+    path: resolvedPath,
+    files: walkDirectoryFiles(resolvedPath).map(file => ({
+      relativePath: file.relativePath,
+      size: file.snapshot.size,
+      mtimeMs: file.snapshot.mtimeMs,
+      sha256: file.snapshot.sha256
+    }))
+  };
+}
+
+function snapshotByRelativePath(directory) {
+  const map = new Map();
+  (directory?.files || []).forEach(file => {
+    map.set(portablePath(file.relativePath), file);
+  });
+  return map;
+}
+
+function fileSnapshotChanged(baseline, current) {
+  const baseExists = Boolean(baseline?.exists);
+  const currentExists = Boolean(current?.exists);
+  if (baseExists !== currentExists) return true;
+  if (!baseExists && !currentExists) return false;
+  return asText(baseline?.sha256) !== asText(current?.sha256);
+}
+
+function sameSnapshotContent(left, right) {
+  return Boolean(left?.exists && right?.exists && asText(left.sha256) && left.sha256 === right.sha256);
+}
+
+function transferChangeStatus(baseline, usb, local) {
+  const baselineExists = Boolean(baseline?.exists);
+  const usbExists = Boolean(usb?.exists);
+  const localExists = Boolean(local?.exists);
+
+  if (!baselineExists) {
+    if (usbExists && !localExists) return "usb-added";
+    if (!usbExists && localExists) return "local-added";
+    if (!usbExists && !localExists) return "unchanged";
+    return sameSnapshotContent(usb, local) ? "already-matching" : "conflict";
+  }
+
+  const usbChanged = fileSnapshotChanged(baseline, usb);
+  const localChanged = fileSnapshotChanged(baseline, local);
+
+  if (!usbChanged && !localChanged) return "unchanged";
+  if (usbChanged && !localChanged) return usb?.exists ? "safe-update" : "usb-deleted";
+  if (!usbChanged && localChanged) return local?.exists ? "local-only-change" : "local-deleted";
+  if (sameSnapshotContent(usb, local)) return "already-matching";
+  return "conflict";
+}
+
+function transferStatusLabel(status) {
+  return {
+    "usb-added": "Added on USB",
+    "local-added": "Added on this computer",
+    "safe-update": "Safe update",
+    "usb-deleted": "Deleted on USB",
+    "local-only-change": "Changed on this computer",
+    "local-deleted": "Deleted on this computer",
+    "already-matching": "Already matching",
+    conflict: "Conflict",
+    unchanged: "Unchanged"
+  }[status] || status;
+}
+
 function versionHistoryJsonFolderPath(options = {}) {
   const folderPath = options.requireExistingRoot
     ? requireVersionHistoryFolderPath()
@@ -618,6 +774,396 @@ function versionHistoryPayloadFromState(state, options = {}) {
       createdAt: draft.createdAt || null,
       history: draft.versionHistory || []
     }))
+  };
+}
+
+function textHash(value) {
+  return crypto.createHash("sha256").update(asText(value), "utf8").digest("hex");
+}
+
+const monthIndexes = new Map([
+  ["january", 0],
+  ["february", 1],
+  ["march", 2],
+  ["april", 3],
+  ["may", 4],
+  ["june", 5],
+  ["july", 6],
+  ["august", 7],
+  ["september", 8],
+  ["october", 9],
+  ["november", 10],
+  ["december", 11]
+]);
+
+function parseExportDate(value, fallback = nowIso()) {
+  const raw = asText(value).trim();
+  if (!raw) return fallback;
+
+  const direct = new Date(raw);
+  if (!Number.isNaN(direct.valueOf())) return direct.toISOString();
+
+  const englishDate = raw.match(/^(?:[A-Za-z]+,\s*)?(\d{1,2})\s+([A-Za-z]+)\s+(\d{4})(?:\s+at|,)?\s+(\d{1,2}):(\d{2})/u);
+  if (englishDate) {
+    const [, day, monthName, year, hour, minute] = englishDate;
+    const month = monthIndexes.get(monthName.toLowerCase());
+    if (month !== undefined) {
+      const parsed = new Date(Number(year), month, Number(day), Number(hour), Number(minute));
+      if (!Number.isNaN(parsed.valueOf())) return parsed.toISOString();
+    }
+  }
+
+  return fallback;
+}
+
+function parseExportTextBlock(block) {
+  const lines = asText(block).replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n");
+  const firstLineCreatedMatch = /^Created:\s*(.*)$/i.exec(lines[0] || "");
+  const title = (firstLineCreatedMatch ? lines[1] : lines[0] || "").trim();
+  const createdLineIndex = firstLineCreatedMatch ? 0 : 1;
+  const createdMatch = firstLineCreatedMatch || /^Created:\s*(.*)$/i.exec(lines[createdLineIndex] || "");
+  if (!title || !createdMatch) return null;
+
+  let bodyStart = createdLineIndex + 1;
+  let updatedAt = "";
+  for (; bodyStart < lines.length; bodyStart += 1) {
+    const line = lines[bodyStart] || "";
+    if (line === "") {
+      bodyStart += 1;
+      break;
+    }
+    const lastEditedMatch = /^Last edited:\s*(.*)$/i.exec(line);
+    if (lastEditedMatch) {
+      updatedAt = parseExportDate(lastEditedMatch[1], "");
+      continue;
+    }
+    if (/^Word count:\s*/i.test(line)) continue;
+    break;
+  }
+
+  const content = lines.slice(bodyStart).join("\n").replace(/\n+$/gu, "");
+  return {
+    title,
+    createdAt: parseExportDate(createdMatch[1]),
+    updatedAt,
+    content: content === "[No text yet]" ? "" : content
+  };
+}
+
+function parseExportTextPages(text) {
+  return asText(text)
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .split(/\n{2}[ \t]*---[ \t]*\n{2}/gu)
+    .map(block => parseExportTextBlock(block.replace(/^\n+|\n+$/gu, "")))
+    .filter(Boolean);
+}
+
+function draftPagesFromExportText(text) {
+  const pages = parseExportTextPages(text);
+  const storyIndex = pages.findIndex(page => {
+    const title = page.title.toLowerCase();
+    return title === "project notes" || title === "story notes";
+  });
+  const projectNotes = pages[storyIndex >= 0 ? storyIndex : 0] || {
+    title: PROJECT_NOTES_TITLE,
+    content: ""
+  };
+  const afterStory = pages.slice((storyIndex >= 0 ? storyIndex : 0) + 1);
+  const drafts = [];
+
+  for (let index = 0; index < afterStory.length; index += 1) {
+    const draftBlock = afterStory[index];
+    if (!draftBlock || /\snotes$/i.test(draftBlock.title)) continue;
+
+    let notesBlock = null;
+    const nextBlock = afterStory[index + 1];
+    if (nextBlock && (
+      nextBlock.title.toLowerCase() === `${draftBlock.title} notes`.toLowerCase() ||
+      /\snotes$/i.test(nextBlock.title)
+    )) {
+      notesBlock = nextBlock;
+      index += 1;
+    }
+
+    drafts.push({
+      title: draftBlock.title || `Draft ${drafts.length + 1}`,
+      content: draftBlock.content || "",
+      notesTitle: notesBlock?.title || `${draftBlock.title || `Draft ${drafts.length + 1}`} Notes`,
+      notesContent: notesBlock?.content || ""
+    });
+  }
+
+  return {
+    projectNotes,
+    drafts
+  };
+}
+
+function fileMtimeIso(filePath) {
+  try {
+    return fs.statSync(filePath).mtime.toISOString();
+  } catch {
+    return nowIso();
+  }
+}
+
+function pagePlainText(page) {
+  return asText(page?.content) || htmlToText(page?.contentHtml || "");
+}
+
+function pageFromTransferBlock(block, fallbackTitle, previousPage = null, options = {}) {
+  const title = block?.title || fallbackTitle;
+  const content = asText(block?.content);
+  const importedCreatedAt = block?.createdAt || nowIso();
+  const previousContent = previousPage ? pagePlainText(previousPage) : null;
+  const contentChanged = Boolean(previousPage) && previousContent !== content;
+  const importedUpdatedAt = block?.updatedAt || "";
+  const changedAt = options.changedAt || importedUpdatedAt || nowIso();
+  const createdAt = previousPage?.createdAt || importedCreatedAt;
+  const updatedAt = contentChanged
+    ? importedUpdatedAt || changedAt
+    : previousPage?.updatedAt || importedUpdatedAt || importedCreatedAt || createdAt;
+
+  return {
+    id: previousPage?.id || id("page"),
+    title,
+    createdAt,
+    updatedAt,
+    content,
+    contentHtml: textToHtml(content),
+    format: previousPage?.format ? { ...normalizeFormat(previousPage.format) } : { ...DEFAULT_FORMAT }
+  };
+}
+
+function stateFromExportText(text, previousState = null, options = {}) {
+  const pages = parseExportTextPages(text);
+  if (!pages.length) throw new Error("This file is empty.");
+
+  const previous = previousState ? normalizeState(previousState) : null;
+  const storyIndex = pages.findIndex(page => {
+    const title = page.title.toLowerCase();
+    return title === "project notes" || title === "story notes";
+  });
+  const storyBlock = pages[storyIndex >= 0 ? storyIndex : 0];
+  const afterStory = pages.slice((storyIndex >= 0 ? storyIndex : 0) + 1);
+  const drafts = [];
+
+  for (let index = 0; index < afterStory.length; index += 1) {
+    const draftBlock = afterStory[index];
+    if (!draftBlock || /\snotes$/i.test(draftBlock.title)) continue;
+
+    let notesBlock = null;
+    const nextBlock = afterStory[index + 1];
+    if (nextBlock && (
+      nextBlock.title.toLowerCase() === `${draftBlock.title} notes`.toLowerCase() ||
+      /\snotes$/i.test(nextBlock.title)
+    )) {
+      notesBlock = nextBlock;
+      index += 1;
+    }
+
+    const draftNumber = drafts.length + 1;
+    const previousDraft = previous?.drafts?.[draftNumber - 1] || null;
+    const draftPage = pageFromTransferBlock(draftBlock, `Draft ${draftNumber}`, previousDraft, options);
+    const notesPage = pageFromTransferBlock(notesBlock, `${draftPage.title} Notes`, previousDraft?.notes, options);
+    notesPage.id = previousDraft?.notes?.id || id("notes");
+    notesPage.title = `${draftPage.title} Notes`;
+
+    drafts.push({
+      ...draftPage,
+      id: previousDraft?.id || id("draft"),
+      versionHistory: Array.isArray(previousDraft?.versionHistory) ? previousDraft.versionHistory : [],
+      notes: notesPage
+    });
+  }
+
+  const initialNotes = {
+    ...pageFromTransferBlock(storyBlock, PROJECT_NOTES_TITLE, previous?.initialNotes, options),
+    id: "initial-notes",
+    title: PROJECT_NOTES_TITLE,
+    versionHistory: Array.isArray(previous?.initialNotes?.versionHistory)
+      ? previous.initialNotes.versionHistory
+      : []
+  };
+
+  return normalizeState({
+    version: 1,
+    formatDefaultVersion: FORMAT_DEFAULT_VERSION,
+    defaultFormat: currentDefaultFormat(previous),
+    createdAt: previous?.createdAt || storyBlock.createdAt || nowIso(),
+    updatedAt: nowIso(),
+    viewState: previous?.viewState || null,
+    initialNotes,
+    drafts: drafts.length ? drafts : [StateCore.defaultState().drafts[0]]
+  });
+}
+
+function findVersionHistoryPayloadForText(fileName, backupFolderPath) {
+  if (!backupFolderPath || !directoryExists(backupFolderPath)) return null;
+
+  const source = {
+    fileName: fileName || "draft-history.txt",
+    filePath: null
+  };
+  const candidateFolders = [
+    path.join(backupFolderPath, "json"),
+    path.join(backupFolderPath, "jsons"),
+    backupFolderPath
+  ];
+
+  const expectedFileName = `${safeHistoryBaseName(source.fileName)}${VERSION_HISTORY_FILE_SUFFIX}`;
+  for (const folderPath of candidateFolders) {
+    const expectedPath = path.join(folderPath, expectedFileName);
+    if (!fs.existsSync(expectedPath)) continue;
+    const payload = parseVersionHistoryFile(expectedPath);
+    if (payload) return payload;
+  }
+
+  for (const folderPath of candidateFolders) {
+    try {
+      const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isFile() || !entry.name.endsWith(VERSION_HISTORY_FILE_SUFFIX)) continue;
+        const payload = parseVersionHistoryFile(path.join(folderPath, entry.name));
+        if (versionHistoryPayloadMatchesSource(payload, source)) return payload;
+      }
+    } catch {
+      // Missing folders are normal when no backup folder has been used yet.
+    }
+  }
+
+  return null;
+}
+
+function versionCountForDraft(historyPayload, index, title) {
+  const drafts = Array.isArray(historyPayload?.drafts) ? historyPayload.drafts : [];
+  const titleKey = normalizeHistoryTitle(title);
+  const match = drafts.find(draft => Number(draft?.index) === index)
+    || drafts.find(draft => normalizeHistoryTitle(draft?.title) === titleKey);
+  const history = Array.isArray(match?.history) ? match.history : match?.versionHistory;
+  return Array.isArray(history) ? history.length : 0;
+}
+
+function storySummaryFromPages(pages, historyPayload = null) {
+  const projectNotesContent = pages.projectNotes?.content || "";
+  const projectNotesHistory = Array.isArray(historyPayload?.story?.history)
+    ? historyPayload.story.history
+    : Array.isArray(historyPayload?.initialNotes)
+      ? historyPayload.initialNotes
+      : [];
+
+  return {
+    projectNotes: {
+      title: PROJECT_NOTES_TITLE,
+      wordCount: wordCountForText(projectNotesContent),
+      contentHash: textHash(projectNotesContent),
+      versionCount: projectNotesHistory.length
+    },
+    draftCount: pages.drafts.length,
+    drafts: pages.drafts.map((draft, index) => ({
+      number: index + 1,
+      title: draft.title || `Draft ${index + 1}`,
+      wordCount: wordCountForText(draft.content),
+      contentHash: textHash(draft.content),
+      notesWordCount: wordCountForText(draft.notesContent),
+      notesHash: textHash(draft.notesContent),
+      versionCount: versionCountForDraft(historyPayload, index, draft.title)
+    }))
+  };
+}
+
+function storySummaryFromState(state, options = {}) {
+  const normalized = normalizeState(state);
+  const pages = {
+    projectNotes: {
+      title: PROJECT_NOTES_TITLE,
+      content: normalized.initialNotes?.content || htmlToText(normalized.initialNotes?.contentHtml || "")
+    },
+    drafts: (normalized.drafts || []).map((draft, index) => ({
+      title: draft.title || `Draft ${index + 1}`,
+      content: draft.content || htmlToText(draft.contentHtml || ""),
+      notesTitle: draft.notes?.title || `${draft.title || `Draft ${index + 1}`} Notes`,
+      notesContent: draft.notes?.content || htmlToText(draft.notes?.contentHtml || "")
+    }))
+  };
+  return storySummaryFromPages(pages, versionHistoryPayloadFromState(normalized, options));
+}
+
+function storySummaryFromTransferFiles(textFilePath, backupFolderPath) {
+  const text = fs.existsSync(textFilePath) ? fs.readFileSync(textFilePath, "utf8") : "";
+  const fileName = path.basename(textFilePath || "draft-history.txt");
+  const pages = draftPagesFromExportText(text);
+  return storySummaryFromPages(pages, findVersionHistoryPayloadForText(fileName, backupFolderPath));
+}
+
+function compareStorySummaries(baseline, usb) {
+  const baselineDrafts = new Map((baseline?.drafts || []).map(draft => [draft.number, draft]));
+  const usbDrafts = new Map((usb?.drafts || []).map(draft => [draft.number, draft]));
+  const draftNumbers = [...new Set([...baselineDrafts.keys(), ...usbDrafts.keys()])].sort((left, right) => left - right);
+
+  const addedDrafts = [];
+  const removedDrafts = [];
+  const changedDrafts = [];
+  const changedDraftNotes = [];
+
+  draftNumbers.forEach(number => {
+    const before = baselineDrafts.get(number);
+    const after = usbDrafts.get(number);
+    if (!before && after) {
+      addedDrafts.push(after);
+      return;
+    }
+    if (before && !after) {
+      removedDrafts.push(before);
+      return;
+    }
+    if (!before || !after) return;
+
+    const newVersions = Math.max(0, Number(after.versionCount || 0) - Number(before.versionCount || 0));
+    if (
+      before.contentHash !== after.contentHash ||
+      before.wordCount !== after.wordCount ||
+      newVersions > 0
+    ) {
+      changedDrafts.push({
+        ...after,
+        previousWordCount: before.wordCount,
+        previousVersionCount: before.versionCount,
+        newVersions
+      });
+    }
+    if (before.notesHash !== after.notesHash || before.notesWordCount !== after.notesWordCount) {
+      changedDraftNotes.push({
+        number: after.number,
+        title: `${after.title} Notes`,
+        wordCount: after.notesWordCount,
+        previousWordCount: before.notesWordCount
+      });
+    }
+  });
+
+  const beforeProject = baseline?.projectNotes || { wordCount: 0, contentHash: "", versionCount: 0 };
+  const afterProject = usb?.projectNotes || { wordCount: 0, contentHash: "", versionCount: 0 };
+  const projectNewVersions = Math.max(0, Number(afterProject.versionCount || 0) - Number(beforeProject.versionCount || 0));
+
+  return {
+    baseline,
+    usb,
+    projectNotes: {
+      wordCount: afterProject.wordCount,
+      previousWordCount: beforeProject.wordCount,
+      versionCount: afterProject.versionCount,
+      previousVersionCount: beforeProject.versionCount,
+      newVersions: projectNewVersions,
+      changed: beforeProject.contentHash !== afterProject.contentHash
+        || beforeProject.wordCount !== afterProject.wordCount
+        || projectNewVersions > 0
+    },
+    addedDrafts,
+    removedDrafts,
+    changedDrafts,
+    changedDraftNotes
   };
 }
 
@@ -2840,6 +3386,981 @@ function writeAll(state, options = {}) {
   return normalized;
 }
 
+function usbTransferTimestamp(date = new Date()) {
+  return date.toISOString().replace(/[:.]/g, "-");
+}
+
+function usbTransferPackageFolderName(sourceName) {
+  return `${safeFolderName(safeHistoryBaseName(sourceName), "draft-history")}-draftdiff-transfer-${usbTransferTimestamp()}`;
+}
+
+function copyFileToPackage(sourcePath, packagePath) {
+  fs.mkdirSync(path.dirname(packagePath), { recursive: true });
+  fs.copyFileSync(sourcePath, packagePath);
+}
+
+function copyDirectoryToPackage(sourcePath, packagePath) {
+  fs.rmSync(packagePath, { recursive: true, force: true });
+  fs.mkdirSync(path.dirname(packagePath), { recursive: true });
+  fs.cpSync(sourcePath, packagePath, { recursive: true });
+}
+
+function copyDirectorySubsetToPackage(sourcePath, packagePath, relativePaths = []) {
+  fs.rmSync(packagePath, { recursive: true, force: true });
+  fs.mkdirSync(packagePath, { recursive: true });
+
+  relativePaths.forEach(relativePath => {
+    const sourceFilePath = pathFromPortable(sourcePath, relativePath);
+    if (!fs.existsSync(sourceFilePath) || !fs.statSync(sourceFilePath).isFile()) return;
+    copyFileToPackage(sourceFilePath, pathFromPortable(packagePath, relativePath));
+  });
+}
+
+function subsetDirectorySnapshot(folderPath, relativePaths = []) {
+  const resolvedPath = folderPath ? path.resolve(folderPath) : "";
+  const files = [...new Set(relativePaths.map(relativePath => portablePath(relativePath)).filter(Boolean))]
+    .sort((left, right) => left.localeCompare(right))
+    .map(relativePath => ({
+      relativePath,
+      snapshot: fileSnapshot(pathFromPortable(resolvedPath, relativePath))
+    }))
+    .filter(file => file.snapshot.exists)
+    .map(file => ({
+      relativePath: file.relativePath,
+      size: file.snapshot.size,
+      mtimeMs: file.snapshot.mtimeMs,
+      sha256: file.snapshot.sha256
+    }));
+
+  return {
+    exists: Boolean(resolvedPath && directoryExists(resolvedPath)),
+    path: resolvedPath,
+    files
+  };
+}
+
+function addRelativePathIfFile(paths, rootFolderPath, filePath) {
+  if (!rootFolderPath || !filePath) return;
+  const resolvedRoot = path.resolve(rootFolderPath);
+  const resolvedFile = path.resolve(filePath);
+  if (!pathIsInsideFolder(resolvedFile, resolvedRoot)) return;
+
+  try {
+    if (!fs.statSync(resolvedFile).isFile()) return;
+  } catch {
+    return;
+  }
+
+  paths.add(portablePath(path.relative(resolvedRoot, resolvedFile)));
+}
+
+function relevantBackupRelativePaths(backupFolderPath, source) {
+  const paths = new Set();
+  if (!backupFolderPath || !directoryExists(backupFolderPath)) return [];
+
+  const baseName = safeHistoryBaseName(source.fileName);
+  const textFileName = safeBackupFileName(source.fileName, "draft-history.txt");
+  [
+    path.join(backupFolderPath, "original txt", textFileName),
+    path.join(backupFolderPath, "version history md", `${baseName}${BACKUP_HISTORY_REPORT_SUFFIX}`),
+    path.join(backupFolderPath, "version history summaries", `${baseName}${CUT_HISTORY_REPORT_SUFFIX}`),
+    path.join(backupFolderPath, "version history summaries", `${baseName}${FULL_VERSION_HISTORY_REPORT_SUFFIX}`),
+    path.join(backupFolderPath, "version history summary cache", `${baseName}${CUT_HISTORY_REPORT_SUFFIX}.meta.json`),
+    path.join(backupFolderPath, "version history summary cache", `${baseName}${FULL_VERSION_HISTORY_REPORT_SUFFIX}.meta.json`),
+    path.join(backupFolderPath, "json", `${baseName}${VERSION_HISTORY_FILE_SUFFIX}`),
+    path.join(backupFolderPath, "jsons", `${baseName}${VERSION_HISTORY_FILE_SUFFIX}`),
+    path.join(backupFolderPath, `${baseName}${VERSION_HISTORY_FILE_SUFFIX}`)
+  ].forEach(filePath => addRelativePathIfFile(paths, backupFolderPath, filePath));
+
+  addRelativePathIfFile(paths, backupFolderPath, findVersionHistoryFilePath({
+    filePath: source.filePath,
+    fileName: source.fileName
+  }));
+
+  return Array.from(paths).sort((left, right) => left.localeCompare(right));
+}
+
+function assertTransferDestinationSafe(packageFolderPath, sourcePaths) {
+  const packagePath = path.resolve(packageFolderPath);
+  sourcePaths.filter(Boolean).forEach(sourcePath => {
+    const resolvedSource = path.resolve(sourcePath);
+    if (directoryExists(resolvedSource) && pathIsInsideFolder(packagePath, resolvedSource)) {
+      throw new Error(`Transfer package cannot be created inside copied folder: ${resolvedSource}`);
+    }
+  });
+}
+
+function transferItemDisplayPath(item, relativePath = "") {
+  if (!relativePath) return item.sourcePath || item.label || item.id;
+  return item.kind === "directory"
+    ? path.join(item.sourcePath || item.label || item.id, ...asText(relativePath).split(/[\\/]+/u).filter(Boolean))
+    : item.sourcePath || item.label || item.id;
+}
+
+function compareTransferFileEntry(item, relativePath, baseline, usb, local) {
+  const status = transferChangeStatus(baseline, usb, local);
+  return {
+    itemId: item.id,
+    role: item.role,
+    kind: item.kind,
+    relativePath: relativePath || "",
+    displayPath: transferItemDisplayPath(item, relativePath),
+    status,
+    statusLabel: transferStatusLabel(status),
+    baseline: baseline || { exists: false },
+    usb: usb || { exists: false },
+    local: local || { exists: false }
+  };
+}
+
+function compareTransferFileItem(item, packageFolderPath) {
+  const usbPath = pathFromPortable(packageFolderPath, item.packagePath);
+  return [compareTransferFileEntry(
+    item,
+    "",
+    item.baseline,
+    fileSnapshot(usbPath),
+    fileSnapshot(item.sourcePath)
+  )];
+}
+
+function compareTransferDirectoryItem(item, packageFolderPath) {
+  const usbPath = pathFromPortable(packageFolderPath, item.packagePath);
+  const baselineMap = snapshotByRelativePath(item.baseline);
+  const usbMap = snapshotByRelativePath(directorySnapshot(usbPath));
+  const localSnapshot = Array.isArray(item.managedRelativePaths)
+    ? subsetDirectorySnapshot(item.sourcePath, item.managedRelativePaths)
+    : directorySnapshot(item.sourcePath);
+  const localMap = snapshotByRelativePath(localSnapshot);
+  const relativePaths = [...new Set([
+    ...baselineMap.keys(),
+    ...usbMap.keys(),
+    ...localMap.keys(),
+    ...(item.managedRelativePaths || []).map(relativePath => portablePath(relativePath))
+  ])].sort((left, right) => left.localeCompare(right));
+
+  return relativePaths.map(relativePath => compareTransferFileEntry(
+    item,
+    relativePath,
+    baselineMap.get(relativePath),
+    usbMap.get(relativePath),
+    localMap.get(relativePath)
+  ));
+}
+
+function summarizeTransferFileEntries(entries) {
+  const groups = {
+    usbAdded: [],
+    localAdded: [],
+    safeUpdates: [],
+    localOnlyChanges: [],
+    conflicts: [],
+    alreadyMatching: [],
+    usbDeleted: [],
+    localDeleted: [],
+    unchanged: []
+  };
+
+  entries.forEach(entry => {
+    if (entry.status === "usb-added") groups.usbAdded.push(entry);
+    else if (entry.status === "local-added") groups.localAdded.push(entry);
+    else if (entry.status === "safe-update") groups.safeUpdates.push(entry);
+    else if (entry.status === "local-only-change") groups.localOnlyChanges.push(entry);
+    else if (entry.status === "conflict") groups.conflicts.push(entry);
+    else if (entry.status === "already-matching") groups.alreadyMatching.push(entry);
+    else if (entry.status === "usb-deleted") groups.usbDeleted.push(entry);
+    else if (entry.status === "local-deleted") groups.localDeleted.push(entry);
+    else groups.unchanged.push(entry);
+  });
+
+  return {
+    counts: Object.fromEntries(Object.entries(groups).map(([key, values]) => [key, values.length])),
+    ...groups
+  };
+}
+
+function createUsbTransferPackage(payload, destinationRootPath) {
+  const destinationRoot = path.resolve(destinationRootPath);
+  if (!directoryExists(destinationRoot)) fs.mkdirSync(destinationRoot, { recursive: true });
+
+  const sourceInfo = historySourceInfo({
+    filePath: payload.filePath,
+    fileName: payload.fileName
+  });
+  const normalized = writeAll(payload.state || readState(), {
+    filePath: sourceInfo.filePath,
+    fileName: sourceInfo.fileName,
+    allowLinkedTextFileFailure: true
+  });
+  const linkedTextPath = readTextFileLink();
+  const storyTextPath = sourceInfo.filePath || linkedTextPath || EXPORT_FILE;
+  const backupFolderPath = existingVersionHistoryFolderPath();
+  const packageFolderPath = path.join(destinationRoot, usbTransferPackageFolderName(sourceInfo.fileName));
+
+  assertTransferDestinationSafe(packageFolderPath, [backupFolderPath]);
+  fs.mkdirSync(packageFolderPath, { recursive: true });
+
+  const items = [];
+  const storyPackagePath = portablePath(USB_TRANSFER_FILES_DIR, "story", path.basename(storyTextPath));
+  const packageStoryTextPath = pathFromPortable(packageFolderPath, storyPackagePath);
+  writeAtomicText(packageStoryTextPath, formatExport(normalized));
+  items.push({
+    id: "story-text",
+    role: "storyText",
+    kind: "file",
+    label: path.basename(storyTextPath),
+    sourcePath: path.resolve(storyTextPath),
+    packagePath: storyPackagePath,
+    baseline: fileSnapshot(storyTextPath)
+  });
+
+  let backupPackagePath = "";
+  if (backupFolderPath) {
+    const managedRelativePaths = relevantBackupRelativePaths(backupFolderPath, {
+      filePath: storyTextPath,
+      fileName: sourceInfo.fileName
+    });
+    if (managedRelativePaths.length) {
+      backupPackagePath = portablePath(USB_TRANSFER_FILES_DIR, "backup");
+      copyDirectorySubsetToPackage(
+        backupFolderPath,
+        pathFromPortable(packageFolderPath, backupPackagePath),
+        managedRelativePaths
+      );
+      items.push({
+        id: "backup-folder",
+        role: "backupFolder",
+        kind: "directory",
+        label: path.basename(backupFolderPath),
+        sourcePath: path.resolve(backupFolderPath),
+        packagePath: backupPackagePath,
+        managedRelativePaths,
+        baseline: subsetDirectorySnapshot(backupFolderPath, managedRelativePaths)
+      });
+    }
+  }
+
+  const manifest = {
+    version: 1,
+    createdAt: nowIso(),
+    appBuild: SERVER_BUILD,
+    computerName: os.hostname(),
+    source: {
+      fileName: sourceInfo.fileName,
+      filePath: storyTextPath ? path.resolve(storyTextPath) : null,
+      backupFolderPath: backupFolderPath ? path.resolve(backupFolderPath) : null
+    },
+    items,
+    baselineState: normalizeState(normalized),
+    storySummary: storySummaryFromState(normalized, {
+      filePath: storyTextPath,
+      fileName: sourceInfo.fileName
+    })
+  };
+
+  const manifestPath = path.join(packageFolderPath, USB_TRANSFER_MANIFEST_FILE);
+  writeAtomicText(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+
+  return {
+    ok: true,
+    packageFolderPath,
+    manifestPath,
+    manifest,
+    storyTextPath: pathFromPortable(packageFolderPath, storyPackagePath),
+    backupFolderPath: backupPackagePath ? pathFromPortable(packageFolderPath, backupPackagePath) : null
+  };
+}
+
+function findUsbTransferManifestPath(folderPath) {
+  const root = path.resolve(folderPath);
+  const direct = path.join(root, USB_TRANSFER_MANIFEST_FILE);
+  if (fs.existsSync(direct)) return direct;
+
+  try {
+    const entries = fs.readdirSync(root, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const candidate = path.join(root, entry.name, USB_TRANSFER_MANIFEST_FILE);
+      if (fs.existsSync(candidate)) return candidate;
+    }
+  } catch {
+    // The caller will report the missing manifest below.
+  }
+
+  return null;
+}
+
+function readUsbTransferManifest(folderPath) {
+  const manifestPath = findUsbTransferManifestPath(folderPath);
+  if (!manifestPath) throw new Error("No DraftDiff transfer manifest was found in that folder.");
+  const parsed = parseJsonFile(manifestPath);
+  if (!parsed || parsed.version !== 1 || !Array.isArray(parsed.items)) {
+    throw new Error("DraftDiff transfer manifest is invalid.");
+  }
+  return {
+    manifestPath,
+    packageFolderPath: path.dirname(manifestPath),
+    manifest: parsed
+  };
+}
+
+function reviewUsbTransferFolder(folderPath) {
+  const { manifestPath, packageFolderPath, manifest } = readUsbTransferManifest(folderPath);
+  const entries = manifest.items.flatMap(item => (
+    item.kind === "directory"
+      ? compareTransferDirectoryItem(item, packageFolderPath)
+      : compareTransferFileItem(item, packageFolderPath)
+  ));
+
+  const storyItem = manifest.items.find(item => item.role === "storyText");
+  const backupItem = manifest.items.find(item => item.role === "backupFolder");
+  const usbStorySummary = storyItem
+    ? storySummaryFromTransferFiles(
+        pathFromPortable(packageFolderPath, storyItem.packagePath),
+        backupItem ? pathFromPortable(packageFolderPath, backupItem.packagePath) : ""
+      )
+    : null;
+
+  const review = {
+    ok: true,
+    manifestPath,
+    packageFolderPath,
+    manifest,
+    files: summarizeTransferFileEntries(entries),
+    story: compareStorySummaries(manifest.storySummary, usbStorySummary)
+  };
+  review.merge = createUsbTransferMergeReview(review);
+  return review;
+}
+
+function importBackupRootForManifest(manifest) {
+  const sourceName = manifest?.source?.fileName || "draft-history";
+  const primaryRoot = path.join(
+    DATA_DIR,
+    "usb-transfer-import-backups",
+    `${safeFolderName(safeHistoryBaseName(sourceName), "draft-history")}-${usbTransferTimestamp()}`
+  );
+  const primaryInsideSource = (manifest.items || []).some(item => (
+    item.kind === "directory" && item.sourcePath && pathIsInsideFolder(primaryRoot, item.sourcePath)
+  ));
+
+  if (!primaryInsideSource) return primaryRoot;
+
+  return path.join(
+    os.tmpdir(),
+    "draftdiff-import-backups",
+    `${safeFolderName(safeHistoryBaseName(sourceName), "draft-history")}-${usbTransferTimestamp()}`
+  );
+}
+
+function backupCurrentTransferItem(item, backupRootPath) {
+  const sourcePath = path.resolve(item.sourcePath || "");
+  const targetPath = path.join(backupRootPath, "current", safeFolderName(item.id || item.role || "item"));
+  const snapshot = item.kind === "directory" && Array.isArray(item.managedRelativePaths)
+    ? subsetDirectorySnapshot(sourcePath, item.managedRelativePaths)
+    : item.kind === "directory"
+      ? directorySnapshot(sourcePath)
+      : fileSnapshot(sourcePath);
+
+  if (item.kind === "directory") {
+    if (directoryExists(sourcePath)) {
+      if (Array.isArray(item.managedRelativePaths)) {
+        copyDirectorySubsetToPackage(sourcePath, targetPath, item.managedRelativePaths);
+      } else {
+        copyDirectoryToPackage(sourcePath, targetPath);
+      }
+    }
+  } else if (snapshot.exists) {
+    copyFileToPackage(sourcePath, path.join(targetPath, path.basename(sourcePath)));
+  }
+
+  return {
+    itemId: item.id,
+    role: item.role,
+    kind: item.kind,
+    sourcePath,
+    backupPath: snapshot.exists || snapshot.files?.length ? targetPath : "",
+    snapshot
+  };
+}
+
+function createUsbTransferImportBackup(review) {
+  const backupRootPath = importBackupRootForManifest(review.manifest);
+  fs.mkdirSync(backupRootPath, { recursive: true });
+  const items = review.manifest.items.map(item => backupCurrentTransferItem(item, backupRootPath));
+  writeAtomicText(path.join(backupRootPath, "transfer-manifest.json"), `${JSON.stringify(review.manifest, null, 2)}\n`);
+  writeAtomicText(path.join(backupRootPath, "import-review.json"), `${JSON.stringify({
+    createdAt: nowIso(),
+    packageFolderPath: review.packageFolderPath,
+    files: review.files,
+    story: review.story,
+    items
+  }, null, 2)}\n`);
+
+  return {
+    backupFolderPath: backupRootPath,
+    items
+  };
+}
+
+function validateTransferPackageItems(manifest, packageFolderPath) {
+  (manifest.items || []).forEach(item => {
+    const packagePath = pathFromPortable(packageFolderPath, item.packagePath);
+    if (item.kind === "directory") {
+      if (!directoryExists(packagePath)) throw new Error(`Transfer package folder is missing: ${item.packagePath}`);
+      return;
+    }
+
+    const snapshot = fileSnapshot(packagePath);
+    if (!snapshot.exists) throw new Error(`Transfer package file is missing: ${item.packagePath}`);
+  });
+}
+
+function applyTransferItem(item, packageFolderPath) {
+  const sourcePath = path.resolve(item.sourcePath || "");
+  const packagePath = pathFromPortable(packageFolderPath, item.packagePath);
+  if (!sourcePath) throw new Error(`Transfer item has no source path: ${item.id || item.role || "item"}`);
+
+  if (item.kind === "directory") {
+    if (Array.isArray(item.managedRelativePaths)) {
+      fs.mkdirSync(sourcePath, { recursive: true });
+      item.managedRelativePaths.forEach(relativePath => {
+        const packageFilePath = pathFromPortable(packagePath, relativePath);
+        const sourceFilePath = pathFromPortable(sourcePath, relativePath);
+        if (fs.existsSync(packageFilePath) && fs.statSync(packageFilePath).isFile()) {
+          copyFileToPackage(packageFilePath, sourceFilePath);
+        } else {
+          fs.rmSync(sourceFilePath, { force: true });
+        }
+      });
+      return;
+    }
+
+    fs.rmSync(sourcePath, { recursive: true, force: true });
+    fs.mkdirSync(path.dirname(sourcePath), { recursive: true });
+    fs.cpSync(packagePath, sourcePath, { recursive: true });
+    return;
+  }
+
+  copyFileToPackage(packagePath, sourcePath);
+}
+
+function transferStoryItem(review) {
+  return review.manifest.items.find(item => item.role === "storyText") || null;
+}
+
+function transferBackupItem(review) {
+  return review.manifest.items.find(item => item.role === "backupFolder") || null;
+}
+
+function transferStoryPackagePath(review) {
+  const storyItem = transferStoryItem(review);
+  return storyItem ? pathFromPortable(review.packageFolderPath, storyItem.packagePath) : "";
+}
+
+function transferBackupPackagePath(review) {
+  const backupItem = transferBackupItem(review);
+  return backupItem ? pathFromPortable(review.packageFolderPath, backupItem.packagePath) : "";
+}
+
+function baselineStateFromManifest(manifest) {
+  if (!manifest?.baselineState) return null;
+
+  try {
+    return normalizeState(manifest.baselineState);
+  } catch {
+    return null;
+  }
+}
+
+function stateWithVersionHistoryPayload(state, fileName, backupFolderPath) {
+  const normalized = normalizeState(state);
+  const payload = findVersionHistoryPayloadForText(fileName, backupFolderPath);
+  if (payload) applyVersionHistoryPayloadToState(normalized, payload);
+  return normalizeState(normalized);
+}
+
+function transferPackageState(review, baselineState = null) {
+  const storyPath = transferStoryPackagePath(review);
+  if (!storyPath || !fs.existsSync(storyPath)) throw new Error("Transfer package story file is missing.");
+
+  const fileName = review.manifest?.source?.fileName || path.basename(storyPath);
+  const parsed = stateFromExportText(fs.readFileSync(storyPath, "utf8"), baselineState);
+  return stateWithVersionHistoryPayload(parsed, fileName, transferBackupPackagePath(review));
+}
+
+function localTransferState(review) {
+  const storyItem = transferStoryItem(review);
+  const backupItem = transferBackupItem(review);
+  const storyPath = storyItem?.sourcePath ? path.resolve(storyItem.sourcePath) : "";
+  const fileName = storyPath ? path.basename(storyPath) : review.manifest?.source?.fileName || "draft-history.txt";
+  const currentState = readState();
+  const currentSnapshot = storyPath ? fileSnapshot(storyPath) : { exists: false };
+  const storyFileChanged = storyPath && currentSnapshot.exists && fileSnapshotChanged(storyItem?.baseline, currentSnapshot);
+
+  if (!storyFileChanged) return currentState;
+
+  try {
+    const parsed = stateFromExportText(fs.readFileSync(storyPath, "utf8"), currentState, {
+      changedAt: fileMtimeIso(storyPath)
+    });
+    return stateWithVersionHistoryPayload(parsed, fileName, backupItem?.sourcePath || existingVersionHistoryFolderPath());
+  } catch {
+    return currentState;
+  }
+}
+
+function pageCurrentSignature(page, fallbackTitle) {
+  if (!page) return "";
+  return versionHistorySignature(currentPageHistorySnapshot(page, fallbackTitle));
+}
+
+function pageChangedFromBase(basePage, page, fallbackTitle) {
+  if (!basePage && !page) return false;
+  if (!basePage || !page) return true;
+  return pageCurrentSignature(basePage, fallbackTitle) !== pageCurrentSignature(page, fallbackTitle);
+}
+
+function pageCurrentTime(page, fallbackTitle) {
+  if (!page) return null;
+
+  const currentSignature = pageCurrentSignature(page, fallbackTitle);
+  const times = [
+    Date.parse(page.updatedAt || ""),
+    Date.parse(page.createdAt || "")
+  ].filter(time => !Number.isNaN(time));
+
+  (Array.isArray(page.versionHistory) ? page.versionHistory : []).forEach(version => {
+    if (versionHistorySignature(version) !== currentSignature) return;
+    const time = versionHistoryTime(version);
+    if (time !== null) times.push(time);
+  });
+
+  return times.length ? Math.max(...times) : null;
+}
+
+function clonePage(page) {
+  return page ? JSON.parse(JSON.stringify(page)) : null;
+}
+
+function earliestIsoDate(...values) {
+  const times = values
+    .map(value => Date.parse(value || ""))
+    .filter(time => !Number.isNaN(time));
+  return times.length ? new Date(Math.min(...times)).toISOString() : nowIso();
+}
+
+function mergeHistoryEntries(histories) {
+  const merged = [];
+  const seenIds = new Set();
+  const seenSignatures = new Set();
+
+  histories.flat().forEach(entry => {
+    if (!entry || typeof entry !== "object") return;
+    const idValue = asText(entry.id);
+    const signature = versionHistorySignature(entry);
+    if (idValue && seenIds.has(idValue)) return;
+    if (seenSignatures.has(signature)) return;
+    if (idValue) seenIds.add(idValue);
+    seenSignatures.add(signature);
+    merged.push(entry);
+  });
+
+  return sortVersionHistoryByCreatedAt(merged);
+}
+
+function historyWithCurrentPage(page, fallbackTitle) {
+  if (!page) return [];
+  const normalized = normalizePageVersionHistory(page.versionHistory, page, fallbackTitle);
+  return addCurrentPageToHistoryIfMissing(normalized, page, fallbackTitle);
+}
+
+function chooseMergedPageSource(basePage, localPage, usbPage, fallbackTitle) {
+  if (localPage && !usbPage) return "local";
+  if (!localPage && usbPage) return "usb";
+  if (!localPage && !usbPage) return "";
+
+  const localChanged = pageChangedFromBase(basePage, localPage, fallbackTitle);
+  const usbChanged = pageChangedFromBase(basePage, usbPage, fallbackTitle);
+  if (usbChanged && !localChanged) return "usb";
+  if (localChanged && !usbChanged) return "local";
+  if (!localChanged && !usbChanged) return "local";
+
+  const localTime = pageCurrentTime(localPage, fallbackTitle);
+  const usbTime = pageCurrentTime(usbPage, fallbackTitle);
+  if (usbTime !== null && localTime !== null) return usbTime > localTime ? "usb" : "local";
+  if (usbTime !== null) return "usb";
+  return "local";
+}
+
+function mergeVersionedPage(basePage, localPage, usbPage, fallbackTitle, options = {}) {
+  const source = chooseMergedPageSource(basePage, localPage, usbPage, fallbackTitle);
+  const chosen = source === "usb" ? usbPage : localPage || usbPage || basePage;
+  if (!chosen) return null;
+
+  const page = clonePage(chosen);
+  const identityPage = localPage || basePage || usbPage || chosen;
+  page.id = options.fixedId || identityPage.id || chosen.id || id("page");
+  page.createdAt = earliestIsoDate(localPage?.createdAt, usbPage?.createdAt, basePage?.createdAt, chosen.createdAt);
+  page.updatedAt = chosen.updatedAt || chosen.createdAt || nowIso();
+  page.versionHistory = mergeHistoryEntries([
+    historyWithCurrentPage(basePage, fallbackTitle),
+    historyWithCurrentPage(localPage, fallbackTitle),
+    historyWithCurrentPage(usbPage, fallbackTitle),
+    historyWithCurrentPage(chosen, fallbackTitle)
+  ]);
+
+  const normalizedPage = normalizePage(page, {
+    id: page.id,
+    title: fallbackTitle,
+    createdAt: page.createdAt,
+    updatedAt: page.updatedAt,
+    content: ""
+  });
+  normalizedPage.versionHistory = page.versionHistory;
+
+  return {
+    page: normalizedPage,
+    source
+  };
+}
+
+function mergePlainPage(basePage, localPage, usbPage, fallbackTitle, options = {}) {
+  const source = chooseMergedPageSource(basePage, localPage, usbPage, fallbackTitle);
+  const chosen = source === "usb" ? usbPage : localPage || usbPage || basePage;
+  if (!chosen) return null;
+
+  const page = clonePage(chosen);
+  const identityPage = localPage || basePage || usbPage || chosen;
+  page.id = options.fixedId || identityPage.id || chosen.id || id("page");
+  page.createdAt = earliestIsoDate(localPage?.createdAt, usbPage?.createdAt, basePage?.createdAt, chosen.createdAt);
+  page.updatedAt = chosen.updatedAt || chosen.createdAt || nowIso();
+  return normalizePage(page, {
+    id: page.id,
+    title: fallbackTitle,
+    createdAt: page.createdAt,
+    updatedAt: page.updatedAt,
+    content: ""
+  });
+}
+
+function mergeDraftAtIndex(baseDraft, localDraft, usbDraft, index, summary) {
+  if (!baseDraft && !localDraft && !usbDraft) return null;
+
+  const fallbackTitle = localDraft?.title || usbDraft?.title || baseDraft?.title || `Draft ${index + 1}`;
+  const mergedDraft = mergeVersionedPage(baseDraft, localDraft, usbDraft, fallbackTitle);
+  if (!mergedDraft?.page) return null;
+
+  const draft = mergedDraft.page;
+  draft.id = localDraft?.id || baseDraft?.id || usbDraft?.id || draft.id || id("draft");
+  draft.notes = mergePlainPage(
+    baseDraft?.notes,
+    localDraft?.notes,
+    usbDraft?.notes,
+    `${draft.title || fallbackTitle} Notes`,
+    { fixedId: localDraft?.notes?.id || baseDraft?.notes?.id || usbDraft?.notes?.id || id("notes") }
+  ) || {
+    id: localDraft?.notes?.id || baseDraft?.notes?.id || usbDraft?.notes?.id || id("notes"),
+    title: `${draft.title || fallbackTitle} Notes`,
+    createdAt: draft.createdAt,
+    updatedAt: draft.updatedAt,
+    content: "",
+    contentHtml: "",
+    format: { ...normalizeFormat(draft.format || {}) }
+  };
+  draft.notes.title = `${draft.title || fallbackTitle} Notes`;
+
+  if (mergedDraft.source === "usb") summary.currentFromUsb.push(index + 1);
+  if (mergedDraft.source === "local") summary.currentFromLocal.push(index + 1);
+  if (!localDraft && usbDraft) summary.addedFromUsb.push(index + 1);
+  if (localDraft && !usbDraft && !baseDraft) summary.addedFromLocal.push(index + 1);
+
+  const localChanged = pageChangedFromBase(baseDraft, localDraft, fallbackTitle);
+  const usbChanged = pageChangedFromBase(baseDraft, usbDraft, fallbackTitle);
+  if (localDraft && usbDraft && localChanged && usbChanged && pageCurrentSignature(localDraft, fallbackTitle) !== pageCurrentSignature(usbDraft, fallbackTitle)) {
+    summary.conflictedDrafts.push(index + 1);
+    if (mergedDraft.source === "usb") summary.localDraftsArchived.push(index + 1);
+    if (mergedDraft.source === "local") summary.usbDraftsArchived.push(index + 1);
+  }
+
+  return draft;
+}
+
+function mergeUsbTransferStates(baselineState, localState, usbState) {
+  const base = baselineState ? normalizeState(baselineState) : null;
+  const local = localState ? normalizeState(localState) : null;
+  const usb = usbState ? normalizeState(usbState) : null;
+  const source = local || usb || base || defaultState();
+  const summary = {
+    currentFromUsb: [],
+    currentFromLocal: [],
+    addedFromUsb: [],
+    addedFromLocal: [],
+    conflictedDrafts: [],
+    localDraftsArchived: [],
+    usbDraftsArchived: []
+  };
+
+  const projectNotes = mergeVersionedPage(
+    base?.initialNotes,
+    local?.initialNotes,
+    usb?.initialNotes,
+    PROJECT_NOTES_TITLE,
+    { fixedId: "initial-notes" }
+  );
+  if (projectNotes?.source === "usb") summary.projectNotesCurrent = "usb";
+  if (projectNotes?.source === "local") summary.projectNotesCurrent = "local";
+
+  const maxDrafts = Math.max(
+    base?.drafts?.length || 0,
+    local?.drafts?.length || 0,
+    usb?.drafts?.length || 0
+  );
+  const drafts = [];
+  for (let index = 0; index < maxDrafts; index += 1) {
+    const draft = mergeDraftAtIndex(
+      base?.drafts?.[index] || null,
+      local?.drafts?.[index] || null,
+      usb?.drafts?.[index] || null,
+      index,
+      summary
+    );
+    if (draft) drafts.push(draft);
+  }
+
+  const merged = normalizeState({
+    version: 1,
+    formatDefaultVersion: FORMAT_DEFAULT_VERSION,
+    defaultFormat: currentDefaultFormat(source),
+    createdAt: source.createdAt || nowIso(),
+    updatedAt: nowIso(),
+    viewState: local?.viewState || source.viewState || null,
+    initialNotes: projectNotes?.page || source.initialNotes || defaultState().initialNotes,
+    drafts: drafts.length ? drafts : source.drafts
+  });
+
+  return { state: merged, summary };
+}
+
+function mergeUsbTransferPackage(review) {
+  const baselineState = baselineStateFromManifest(review.manifest);
+  const localState = localTransferState(review);
+  const usbState = transferPackageState(review, baselineState);
+  return mergeUsbTransferStates(baselineState, localState, usbState);
+}
+
+function pageReviewSignature(page, fallbackTitle) {
+  if (!page) return "";
+
+  return JSON.stringify({
+    current: pageCurrentSignature(page, fallbackTitle),
+    history: historyWithCurrentPage(page, fallbackTitle)
+      .map(version => versionHistorySignature(version))
+      .sort((left, right) => left.localeCompare(right))
+  });
+}
+
+function pageChangedFromBaseForReview(basePage, page, fallbackTitle) {
+  if (!basePage && !page) return false;
+  if (!basePage || !page) return true;
+  return pageReviewSignature(basePage, fallbackTitle) !== pageReviewSignature(page, fallbackTitle);
+}
+
+function pageReviewWordCount(page) {
+  return wordCountForText(pagePlainText(page));
+}
+
+function createMergeReviewEntry(type, number, basePage, localPage, usbPage, fallbackTitle) {
+  const localChanged = pageChangedFromBaseForReview(basePage, localPage, fallbackTitle);
+  const usbChanged = pageChangedFromBaseForReview(basePage, usbPage, fallbackTitle);
+  if (!localChanged && !usbChanged) return null;
+
+  const localCurrentSignature = pageCurrentSignature(localPage, fallbackTitle);
+  const usbCurrentSignature = pageCurrentSignature(usbPage, fallbackTitle);
+  const currentSource = chooseMergedPageSource(basePage, localPage, usbPage, fallbackTitle);
+  const bothChanged = localChanged && usbChanged;
+
+  return {
+    type,
+    number,
+    title: fallbackTitle,
+    localChanged,
+    usbChanged,
+    bothChanged,
+    conflict: bothChanged && Boolean(localCurrentSignature && usbCurrentSignature && localCurrentSignature !== usbCurrentSignature),
+    currentSource,
+    baseWordCount: pageReviewWordCount(basePage),
+    localWordCount: pageReviewWordCount(localPage),
+    usbWordCount: pageReviewWordCount(usbPage)
+  };
+}
+
+function createUsbTransferMergeReview(review) {
+  const empty = {
+    status: "unknown",
+    counts: {
+      usbOnly: 0,
+      localOnly: 0,
+      bothChanged: 0,
+      conflicts: 0,
+      unchanged: 0
+    },
+    usbOnly: [],
+    localOnly: [],
+    bothChanged: []
+  };
+  const baselineState = baselineStateFromManifest(review.manifest);
+  if (!baselineState) {
+    return {
+      ...empty,
+      reason: "This transfer package was created before story-level merge review was available."
+    };
+  }
+
+  try {
+    const base = normalizeState(baselineState);
+    const local = localTransferState(review);
+    const usb = transferPackageState(review, base);
+    const entries = [];
+    const projectNotesEntry = createMergeReviewEntry(
+      "projectNotes",
+      null,
+      base.initialNotes,
+      local.initialNotes,
+      usb.initialNotes,
+      PROJECT_NOTES_TITLE
+    );
+    if (projectNotesEntry) entries.push(projectNotesEntry);
+
+    const maxDrafts = Math.max(
+      base.drafts?.length || 0,
+      local.drafts?.length || 0,
+      usb.drafts?.length || 0
+    );
+    for (let index = 0; index < maxDrafts; index += 1) {
+      const baseDraft = base.drafts?.[index] || null;
+      const localDraft = local.drafts?.[index] || null;
+      const usbDraft = usb.drafts?.[index] || null;
+      const title = localDraft?.title || usbDraft?.title || baseDraft?.title || `Draft ${index + 1}`;
+      const draftEntry = createMergeReviewEntry(
+        "draft",
+        index + 1,
+        baseDraft,
+        localDraft,
+        usbDraft,
+        title
+      );
+      if (draftEntry) entries.push(draftEntry);
+
+      const notesEntry = createMergeReviewEntry(
+        "draftNotes",
+        index + 1,
+        baseDraft?.notes,
+        localDraft?.notes,
+        usbDraft?.notes,
+        `${title} Notes`
+      );
+      if (notesEntry) entries.push(notesEntry);
+    }
+
+    const usbOnly = entries.filter(entry => entry.usbChanged && !entry.localChanged);
+    const localOnly = entries.filter(entry => entry.localChanged && !entry.usbChanged);
+    const bothChanged = entries.filter(entry => entry.localChanged && entry.usbChanged);
+    const usbChangedCount = usbOnly.length + bothChanged.length;
+    const localChangedCount = localOnly.length + bothChanged.length;
+    const status = !usbChangedCount && !localChangedCount
+      ? "no-changes"
+      : usbChangedCount && !localChangedCount
+        ? "usb-only"
+        : localChangedCount && !usbChangedCount
+          ? "local-only"
+          : "both-changed";
+
+    return {
+      status,
+      counts: {
+        usbOnly: usbOnly.length,
+        localOnly: localOnly.length,
+        bothChanged: bothChanged.length,
+        conflicts: bothChanged.filter(entry => entry.conflict).length,
+        unchanged: Math.max(0, (maxDrafts * 2) + 1 - entries.length)
+      },
+      usbOnly,
+      localOnly,
+      bothChanged
+    };
+  } catch (error) {
+    return {
+      ...empty,
+      reason: error?.message || "Story-level merge review could not be prepared."
+    };
+  }
+}
+
+function applyUsbTransferFolder(folderPath) {
+  const review = reviewUsbTransferFolder(folderPath);
+  validateTransferPackageItems(review.manifest, review.packageFolderPath);
+  const backup = createUsbTransferImportBackup(review);
+
+  const { state: mergedState, summary: mergeSummary } = mergeUsbTransferPackage(review);
+  const storyItem = transferStoryItem(review);
+  const backupItem = transferBackupItem(review);
+  const storyPath = storyItem?.sourcePath ? path.resolve(storyItem.sourcePath) : "";
+  const importedBackupFolderPath = backupItem?.sourcePath ? path.resolve(backupItem.sourcePath) : "";
+  if (storyPath) writeTextFileLink(storyPath);
+  if (importedBackupFolderPath) writeVersionHistoryFolderPath(importedBackupFolderPath);
+
+  const fileName = storyPath ? path.basename(storyPath) : review.manifest?.source?.fileName || "draft-history.txt";
+  const savedState = writeAll(mergedState, {
+    filePath: storyPath,
+    fileName,
+    allowLinkedTextFileFailure: true
+  });
+  return {
+    ok: true,
+    imported: true,
+    backup,
+    merge: mergeSummary,
+    packageFolderPath: review.packageFolderPath,
+    filePath: storyPath,
+    fileName,
+    text: formatExport(savedState),
+    ...statePathPayload({ filePath: storyPath, fileName })
+  };
+}
+
+async function chooseUsbTransferFolder(description) {
+  const initialDirectory = existingDirectory(readTextFileLink() || EXPORT_FILE);
+
+  if (process.platform === "win32") {
+    return runPowerShell(windowsFolderDialogCommand(initialDirectory, description));
+  }
+
+  throw new Error("USB transfer folder selection is only available in the desktop Windows dialog right now.");
+}
+
+async function exportUsbTransferFromRequestBody(body) {
+  const payload = parseStatePayload(body);
+  const folderPath = await chooseUsbTransferFolder("Select the USB drive or transfer folder");
+  if (!folderPath) return { ok: false, cancelled: true };
+  return createUsbTransferPackage(payload, folderPath);
+}
+
+async function reviewUsbTransferFromRequestBody() {
+  const folderPath = await chooseUsbTransferFolder("Select the returned DraftDiff USB transfer folder");
+  if (!folderPath) return { ok: false, cancelled: true };
+  return reviewUsbTransferFolder(folderPath);
+}
+
+function importUsbTransferFromRequestBody(body) {
+  const payload = body ? JSON.parse(body) : {};
+  const folderPath = asText(payload.packageFolderPath);
+  if (!folderPath) {
+    throw new Error("Missing USB transfer package folder.");
+  }
+  return applyUsbTransferFolder(folderPath);
+}
+
 function projectRecoveryNotice(error, backupPath) {
   return {
     type: "corrupt-project-json",
@@ -3108,7 +4629,8 @@ function saveStateFromRequestBody(body) {
   const payload = parseStatePayload(body);
   const state = writeAll(payload.state, {
     filePath: payload.filePath,
-    fileName: payload.fileName
+    fileName: payload.fileName,
+    allowLinkedTextFileFailure: true
   });
   return {
     ok: true,
@@ -3510,7 +5032,8 @@ async function handleApi(req, res, pathname) {
     const payload = parseStatePayload(body);
     const state = writeAll(payload.state, {
       filePath: payload.filePath,
-      fileName: payload.fileName
+      fileName: payload.fileName,
+      allowLinkedTextFileFailure: true
     });
     sendJson(res, 200, {
       ok: true,
@@ -3532,7 +5055,9 @@ async function handleApi(req, res, pathname) {
       return;
     }
 
-    const savedState = writeAll(state);
+    const savedState = writeAll(state, {
+      allowLinkedTextFileFailure: true
+    });
     sendJson(res, 200, {
       ok: true,
       state: savedState,
@@ -3553,7 +5078,9 @@ async function handleApi(req, res, pathname) {
       return;
     }
 
-    const savedState = writeAll(state);
+    const savedState = writeAll(state, {
+      allowLinkedTextFileFailure: true
+    });
     sendJson(res, 200, {
       ok: true,
       state: savedState,
@@ -3819,6 +5346,29 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/usb-transfer/export") {
+    markClientActive();
+    const body = await readBody(req);
+    const result = await exportUsbTransferFromRequestBody(body);
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/usb-transfer/review") {
+    markClientActive();
+    const result = await reviewUsbTransferFromRequestBody();
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/usb-transfer/import") {
+    markClientActive();
+    const body = await readBody(req);
+    const result = importUsbTransferFromRequestBody(body);
+    sendJson(res, 200, result);
+    return;
+  }
+
   sendJson(res, 404, { error: "Not found" });
 }
 
@@ -3966,6 +5516,9 @@ module.exports = {
   openTextFileFromDialog,
   recentTextFilesPayload,
   openRecentTextFileFromRequestBody,
+  exportUsbTransferFromRequestBody,
+  reviewUsbTransferFromRequestBody,
+  importUsbTransferFromRequestBody,
   writeBackupFromRequestBody,
   saveStateFromRequestBody,
   writeStateFromRequestBody,
@@ -3979,6 +5532,10 @@ module.exports = {
     recoverPersistenceTransaction,
     writeAll,
     writeTextFileLink,
-    writeVersionHistoryFolderPath
+    writeVersionHistoryFolderPath,
+    createUsbTransferPackage,
+    reviewUsbTransferFolder,
+    applyUsbTransferFolder,
+    storySummaryFromTransferFiles
   }
 };

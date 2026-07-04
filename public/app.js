@@ -23,6 +23,8 @@ const els = {
   fileVersionHistoryFolder: document.querySelector("#file-version-history-folder"),
   fileActivateBackup: document.querySelector("#file-activate-backup"),
   fileGenerateHistorySummary: document.querySelector("#file-generate-history-summary"),
+  fileUsbExport: document.querySelector("#file-usb-export"),
+  fileUsbReview: document.querySelector("#file-usb-review"),
   fileClose: document.querySelector("#file-close"),
   editUndo: document.querySelector("#edit-undo"),
   editRedo: document.querySelector("#edit-redo"),
@@ -69,7 +71,13 @@ const els = {
   summaryProgressActions: document.querySelector("#summary-progress-actions"),
   summaryProgressOpen: document.querySelector("#summary-progress-open"),
   summaryProgressReveal: document.querySelector("#summary-progress-reveal"),
-  summaryProgressClose: document.querySelector("#summary-progress-close")
+  summaryProgressClose: document.querySelector("#summary-progress-close"),
+  transferReviewOverlay: document.querySelector("#transfer-review-overlay"),
+  transferReviewTitle: document.querySelector("#transfer-review-title"),
+  transferReviewContent: document.querySelector("#transfer-review-content"),
+  transferReviewClose: document.querySelector("#transfer-review-close"),
+  transferImportCancel: document.querySelector("#transfer-import-cancel"),
+  transferImportProceed: document.querySelector("#transfer-import-proceed")
 };
 
 const STORY_KEY = StateCore.STORY_KEY;
@@ -96,6 +104,7 @@ const DIFF_PROGRESS_FRAME_DELAY_MS = 0;
 const DIFF_BLOCK_CACHE_LIMIT = 160;
 const DIFF_RESULT_CACHE_LIMIT = 80;
 const DIFF_RESULT_MAX_CACHE_PARTS = 20000;
+const LINKED_TEXT_BLOCKED_STATUS = "Project saved locally";
 
 let state = null;
 let selectedDraftId = null;
@@ -121,6 +130,8 @@ let saveRetryCount = 0;
 let isClosingApp = false;
 let summaryProgressTimer = null;
 let latestSummaryReportPath = "";
+let latestTransferReview = null;
+let suppressLinkedTextBlockedStatusUntil = 0;
 let viewStateSaveTimer = null;
 let isSavingViewState = false;
 let viewStateSaveQueued = false;
@@ -867,7 +878,25 @@ function stopRecentSubmenuTracking() {
   document.removeEventListener("wheel", handleRecentSubmenuWheel);
 }
 
+function isLinkedTextBlockedStatus(value) {
+  const text = String(value || "").trim().toLowerCase();
+  return text === LINKED_TEXT_BLOCKED_STATUS.toLowerCase()
+    || text === "saved locally; linked text file blocked";
+}
+
+function suppressLinkedTextBlockedStatus(ms = 8000) {
+  suppressLinkedTextBlockedStatusUntil = Math.max(
+    suppressLinkedTextBlockedStatusUntil,
+    Date.now() + ms
+  );
+}
+
+function shouldSuppressLinkedTextBlockedStatus(value) {
+  return isLinkedTextBlockedStatus(value) && Date.now() < suppressLinkedTextBlockedStatusUntil;
+}
+
 function setStatus(text) {
+  if (shouldSuppressLinkedTextBlockedStatus(text)) return;
   const statusText = String(text || "").replace(/^Saved\s+/, "Saved · ");
   const statusTextEl = els.saveStatus.querySelector(".status-text");
   if (statusTextEl) {
@@ -6634,8 +6663,17 @@ function isAbortError(error) {
 
 function readableSaveFailure(message = "") {
   const text = String(message || "");
-  if (/linked text file write failed|EACCES|EPERM|access is denied|denied/i.test(text)) {
-    return "Save failed: linked text file blocked";
+  if (/^project saved locally$/i.test(text) || /^saved locally; linked text file blocked$/i.test(text)) {
+    return LINKED_TEXT_BLOCKED_STATUS;
+  }
+  if (/^save failed:\s*/i.test(text)) {
+    return text.replace(/^save failed:\s*/i, "Save failed: ");
+  }
+  if (/linked text file write failed/i.test(text)) {
+    return LINKED_TEXT_BLOCKED_STATUS;
+  }
+  if (/EACCES|EPERM|access is denied|denied/i.test(text)) {
+    return "Save failed: access denied";
   }
   if (/backup folder missing/i.test(text)) {
     return "Save paused: backup folder missing";
@@ -6647,6 +6685,17 @@ function readableSaveFailure(message = "") {
     return "Save failed: local server unavailable";
   }
   return text ? `Save failed: ${text.slice(0, 90)}` : "Save failed";
+}
+
+function readableUsbExportFailure(message = "") {
+  const text = String(message || "");
+  if (/EACCES|EPERM|access is denied|denied/i.test(text)) {
+    return "USB export failed: access denied";
+  }
+  if (/backup folder missing/i.test(text)) {
+    return "USB export failed: backup folder missing";
+  }
+  return text ? `USB export failed: ${text.slice(0, 90)}` : "USB export failed";
 }
 
 async function responseSaveFailure(response) {
@@ -6673,6 +6722,12 @@ function handleSaveFailure(failure) {
   const message = typeof failure === "object" && failure
     ? failure.message
     : failure;
+  if (isLinkedTextBlockedStatus(message)) {
+    isSaving = false;
+    saveRetryCount = 0;
+    setStatus(message);
+    return;
+  }
   const retry = !(typeof failure === "object" && failure && failure.retry === false);
   isSaving = false;
   if (retry && saveRetryCount < MAX_SAVE_RETRIES) {
@@ -7378,6 +7433,469 @@ async function generateVersionHistorySummary() {
   }
 }
 
+function countLabel(count, singular, plural = `${singular}s`) {
+  const value = Number(count) || 0;
+  return `${value.toLocaleString("en-GB")} ${value === 1 ? singular : plural}`;
+}
+
+function wordCountText(value) {
+  return countLabel(value, "word");
+}
+
+function versionCountText(value) {
+  return countLabel(value, "saved version");
+}
+
+function wordCountChangeText(previous, next) {
+  return `${Number(previous || 0).toLocaleString("en-GB")} -> ${Number(next || 0).toLocaleString("en-GB")} words`;
+}
+
+function renderTransferEntryList(entries = []) {
+  if (!entries.length) return '<p class="transfer-review-empty">None</p>';
+
+  return `
+    <ul class="transfer-review-list">
+      ${entries.slice(0, 80).map(entry => `
+        <li>
+          <span class="transfer-review-path">${escapeHtml(entry.displayPath || entry.relativePath || entry.itemId || "File")}</span>
+          <span class="transfer-review-status">${escapeHtml(entry.statusLabel || entry.status || "")}</span>
+        </li>
+      `).join("")}
+    </ul>
+    ${entries.length > 80 ? `<p class="transfer-review-more">${countLabel(entries.length - 80, "more file")}</p>` : ""}
+  `;
+}
+
+function renderTransferFileGroup(title, entries = []) {
+  return `
+    <section class="transfer-review-section">
+      <h3>${escapeHtml(title)} <span>${entries.length.toLocaleString("en-GB")}</span></h3>
+      ${renderTransferEntryList(entries)}
+    </section>
+  `;
+}
+
+function transferShortPath(entry = {}) {
+  if (entry.role === "storyText") return fileNameFromPath(entry.displayPath) || "Story text file";
+  const relativePath = entry.relativePath || "";
+  if (relativePath) return relativePath;
+  return fileNameFromPath(entry.displayPath) || entry.itemId || "File";
+}
+
+function renderTransferBriefList(entries = [], emptyText = "Nothing to check.") {
+  if (!entries.length) return `<p class="transfer-review-empty">${escapeHtml(emptyText)}</p>`;
+
+  return `
+    <ul class="transfer-review-brief-list">
+      ${entries.slice(0, 8).map(entry => `
+        <li>
+          <span>${escapeHtml(transferShortPath(entry))}</span>
+          <em>${escapeHtml(entry.statusLabel || entry.status || "")}</em>
+        </li>
+      `).join("")}
+    </ul>
+    ${entries.length > 8 ? `<p class="transfer-review-more">${countLabel(entries.length - 8, "more item")}</p>` : ""}
+  `;
+}
+
+function renderTransferDraftList(drafts = [], type) {
+  if (!drafts.length) return '<p class="transfer-review-empty">None</p>';
+
+  return `
+    <ul class="transfer-review-list">
+      ${drafts.map(draft => {
+        const number = Number(draft.number || 0);
+        const title = type === "notes"
+          ? `Draft ${number} Notes`
+          : `Draft ${number}: ${draft.title || "Untitled draft"}`;
+        const meta = type === "added"
+          ? `${wordCountText(draft.wordCount)}, ${versionCountText(draft.versionCount)}`
+          : type === "removed"
+            ? `${wordCountText(draft.wordCount)}, ${versionCountText(draft.versionCount)}`
+          : type === "notes"
+            ? wordCountChangeText(draft.previousWordCount, draft.wordCount)
+            : `${wordCountChangeText(draft.previousWordCount, draft.wordCount)}, ${countLabel(draft.newVersions, "new saved version")} (${versionCountText(draft.versionCount)} total)`;
+        return `
+          <li>
+            <span class="transfer-review-path">${escapeHtml(title)}</span>
+            <span class="transfer-review-status">${escapeHtml(meta)}</span>
+          </li>
+        `;
+      }).join("")}
+    </ul>
+  `;
+}
+
+function transferStoryChangeCount(story = {}) {
+  return Number(Boolean(story.projectNotes?.changed))
+    + Number(story.addedDrafts?.length || 0)
+    + Number(story.removedDrafts?.length || 0)
+    + Number(story.changedDrafts?.length || 0)
+    + Number(story.changedDraftNotes?.length || 0);
+}
+
+function renderTransferStoryLines(story = {}) {
+  const project = story.projectNotes || {};
+  const projectChanged = Boolean(project.changed);
+  const lines = [];
+
+  if (projectChanged) {
+    lines.push({
+      title: "Project notes changed",
+      detail: `${wordCountChangeText(project.previousWordCount, project.wordCount)}, ${countLabel(project.newVersions, "new saved version")}`
+    });
+  }
+
+  (story.addedDrafts || []).forEach(draft => {
+    lines.push({
+      title: `Draft ${Number(draft.number || 0)} added`,
+      detail: `${wordCountText(draft.wordCount)}, ${versionCountText(draft.versionCount)}`
+    });
+  });
+
+  (story.changedDrafts || []).forEach(draft => {
+    lines.push({
+      title: `Draft ${Number(draft.number || 0)} changed`,
+      detail: `${wordCountChangeText(draft.previousWordCount, draft.wordCount)}, ${countLabel(draft.newVersions, "new saved version")}`
+    });
+  });
+
+  (story.changedDraftNotes || []).forEach(notes => {
+    lines.push({
+      title: `Draft ${Number(notes.number || 0)} notes changed`,
+      detail: wordCountChangeText(notes.previousWordCount, notes.wordCount)
+    });
+  });
+
+  (story.removedDrafts || []).forEach(draft => {
+    lines.push({
+      title: `Draft ${Number(draft.number || 0)} removed from USB copy`,
+      detail: `${wordCountText(draft.wordCount)}, ${versionCountText(draft.versionCount)}`
+    });
+  });
+
+  if (!lines.length) return '<p class="transfer-review-empty">No story changes detected in the USB copy.</p>';
+
+  return `
+    <ul class="transfer-review-plain-list">
+      ${lines.slice(0, 14).map(line => `
+        <li>
+          <strong>${escapeHtml(line.title)}</strong>
+          <span>${escapeHtml(line.detail)}</span>
+        </li>
+      `).join("")}
+    </ul>
+    ${lines.length > 14 ? `<p class="transfer-review-more">${countLabel(lines.length - 14, "more story change")}</p>` : ""}
+  `;
+}
+
+function transferMergeVerdict(merge = {}) {
+  if (merge.status === "no-changes") {
+    return {
+      title: "No story changes found",
+      body: "The USB copy and this computer both match the version that was exported.",
+      ready: true
+    };
+  }
+  if (merge.status === "usb-only") {
+    return {
+      title: "Only the USB copy changed",
+      body: "Proceed will back up this computer first, then bring in the USB story changes and saved versions.",
+      ready: true
+    };
+  }
+  if (merge.status === "local-only") {
+    return {
+      title: "Only this computer changed",
+      body: "The USB copy has no newer story changes. Proceed will keep this computer's story current and preserve the backup.",
+      ready: true
+    };
+  }
+  if (merge.status === "both-changed") {
+    return {
+      title: "Both copies changed; merge needed",
+      body: "Proceed will merge the USB story with this computer. For the same draft, the newest copy stays current and the older copy is saved in version history.",
+      ready: false
+    };
+  }
+  return {
+    title: "Story merge review unavailable",
+    body: merge.reason || "DraftDiff could not prepare the story-level merge summary for this transfer package.",
+    ready: false
+  };
+}
+
+function transferMergeEntryLabel(entry = {}) {
+  if (entry.type === "projectNotes") return "Project notes";
+  if (entry.type === "draftNotes") return `Draft ${Number(entry.number || 0)} notes`;
+  if (entry.type === "draft") return `Draft ${Number(entry.number || 0)}: ${entry.title || "Untitled draft"}`;
+  return entry.title || "Story item";
+}
+
+function transferMergeSourceLabel(source) {
+  if (source === "usb") return "USB copy";
+  if (source === "local") return "this computer";
+  return "newest copy";
+}
+
+function renderTransferMergeList(title, entries = [], mode) {
+  if (!entries.length) return "";
+
+  return `
+    <h4>${escapeHtml(title)}</h4>
+    <ul class="transfer-review-plain-list">
+      ${entries.map(entry => {
+        const detail = mode === "both"
+          ? `${transferMergeSourceLabel(entry.currentSource)} stays current${entry.conflict ? "; the other copy is saved as a version" : ""}. USB: ${wordCountText(entry.usbWordCount)}. This computer: ${wordCountText(entry.localWordCount)}.`
+          : mode === "usb"
+            ? `USB: ${wordCountText(entry.usbWordCount)}. This computer matches the exported copy.`
+            : `This computer: ${wordCountText(entry.localWordCount)}. USB matches the exported copy.`;
+        return `
+          <li>
+            <strong>${escapeHtml(transferMergeEntryLabel(entry))}</strong>
+            <span>${escapeHtml(detail)}</span>
+          </li>
+        `;
+      }).join("")}
+    </ul>
+  `;
+}
+
+function renderTransferMergeReview(merge = {}) {
+  if (merge.status === "unknown") {
+    return `<p class="transfer-review-empty">${escapeHtml(merge.reason || "Story-level merge review is unavailable for this package.")}</p>`;
+  }
+  if (merge.status === "no-changes") {
+    return '<p class="transfer-review-empty">No project notes, drafts, draft notes, or saved draft versions changed on either side.</p>';
+  }
+
+  return `
+    ${renderTransferMergeList("Changed only on USB", merge.usbOnly || [], "usb")}
+    ${renderTransferMergeList("Changed only on this computer", merge.localOnly || [], "local")}
+    ${renderTransferMergeList("Changed on both; will be merged", merge.bothChanged || [], "both")}
+  `;
+}
+
+function renderTransferReview(payload) {
+  if (!els.transferReviewOverlay || !els.transferReviewContent) return;
+
+  latestTransferReview = payload;
+  const files = payload.files || {};
+  const merge = payload.merge || {};
+  const mergeVerdict = transferMergeVerdict(merge);
+  const counts = files.counts || {};
+  const needsReviewCount = Number(counts.conflicts || 0)
+    + Number(counts.localOnlyChanges || 0)
+    + Number(counts.localAdded || 0)
+    + Number(counts.usbDeleted || 0)
+    + Number(counts.localDeleted || 0);
+  const localChangedEntries = [
+    ...(files.conflicts || []),
+    ...(files.localOnlyChanges || []),
+    ...(files.localAdded || []),
+    ...(files.localDeleted || [])
+  ];
+  const usbDeleteEntries = files.usbDeleted || [];
+  const storyChangeCount = transferStoryChangeCount(payload.story || {});
+  const exportedAt = payload.manifest?.createdAt ? formatDate(payload.manifest.createdAt) : "";
+  if (els.transferReviewTitle) {
+    els.transferReviewTitle.textContent = mergeVerdict.title;
+  }
+
+  els.transferReviewContent.innerHTML = `
+    <section class="transfer-review-verdict ${mergeVerdict.ready ? "is-ready" : "needs-check"}">
+      <h3>${escapeHtml(mergeVerdict.title)}</h3>
+      <p>${escapeHtml(mergeVerdict.body)}</p>
+    </section>
+
+    <section class="transfer-review-simple-grid">
+      <div>
+        <span class="transfer-review-number">${Number(merge.counts?.usbOnly || 0).toLocaleString("en-GB")}</span>
+        <strong>USB-only change${Number(merge.counts?.usbOnly || 0) === 1 ? "" : "s"}</strong>
+        <p>Story areas changed on the USB copy but not on this computer.</p>
+      </div>
+      <div>
+        <span class="transfer-review-number">${Number(merge.counts?.localOnly || 0).toLocaleString("en-GB")}</span>
+        <strong>local-only change${Number(merge.counts?.localOnly || 0) === 1 ? "" : "s"}</strong>
+        <p>Story areas changed on this computer but not on the USB copy.</p>
+      </div>
+      <div>
+        <span class="transfer-review-number">${Number(merge.counts?.bothChanged || 0).toLocaleString("en-GB")}</span>
+        <strong>merge item${Number(merge.counts?.bothChanged || 0) === 1 ? "" : "s"}</strong>
+        <p>Story areas changed in both places and will be merged.</p>
+      </div>
+    </section>
+
+    <section class="transfer-review-section transfer-review-story">
+      <h3>Story merge review</h3>
+      ${renderTransferMergeReview(merge)}
+    </section>
+
+    <section class="transfer-review-section transfer-review-story">
+      <h3>USB story details${storyChangeCount ? ` (${storyChangeCount.toLocaleString("en-GB")})` : ""}</h3>
+      ${renderTransferStoryLines(payload.story || {})}
+    </section>
+
+    <section class="transfer-review-section">
+      <h3>Check before proceeding</h3>
+      ${localChangedEntries.length || usbDeleteEntries.length
+        ? `
+          ${localChangedEntries.length ? `<h4>Changed on this computer since export</h4>${renderTransferBriefList(localChangedEntries)}` : ""}
+          ${usbDeleteEntries.length ? `<h4>Deleted from USB copy</h4>${renderTransferBriefList(usbDeleteEntries)}` : ""}
+        `
+        : '<p class="transfer-review-empty">Nothing extra to check.</p>'}
+    </section>
+
+    <section class="transfer-review-section">
+      <h3>What Proceed to Import will do</h3>
+      <ul class="transfer-review-plain-list">
+        <li><strong>Back up this computer first</strong><span>The current story file and this story's matching history files are copied to a dated backup folder.</span></li>
+        <li><strong>Import only this story</strong><span>Other stories in the shared backup folder are left alone.</span></li>
+        <li><strong>Merge by newest draft</strong><span>If both computers changed the same draft, the newest copy stays current and the older copy is saved in that draft's version history.</span></li>
+      </ul>
+    </section>
+
+    <details class="transfer-review-technical">
+      <summary>Technical file details</summary>
+      <p class="transfer-review-meta">
+        ${escapeHtml(payload.packageFolderPath || "")}${exportedAt ? ` - exported ${escapeHtml(exportedAt)}` : ""}
+      </p>
+      <div class="transfer-review-columns">
+        ${renderTransferFileGroup("Conflicts", files.conflicts || [])}
+        ${renderTransferFileGroup("Added on USB", files.usbAdded || [])}
+        ${renderTransferFileGroup("Changed on USB", files.safeUpdates || [])}
+        ${renderTransferFileGroup("Added on this computer", files.localAdded || [])}
+        ${renderTransferFileGroup("Changed on this computer", files.localOnlyChanges || [])}
+        ${renderTransferFileGroup("Deleted on USB", files.usbDeleted || [])}
+        ${renderTransferFileGroup("Deleted on this computer", files.localDeleted || [])}
+        ${renderTransferFileGroup("Already matching", files.alreadyMatching || [])}
+      </div>
+    </details>
+  `;
+  if (els.transferImportProceed) els.transferImportProceed.disabled = !payload.packageFolderPath;
+  els.transferReviewOverlay.hidden = false;
+}
+
+function hideTransferReview() {
+  latestTransferReview = null;
+  if (els.transferReviewOverlay) els.transferReviewOverlay.hidden = true;
+  if (els.transferImportProceed) els.transferImportProceed.disabled = false;
+}
+
+function cancelTransferImport() {
+  hideTransferReview();
+  setStatus("USB import cancelled");
+}
+
+function importConfirmationText(review) {
+  const counts = review?.files?.counts || {};
+  const needsReviewCount = Number(counts.conflicts || 0)
+    + Number(counts.localOnlyChanges || 0)
+    + Number(counts.localAdded || 0)
+    + Number(counts.usbDeleted || 0)
+    + Number(counts.localDeleted || 0);
+  const conflictText = needsReviewCount
+    ? `\n\n${needsReviewCount.toLocaleString("en-GB")} item${needsReviewCount === 1 ? "" : "s"} need review.`
+    : "";
+  return `Proceed with this USB import?\n\nDraftDiff will back up the current files on this computer, then merge the USB story with the local story. Newest drafts stay current; older conflicting copies are saved in version history.${conflictText}`;
+}
+
+async function proceedTransferImport() {
+  if (!latestTransferReview?.packageFolderPath) return;
+  const review = latestTransferReview;
+  if (!window.confirm(importConfirmationText(review))) return;
+
+  if (els.transferImportProceed) els.transferImportProceed.disabled = true;
+  if (els.transferImportCancel) els.transferImportCancel.disabled = true;
+  setStatus("Importing USB transfer...");
+
+  try {
+    const response = await fetch("/api/usb-transfer/import", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ packageFolderPath: review.packageFolderPath })
+    });
+    if (!response.ok) throw new Error(await response.text());
+
+    const payload = await response.json();
+    if (!payload.ok) throw new Error(payload.error || "USB import failed");
+
+    updateStoragePathsFromPayload(payload);
+    linkedTextPath = payload.filePath || linkedTextPath || "";
+    await applyTextProject(payload.text || "", payload.fileName || projectFileName || "draft-history.txt", {
+      preserveFormatsFrom: null,
+      filePath: linkedTextPath
+    });
+    hideTransferReview();
+    setStatus(`USB import complete; backup saved to ${payload.backup?.backupFolderPath || "backup folder"}`);
+  } catch (error) {
+    console.error(error);
+    setStatus("USB import failed");
+    if (els.transferImportProceed) els.transferImportProceed.disabled = false;
+  } finally {
+    if (els.transferImportCancel) els.transferImportCancel.disabled = false;
+  }
+}
+
+async function exportUsbTransfer() {
+  closeFileMenu();
+  if (!state) return;
+
+  try {
+    suppressLinkedTextBlockedStatus(30000);
+    syncFromInputs();
+    saveCurrentViewState();
+    flushDraftVersionCaptures();
+    rememberLinkedProjectState();
+    window.clearTimeout(saveTimer);
+    setStatus("Choose USB transfer folder...");
+    const response = await fetch("/api/usb-transfer/export", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: prepareClosePayload({ skipSummary: true })
+    });
+    if (!response.ok) {
+      const failure = await responseSaveFailure(response);
+      throw new Error(typeof failure === "object" && failure ? failure.message : failure);
+    }
+
+    const payload = await response.json();
+    if (payload.cancelled) {
+      setStatus("USB export cancelled");
+      return;
+    }
+
+    suppressLinkedTextBlockedStatus(5000);
+    setStatus(`USB transfer exported: ${payload.packageFolderPath || "package created"}`);
+  } catch (error) {
+    console.error(error);
+    suppressLinkedTextBlockedStatusUntil = 0;
+    setStatus(readableUsbExportFailure(error?.message));
+  }
+}
+
+async function reviewUsbTransfer() {
+  closeFileMenu();
+
+  try {
+    setStatus("Choose returned USB transfer folder...");
+    const response = await fetch("/api/usb-transfer/review", { method: "POST" });
+    if (!response.ok) throw new Error(await response.text());
+
+    const payload = await response.json();
+    if (payload.cancelled) {
+      setStatus("USB review cancelled");
+      return;
+    }
+
+    renderTransferReview(payload);
+    setStatus("USB import review ready");
+  } catch (error) {
+    console.error(error);
+    setStatus("USB review failed");
+  }
+}
+
 async function closeApp() {
   closeFileMenu();
   window.clearTimeout(saveTimer);
@@ -8076,10 +8594,15 @@ els.fileSaveAs.addEventListener("click", () => saveAsTextProject());
 els.fileVersionHistoryFolder?.addEventListener("click", selectVersionHistoryFolder);
 els.fileActivateBackup?.addEventListener("click", toggleBackup);
 els.fileGenerateHistorySummary?.addEventListener("click", generateVersionHistorySummary);
+els.fileUsbExport?.addEventListener("click", exportUsbTransfer);
+els.fileUsbReview?.addEventListener("click", reviewUsbTransfer);
 els.fileClose.addEventListener("click", closeApp);
 els.summaryProgressOpen?.addEventListener("click", openGeneratedSummaryReport);
 els.summaryProgressReveal?.addEventListener("click", revealGeneratedSummaryReport);
 els.summaryProgressClose?.addEventListener("click", hideSummaryProgressOverlay);
+els.transferReviewClose?.addEventListener("click", hideTransferReview);
+els.transferImportCancel?.addEventListener("click", cancelTransferImport);
+els.transferImportProceed?.addEventListener("click", proceedTransferImport);
 els.editUndo.addEventListener("click", () => {
   undoProjectChange();
   closeTopMenus();

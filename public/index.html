@@ -38,6 +38,9 @@
               <button id="file-version-history-folder" type="button"><span class="menu-check" aria-hidden="true"></span><span>Backup folder</span><span class="menu-shortcut" aria-hidden="true"></span></button>
               <button id="file-generate-history-summary" type="button"><span class="menu-check" aria-hidden="true"></span><span>Generate version history summary</span><span class="menu-shortcut" aria-hidden="true"></span></button>
               <span class="menu-divider" aria-hidden="true"></span>
+              <button id="file-usb-export" type="button"><span class="menu-check" aria-hidden="true"></span><span>Export to USB</span><span class="menu-shortcut" aria-hidden="true"></span></button>
+              <button id="file-usb-review" type="button"><span class="menu-check" aria-hidden="true"></span><span>Review USB import</span><span class="menu-shortcut" aria-hidden="true"></span></button>
+              <span class="menu-divider" aria-hidden="true"></span>
               <button id="file-close" type="button"><span class="menu-check" aria-hidden="true"></span><span>Close</span><span class="menu-shortcut" data-shortcut="close">Ctrl+W</span></button>
             </div>
           </details>
@@ -207,6 +210,23 @@
           <button id="summary-progress-reveal" class="summary-progress-action" type="button">Open containing folder</button>
           <button id="summary-progress-close" class="summary-progress-action" type="button">Close</button>
         </div>
+      </div>
+    </section>
+
+    <section id="transfer-review-overlay" class="transfer-review-overlay" aria-label="USB import review" hidden>
+      <div class="transfer-review-panel">
+        <header class="transfer-review-header">
+          <div>
+            <p class="transfer-review-kicker">USB IMPORT REVIEW</p>
+            <h2 id="transfer-review-title">Transfer review</h2>
+          </div>
+          <button id="transfer-review-close" class="transfer-review-close" type="button">Close</button>
+        </header>
+        <div id="transfer-review-content" class="transfer-review-content"></div>
+        <footer class="transfer-review-actions">
+          <button id="transfer-import-cancel" class="transfer-review-action" type="button">Cancel import</button>
+          <button id="transfer-import-proceed" class="transfer-review-action transfer-review-primary" type="button">Proceed to Import</button>
+        </footer>
       </div>
     </section>
 
