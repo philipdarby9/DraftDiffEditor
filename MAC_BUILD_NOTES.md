@@ -1,6 +1,6 @@
 # macOS Build Notes
 
-Build macOS releases from the latest branch that includes the native macOS backup-folder picker fix. The fix is in `server.js`: `Backup folder`, `Activate backup`, and USB transfer folder selection must route through `chooseFolderWithNativeDialog`, which uses `osascript` on macOS.
+Build macOS releases from the latest branch that includes the native macOS picker fixes. The fixes are in `server.js`: `Open...` and `Save as...` must route through `chooseTextFileWithNativeDialog`, and `Backup folder`, `Activate backup`, and USB transfer folder selection must route through `chooseFolderWithNativeDialog`. These helpers use `osascript` on macOS.
 
 ## Prerequisites
 
@@ -55,16 +55,21 @@ Draft Diff Editor.app
 Applications
 ```
 
-To confirm the packaged app contains the mac backup-folder fix:
+To confirm the packaged app contains the mac picker fixes:
 
 ```sh
-node -e "const asar=require('@electron/asar'); const text=asar.extractFile('dist/mac/Draft Diff Editor.app/Contents/Resources/app.asar','server.js').toString(); console.log({hasMacDialog:text.includes('choose folder with prompt promptText default location initialFolder'),hasOldBackupError:text.includes('Backup folder selection is only available in the desktop Windows dialog right now.')});"
+node -e "const asar=require('@electron/asar'); const text=asar.extractFile('dist/mac/Draft Diff Editor.app/Contents/Resources/app.asar','server.js').toString(); console.log({hasMacFolderDialog:text.includes('choose folder with prompt promptText default location initialFolder'),hasMacOpenDialog:text.includes('choose file with prompt promptText default location initialFolder'),hasMacSaveDialog:text.includes('choose file name with prompt promptText default name initialName default location initialFolder'),hasOldBackupError:text.includes('Backup folder selection is only available in the desktop Windows dialog right now.')});"
 ```
 
 Expected result:
 
 ```text
-{ hasMacDialog: true, hasOldBackupError: false }
+{
+  hasMacFolderDialog: true,
+  hasMacOpenDialog: true,
+  hasMacSaveDialog: true,
+  hasOldBackupError: false
+}
 ```
 
 ## Manual DMG Fallback

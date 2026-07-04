@@ -16,6 +16,27 @@ const {
   __test
 } = require("../server");
 
+assert.deepEqual(__test.macOpenFileDialogScript(), [
+  "on run argv",
+  "set initialPath to item 1 of argv",
+  "set promptText to item 2 of argv",
+  "set initialFolder to POSIX file initialPath as alias",
+  "set selectedFile to choose file with prompt promptText default location initialFolder",
+  "return POSIX path of selectedFile",
+  "end run"
+]);
+
+assert.deepEqual(__test.macSaveFileDialogScript(), [
+  "on run argv",
+  "set initialPath to item 1 of argv",
+  "set initialName to item 2 of argv",
+  "set promptText to item 3 of argv",
+  "set initialFolder to POSIX file initialPath as alias",
+  "set selectedFile to choose file name with prompt promptText default name initialName default location initialFolder",
+  "return POSIX path of selectedFile",
+  "end run"
+]);
+
 assert.deepEqual(__test.macFolderDialogScript(), [
   "on run argv",
   "set initialPath to item 1 of argv",

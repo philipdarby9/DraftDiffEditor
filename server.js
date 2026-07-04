@@ -4912,18 +4912,55 @@ function windowsFileDialogCommand(dialogType, initialDirectory, initialFileName 
   ].join("; ");
 }
 
+function macOpenFileDialogScript() {
+  return [
+    "on run argv",
+    "set initialPath to item 1 of argv",
+    "set promptText to item 2 of argv",
+    "set initialFolder to POSIX file initialPath as alias",
+    "set selectedFile to choose file with prompt promptText default location initialFolder",
+    "return POSIX path of selectedFile",
+    "end run"
+  ];
+}
+
+function macSaveFileDialogScript() {
+  return [
+    "on run argv",
+    "set initialPath to item 1 of argv",
+    "set initialName to item 2 of argv",
+    "set promptText to item 3 of argv",
+    "set initialFolder to POSIX file initialPath as alias",
+    "set selectedFile to choose file name with prompt promptText default name initialName default location initialFolder",
+    "return POSIX path of selectedFile",
+    "end run"
+  ];
+}
+
+async function chooseTextFileWithNativeDialog(dialogType, initialDirectory, initialFileName = "") {
+  if (process.platform === "win32") {
+    return runPowerShell(windowsFileDialogCommand(dialogType, initialDirectory, initialFileName));
+  }
+
+  if (process.platform === "darwin") {
+    return dialogType === "save"
+      ? runOsascript(macSaveFileDialogScript(), [initialDirectory, initialFileName, "Save text file"])
+      : runOsascript(macOpenFileDialogScript(), [initialDirectory, "Open text file"]);
+  }
+
+  throw new Error("Text file selection is only available in the desktop app on Windows and macOS right now.");
+}
+
 async function chooseTextFileToOpen() {
   const initialDirectory = existingDirectory(readTextFileLink() || EXPORT_FILE);
-  const command = windowsFileDialogCommand("open", initialDirectory);
-  return runPowerShell(command);
+  return chooseTextFileWithNativeDialog("open", initialDirectory);
 }
 
 async function chooseTextFileToSave(suggestedName) {
   const linkedPath = readTextFileLink();
   const initialDirectory = existingDirectory(linkedPath || EXPORT_FILE);
   const initialFileName = path.basename(linkedPath || suggestedName || EXPORT_FILE);
-  const command = windowsFileDialogCommand("save", initialDirectory, initialFileName);
-  return runPowerShell(command);
+  return chooseTextFileWithNativeDialog("save", initialDirectory, initialFileName);
 }
 
 function windowsFolderDialogCommand(initialDirectory, description) {
@@ -5573,6 +5610,8 @@ module.exports = {
     writeAll,
     writeTextFileLink,
     writeVersionHistoryFolderPath,
+    macOpenFileDialogScript,
+    macSaveFileDialogScript,
     macFolderDialogScript,
     createUsbTransferPackage,
     reviewUsbTransferFolder,
