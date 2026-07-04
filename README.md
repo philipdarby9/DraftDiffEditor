@@ -74,6 +74,8 @@ npm run package:linux:deb
 
 This creates `dist/draft-diff-editor_0.1.0_amd64.deb`, which can be opened from the Linux file manager to install the app. Build this package from Linux/WSL; on Windows, Electron Builder needs the Linux `fpm` packaging tool and may fail with `spawn fpm ENOENT`.
 
+Before publishing a Linux build, follow `LINUX_BUILD_NOTES.md` to verify packaged text-file dialogs and folder pickers work for open/save, backup-folder selection, USB export, and USB import review.
+
 An AppImage target is also available:
 
 ```sh

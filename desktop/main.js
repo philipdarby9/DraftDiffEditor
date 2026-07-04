@@ -1,6 +1,6 @@
 const path = require("node:path");
 const fs = require("node:fs/promises");
-const { app, BrowserWindow, Menu, ipcMain, shell } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, shell, dialog } = require("electron");
 const nspell = require("nspell");
 
 let mainWindow = null;
@@ -288,6 +288,42 @@ function closePayloadWithOptions(body, options = {}) {
   }
 }
 
+async function openTextFileWithDesktopDialog() {
+  const result = await dialog.showOpenDialog(mainWindow || undefined, {
+    title: "Open text file",
+    defaultPath: app.getPath("documents"),
+    filters: [
+      { name: "Text files", extensions: ["txt"] },
+      { name: "All files", extensions: ["*"] }
+    ],
+    properties: ["openFile"]
+  });
+
+  if (result.canceled) return { ok: false, cancelled: true };
+  const [filePath] = result.filePaths || [];
+  if (!filePath) return { ok: false, cancelled: true };
+  const api = loadServerApi();
+  return api.openedTextFilePayload(filePath);
+}
+
+async function saveTextFileWithDesktopDialog(body) {
+  const api = loadServerApi();
+  const payload = api.parseStatePayload(String(body || ""));
+  const suggestedName = payload.fileName || "draft-history.txt";
+  const result = await dialog.showSaveDialog(mainWindow || undefined, {
+    title: "Save text file",
+    defaultPath: path.join(app.getPath("documents"), suggestedName),
+    filters: [
+      { name: "Text files", extensions: ["txt"] },
+      { name: "All files", extensions: ["*"] }
+    ]
+  });
+
+  if (result.canceled) return { ok: false, cancelled: true };
+  if (!result.filePath) return { ok: false, cancelled: true };
+  return api.saveTextFileToPath(result.filePath, String(body || ""));
+}
+
 async function createWindow() {
   const { startServer } = loadServerApi();
   serverHandle = await startServer({ port: 0, host: "127.0.0.1" });
@@ -451,10 +487,8 @@ app.whenReady()
     });
     ipcMain.handle("draft-diff:open-generated-report", (_event, reportPath) => openGeneratedReport(reportPath));
     ipcMain.handle("draft-diff:show-generated-report-in-folder", (_event, reportPath) => showGeneratedReportInFolder(reportPath));
-    ipcMain.handle("draft-diff:open-text-file", () => {
-      const api = loadServerApi();
-      return api.openTextFileFromDialog();
-    });
+    ipcMain.handle("draft-diff:open-text-file", () => openTextFileWithDesktopDialog());
+    ipcMain.handle("draft-diff:save-as-text-file", (_event, body) => saveTextFileWithDesktopDialog(String(body || "")));
     ipcMain.handle("draft-diff:recent-text-files", () => {
       const api = loadServerApi();
       return api.recentTextFilesPayload();

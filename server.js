@@ -442,10 +442,11 @@ function sameSnapshotContent(left, right) {
   return Boolean(left?.exists && right?.exists && asText(left.sha256) && left.sha256 === right.sha256);
 }
 
-function transferChangeStatus(baseline, usb, local) {
+function transferChangeStatus(baseline, usb, local, options = {}) {
   const baselineExists = Boolean(baseline?.exists);
   const usbExists = Boolean(usb?.exists);
   const localExists = Boolean(local?.exists);
+  const localRootExists = options.localRootExists !== false;
 
   if (!baselineExists) {
     if (usbExists && !localExists) return "usb-added";
@@ -459,7 +460,8 @@ function transferChangeStatus(baseline, usb, local) {
 
   if (!usbChanged && !localChanged) return "unchanged";
   if (usbChanged && !localChanged) return usb?.exists ? "safe-update" : "usb-deleted";
-  if (!usbChanged && localChanged) return local?.exists ? "local-only-change" : "local-deleted";
+  if (!usbChanged && localChanged) return local?.exists ? "local-only-change" : localRootExists ? "local-deleted" : "local-missing";
+  if (!localExists && !localRootExists && usbExists) return "local-missing";
   if (sameSnapshotContent(usb, local)) return "already-matching";
   return "conflict";
 }
@@ -472,6 +474,7 @@ function transferStatusLabel(status) {
     "usb-deleted": "Deleted on USB",
     "local-only-change": "Changed on this computer",
     "local-deleted": "Deleted on this computer",
+    "local-missing": "Not yet on this computer",
     "already-matching": "Already matching",
     conflict: "Conflict",
     unchanged: "Unchanged"
@@ -3497,8 +3500,8 @@ function transferItemDisplayPath(item, relativePath = "") {
     : item.sourcePath || item.label || item.id;
 }
 
-function compareTransferFileEntry(item, relativePath, baseline, usb, local) {
-  const status = transferChangeStatus(baseline, usb, local);
+function compareTransferFileEntry(item, relativePath, baseline, usb, local, options = {}) {
+  const status = transferChangeStatus(baseline, usb, local, options);
   return {
     itemId: item.id,
     role: item.role,
@@ -3515,17 +3518,20 @@ function compareTransferFileEntry(item, relativePath, baseline, usb, local) {
 
 function compareTransferFileItem(item, packageFolderPath) {
   const usbPath = pathFromPortable(packageFolderPath, item.packagePath);
+  const localRootExists = fs.existsSync(path.resolve(item.sourcePath || ""));
   return [compareTransferFileEntry(
     item,
     "",
     item.baseline,
     fileSnapshot(usbPath),
-    fileSnapshot(item.sourcePath)
+    fileSnapshot(item.sourcePath),
+    { localRootExists }
   )];
 }
 
 function compareTransferDirectoryItem(item, packageFolderPath) {
   const usbPath = pathFromPortable(packageFolderPath, item.packagePath);
+  const localRootExists = directoryExists(item.sourcePath);
   const baselineMap = snapshotByRelativePath(item.baseline);
   const usbMap = snapshotByRelativePath(directorySnapshot(usbPath));
   const localSnapshot = Array.isArray(item.managedRelativePaths)
@@ -3544,7 +3550,8 @@ function compareTransferDirectoryItem(item, packageFolderPath) {
     relativePath,
     baselineMap.get(relativePath),
     usbMap.get(relativePath),
-    localMap.get(relativePath)
+    localMap.get(relativePath),
+    { localRootExists }
   ));
 }
 
@@ -3558,6 +3565,7 @@ function summarizeTransferFileEntries(entries) {
     alreadyMatching: [],
     usbDeleted: [],
     localDeleted: [],
+    localMissing: [],
     unchanged: []
   };
 
@@ -3570,6 +3578,7 @@ function summarizeTransferFileEntries(entries) {
     else if (entry.status === "already-matching") groups.alreadyMatching.push(entry);
     else if (entry.status === "usb-deleted") groups.usbDeleted.push(entry);
     else if (entry.status === "local-deleted") groups.localDeleted.push(entry);
+    else if (entry.status === "local-missing") groups.localMissing.push(entry);
     else groups.unchanged.push(entry);
   });
 
@@ -3889,7 +3898,7 @@ function transferPackageState(review, baselineState = null) {
   return stateWithVersionHistoryPayload(parsed, fileName, transferBackupPackagePath(review));
 }
 
-function localTransferState(review) {
+function localTransferState(review, baselineState = null) {
   const storyItem = transferStoryItem(review);
   const backupItem = transferBackupItem(review);
   const storyPath = storyItem?.sourcePath ? path.resolve(storyItem.sourcePath) : "";
@@ -3898,6 +3907,7 @@ function localTransferState(review) {
   const currentSnapshot = storyPath ? fileSnapshot(storyPath) : { exists: false };
   const storyFileChanged = storyPath && currentSnapshot.exists && fileSnapshotChanged(storyItem?.baseline, currentSnapshot);
 
+  if (storyPath && !currentSnapshot.exists && baselineState) return normalizeState(baselineState);
   if (!storyFileChanged) return currentState;
 
   try {
@@ -4144,7 +4154,7 @@ function mergeUsbTransferStates(baselineState, localState, usbState) {
 
 function mergeUsbTransferPackage(review) {
   const baselineState = baselineStateFromManifest(review.manifest);
-  const localState = localTransferState(review);
+  const localState = localTransferState(review, baselineState);
   const usbState = transferPackageState(review, baselineState);
   return mergeUsbTransferStates(baselineState, localState, usbState);
 }
@@ -4219,7 +4229,10 @@ function createUsbTransferMergeReview(review) {
 
   try {
     const base = normalizeState(baselineState);
-    const local = localTransferState(review);
+    const storyItem = transferStoryItem(review);
+    const localStoryPath = storyItem?.sourcePath ? path.resolve(storyItem.sourcePath) : "";
+    const localStoryMissing = Boolean(localStoryPath && !fileSnapshot(localStoryPath).exists);
+    const local = localTransferState(review, base);
     const usb = transferPackageState(review, base);
     const entries = [];
     const projectNotesEntry = createMergeReviewEntry(
@@ -4278,6 +4291,7 @@ function createUsbTransferMergeReview(review) {
 
     return {
       status,
+      localStoryMissing,
       counts: {
         usbOnly: usbOnly.length,
         localOnly: localOnly.length,
@@ -4297,20 +4311,83 @@ function createUsbTransferMergeReview(review) {
   }
 }
 
+function canPrepareWritableDirectory(folderPath) {
+  if (!folderPath) return false;
+
+  try {
+    fs.mkdirSync(folderPath, { recursive: true });
+    fs.accessSync(folderPath, fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function canPrepareWritableFile(filePath) {
+  if (!filePath) return false;
+
+  try {
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    if (fs.existsSync(filePath)) fs.accessSync(filePath, fs.constants.W_OK);
+    else fs.accessSync(path.dirname(filePath), fs.constants.W_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function usbImportFallbackRoot(fileName) {
+  return path.join(
+    DATA_DIR,
+    "usb-transfer-imports",
+    `${safeFolderName(safeHistoryBaseName(fileName || "draft-history.txt"), "draft-history")}-${usbTransferTimestamp()}`
+  );
+}
+
+function usbImportDestinationPaths(review) {
+  const storyItem = transferStoryItem(review);
+  const backupItem = transferBackupItem(review);
+  const fileName = storyItem?.sourcePath
+    ? path.basename(storyItem.sourcePath)
+    : review.manifest?.source?.fileName || "draft-history.txt";
+  const fallbackRoot = usbImportFallbackRoot(fileName);
+  const fallbackStoryPath = path.join(fallbackRoot, fileName);
+  const fallbackBackupPath = path.join(fallbackRoot, "DraftDiff backup");
+  const preferredStoryPath = storyItem?.sourcePath ? path.resolve(storyItem.sourcePath) : "";
+  const preferredBackupPath = backupItem?.sourcePath ? path.resolve(backupItem.sourcePath) : "";
+  const storyPath = canPrepareWritableFile(preferredStoryPath)
+    ? preferredStoryPath
+    : fallbackStoryPath;
+  const backupFolderPath = preferredBackupPath && canPrepareWritableDirectory(preferredBackupPath)
+    ? preferredBackupPath
+    : fallbackBackupPath;
+
+  canPrepareWritableFile(storyPath);
+  canPrepareWritableDirectory(backupFolderPath);
+
+  return {
+    fileName: path.basename(storyPath),
+    storyPath,
+    backupFolderPath,
+    usedFallback: storyPath !== preferredStoryPath || backupFolderPath !== preferredBackupPath,
+    preferredStoryPath,
+    preferredBackupPath
+  };
+}
+
 function applyUsbTransferFolder(folderPath) {
   const review = reviewUsbTransferFolder(folderPath);
   validateTransferPackageItems(review.manifest, review.packageFolderPath);
   const backup = createUsbTransferImportBackup(review);
 
   const { state: mergedState, summary: mergeSummary } = mergeUsbTransferPackage(review);
-  const storyItem = transferStoryItem(review);
-  const backupItem = transferBackupItem(review);
-  const storyPath = storyItem?.sourcePath ? path.resolve(storyItem.sourcePath) : "";
-  const importedBackupFolderPath = backupItem?.sourcePath ? path.resolve(backupItem.sourcePath) : "";
+  const destination = usbImportDestinationPaths(review);
+  const storyPath = destination.storyPath;
+  const importedBackupFolderPath = destination.backupFolderPath;
   if (storyPath) writeTextFileLink(storyPath);
   if (importedBackupFolderPath) writeVersionHistoryFolderPath(importedBackupFolderPath);
 
-  const fileName = storyPath ? path.basename(storyPath) : review.manifest?.source?.fileName || "draft-history.txt";
+  const fileName = destination.fileName;
   const savedState = writeAll(mergedState, {
     filePath: storyPath,
     fileName,
@@ -4324,6 +4401,7 @@ function applyUsbTransferFolder(folderPath) {
     packageFolderPath: review.packageFolderPath,
     filePath: storyPath,
     fileName,
+    importDestination: destination,
     text: formatExport(savedState),
     ...statePathPayload({ filePath: storyPath, fileName })
   };
@@ -4658,6 +4736,24 @@ async function openTextFileFromDialog() {
     : { ok: false, cancelled: true };
 }
 
+function saveTextFileToPath(filePath, body) {
+  const payload = parseStatePayload(body);
+  const normalized = normalizeState(payload.state, { touch: true });
+  const resolvedPath = path.resolve(filePath);
+  writeTextFileLink(resolvedPath);
+  const state = writeAll(normalized, {
+    filePath: resolvedPath,
+    fileName: path.basename(resolvedPath)
+  });
+  return {
+    ok: true,
+    state,
+    filePath: resolvedPath,
+    fileName: path.basename(resolvedPath),
+    ...statePathPayload({ filePath: resolvedPath, fileName: path.basename(resolvedPath) })
+  };
+}
+
 function recentTextFilesPayload() {
   return {
     ok: true,
@@ -4937,6 +5033,45 @@ function macSaveFileDialogScript() {
   ];
 }
 
+async function chooseTextFileWithElectronDialog(dialogType, initialDirectory, initialFileName = "") {
+  if (!process.versions?.electron) return null;
+
+  let electron = null;
+  try {
+    electron = require("electron");
+  } catch {
+    return null;
+  }
+
+  if (dialogType === "save") {
+    if (!electron?.dialog?.showSaveDialog) return null;
+    const result = await electron.dialog.showSaveDialog({
+      title: "Save text file",
+      defaultPath: path.join(initialDirectory, initialFileName || "draft-history.txt"),
+      filters: [
+        { name: "Text files", extensions: ["txt"] },
+        { name: "All files", extensions: ["*"] }
+      ]
+    });
+    if (result.canceled) return "";
+    return result.filePath || "";
+  }
+
+  if (!electron?.dialog?.showOpenDialog) return null;
+  const result = await electron.dialog.showOpenDialog({
+    title: "Open text file",
+    defaultPath: initialDirectory,
+    filters: [
+      { name: "Text files", extensions: ["txt"] },
+      { name: "All files", extensions: ["*"] }
+    ],
+    properties: ["openFile"]
+  });
+
+  if (result.canceled) return "";
+  return result.filePaths?.[0] || "";
+}
+
 async function chooseTextFileWithNativeDialog(dialogType, initialDirectory, initialFileName = "") {
   if (process.platform === "win32") {
     return runPowerShell(windowsFileDialogCommand(dialogType, initialDirectory, initialFileName));
@@ -4946,6 +5081,11 @@ async function chooseTextFileWithNativeDialog(dialogType, initialDirectory, init
     return dialogType === "save"
       ? runOsascript(macSaveFileDialogScript(), [initialDirectory, initialFileName, "Save text file"])
       : runOsascript(macOpenFileDialogScript(), [initialDirectory, "Open text file"]);
+  }
+
+  if (process.platform === "linux") {
+    const selectedFile = await chooseTextFileWithElectronDialog(dialogType, initialDirectory, initialFileName);
+    if (selectedFile !== null) return selectedFile;
   }
 
   throw new Error("Text file selection is only available in the desktop app on Windows and macOS right now.");
@@ -4999,6 +5139,27 @@ function macFolderDialogScript() {
   ];
 }
 
+async function chooseFolderWithElectronDialog(initialDirectory, description) {
+  if (!process.versions?.electron) return null;
+
+  let electron = null;
+  try {
+    electron = require("electron");
+  } catch {
+    return null;
+  }
+
+  if (!electron?.dialog?.showOpenDialog) return null;
+  const result = await electron.dialog.showOpenDialog({
+    title: description || "Select folder",
+    defaultPath: initialDirectory,
+    properties: ["openDirectory", "createDirectory"]
+  });
+
+  if (result.canceled) return "";
+  return result.filePaths?.[0] || "";
+}
+
 async function chooseFolderWithNativeDialog(initialDirectory, description) {
   if (process.platform === "win32") {
     return runPowerShell(windowsFolderDialogCommand(initialDirectory, description));
@@ -5006,6 +5167,11 @@ async function chooseFolderWithNativeDialog(initialDirectory, description) {
 
   if (process.platform === "darwin") {
     return runOsascript(macFolderDialogScript(), [initialDirectory, description]);
+  }
+
+  if (process.platform === "linux") {
+    const selectedFolder = await chooseFolderWithElectronDialog(initialDirectory, description);
+    if (selectedFolder !== null) return selectedFolder;
   }
 
   throw new Error("Folder selection is only available in the desktop app on Windows and macOS right now.");
@@ -5376,25 +5542,13 @@ async function handleApi(req, res, pathname) {
     markClientActive();
     const body = await readBody(req);
     const payload = parseStatePayload(body);
-    const normalized = normalizeState(payload.state, { touch: true });
     const filePath = await chooseTextFileToSave(payload.fileName);
     if (!filePath) {
       sendJson(res, 200, { ok: false, cancelled: true });
       return;
     }
 
-    writeTextFileLink(filePath);
-    const state = writeAll(normalized, {
-      filePath,
-      fileName: path.basename(filePath)
-    });
-    sendJson(res, 200, {
-      ok: true,
-      state,
-      filePath,
-      fileName: path.basename(filePath),
-      ...statePathPayload({ filePath, fileName: path.basename(filePath) })
-    });
+    sendJson(res, 200, saveTextFileToPath(filePath, body));
     return;
   }
 
@@ -5590,6 +5744,9 @@ module.exports = {
   versionHistorySummaryJobProgress,
   writeFullVersionHistorySummaryReport,
   resolveGeneratedReportPath,
+  parseStatePayload,
+  openedTextFilePayload,
+  saveTextFileToPath,
   openTextFileFromDialog,
   recentTextFilesPayload,
   openRecentTextFileFromRequestBody,

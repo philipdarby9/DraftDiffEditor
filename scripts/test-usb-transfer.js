@@ -132,6 +132,25 @@ assert.equal(unchangedReview.merge.counts.usbOnly, 0);
 assert.equal(unchangedReview.merge.counts.localOnly, 0);
 assert.equal(unchangedReview.merge.counts.bothChanged, 0);
 
+const newComputerPackagePath = path.join(dataDir, "new-computer-package");
+fs.cpSync(exported.packageFolderPath, newComputerPackagePath, { recursive: true });
+const newComputerManifestPath = path.join(newComputerPackagePath, path.basename(exported.manifestPath));
+const newComputerManifest = JSON.parse(fs.readFileSync(newComputerManifestPath, "utf8"));
+newComputerManifest.items = newComputerManifest.items.map(item => ({
+  ...item,
+  sourcePath: item.kind === "directory"
+    ? path.join(dataDir, "new-computer", "DraftDiff backup")
+    : path.join(dataDir, "new-computer", "story.txt")
+}));
+fs.writeFileSync(newComputerManifestPath, `${JSON.stringify(newComputerManifest, null, 2)}\n`, "utf8");
+const newComputerReview = __test.reviewUsbTransferFolder(newComputerPackagePath);
+assert.equal(newComputerReview.files.counts.localMissing > 0, true);
+assert.equal(newComputerReview.files.counts.localDeleted, 0);
+assert.equal(
+  newComputerReview.files.localMissing.every(entry => entry.statusLabel === "Not yet on this computer"),
+  true
+);
+
 const localState = stateWithDrafts([
   {
     title: "Draft 1",
@@ -215,6 +234,28 @@ const usbState = stateWithDrafts([
 fs.writeFileSync(exported.storyTextPath, StateCore.formatExport(usbState), "utf8");
 writeVersionHistorySidecar(exported.backupFolderPath, "story.txt", usbState);
 
+const newComputerChangedPackagePath = path.join(dataDir, "new-computer-changed-package");
+fs.cpSync(exported.packageFolderPath, newComputerChangedPackagePath, { recursive: true });
+const newComputerChangedManifestPath = path.join(newComputerChangedPackagePath, path.basename(exported.manifestPath));
+const newComputerChangedManifest = JSON.parse(fs.readFileSync(newComputerChangedManifestPath, "utf8"));
+newComputerChangedManifest.items = newComputerChangedManifest.items.map(item => ({
+  ...item,
+  sourcePath: item.kind === "directory"
+    ? path.join(dataDir, "new-computer-changed", "DraftDiff backup")
+    : path.join(dataDir, "new-computer-changed", "story.txt")
+}));
+fs.writeFileSync(newComputerChangedManifestPath, `${JSON.stringify(newComputerChangedManifest, null, 2)}\n`, "utf8");
+const newComputerChangedReview = __test.reviewUsbTransferFolder(newComputerChangedPackagePath);
+assert.equal(newComputerChangedReview.merge.status, "usb-only");
+assert.equal(newComputerChangedReview.merge.localStoryMissing, true);
+assert.equal(newComputerChangedReview.merge.counts.localOnly, 0);
+assert.equal(newComputerChangedReview.merge.counts.bothChanged, 0);
+assert.equal(newComputerChangedReview.merge.usbOnly.some(entry => entry.type === "projectNotes"), true);
+assert.equal(newComputerChangedReview.merge.usbOnly.some(entry => entry.type === "draft" && entry.number === 4), true);
+assert.equal(newComputerChangedReview.merge.usbOnly.some(entry => entry.type === "draftNotes" && entry.number === 4), true);
+assert.equal(newComputerChangedReview.files.counts.localMissing > 0, true);
+assert.equal(newComputerChangedReview.files.counts.localDeleted, 0);
+
 const review = __test.reviewUsbTransferFolder(exported.packageFolderPath);
 
 assert.equal(review.ok, true);
@@ -265,5 +306,31 @@ assert.equal(
   "local unrelated history should survive import",
   "import should not overwrite or delete unrelated shared-backup files"
 );
+
+const blockedRoot = path.join(dataDir, "blocked-destination");
+fs.mkdirSync(blockedRoot, { recursive: true });
+fs.chmodSync(blockedRoot, 0o500);
+try {
+  const blockedPackagePath = path.join(dataDir, "blocked-destination-package");
+  fs.cpSync(exported.packageFolderPath, blockedPackagePath, { recursive: true });
+  const blockedManifestPath = path.join(blockedPackagePath, path.basename(exported.manifestPath));
+  const blockedManifest = JSON.parse(fs.readFileSync(blockedManifestPath, "utf8"));
+  blockedManifest.items = blockedManifest.items.map(item => ({
+    ...item,
+    sourcePath: item.kind === "directory"
+      ? path.join(blockedRoot, "DraftDiff backup")
+      : path.join(blockedRoot, "story.txt")
+  }));
+  fs.writeFileSync(blockedManifestPath, `${JSON.stringify(blockedManifest, null, 2)}\n`, "utf8");
+
+  const blockedImport = __test.applyUsbTransferFolder(blockedPackagePath);
+  assert.equal(blockedImport.ok, true);
+  assert.equal(blockedImport.importDestination.usedFallback, true);
+  assert.equal(blockedImport.filePath.includes("usb-transfer-imports"), true);
+  assert.equal(fs.existsSync(blockedImport.filePath), true);
+  assert.equal(fs.existsSync(blockedImport.importDestination.backupFolderPath), true);
+} finally {
+  fs.chmodSync(blockedRoot, 0o700);
+}
 
 console.log("USB transfer review test passed");

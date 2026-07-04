@@ -22,6 +22,7 @@ contextBridge.exposeInMainWorld("draftDiffDesktop", {
   hideForClose: () => ipcRenderer.invoke("draft-diff:hide-for-close"),
   showAfterCloseError: () => ipcRenderer.invoke("draft-diff:show-after-close-error"),
   saveState: body => ipcRenderer.invoke("draft-diff:save-state", String(body || "")),
+  saveAsTextFile: body => ipcRenderer.invoke("draft-diff:save-as-text-file", String(body || "")),
   backupProject: body => ipcRenderer.invoke("draft-diff:backup-project", String(body || "")),
   startVersionHistorySummary: body => ipcRenderer.invoke("draft-diff:version-history-summary-start", String(body || "")),
   versionHistorySummaryProgress: jobId => ipcRenderer.invoke("draft-diff:version-history-summary-progress", String(jobId || "")),

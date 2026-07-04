@@ -6890,21 +6890,27 @@ async function saveAsTextProject(stateOverride = null, suggestedFileName = null)
       await writeProjectBackupNow();
     }
     setStatus("Choose a save location...");
-    const response = await fetch("/api/save-as-text-file", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        state: stateToSave,
-        fileName: fileNameToSuggest
-      })
+    const body = JSON.stringify({
+      state: stateToSave,
+      fileName: fileNameToSuggest
     });
+    let payload = null;
+    if (window.draftDiffDesktop?.saveAsTextFile) {
+      payload = await window.draftDiffDesktop.saveAsTextFile(body);
+    } else {
+      const response = await fetch("/api/save-as-text-file", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body
+      });
 
-    if (!response.ok) {
-      const payload = await response.json().catch(() => ({}));
-      throw new Error(payload.error || "Save as failed.");
+      if (!response.ok) {
+        const failure = await response.json().catch(() => ({}));
+        throw new Error(failure.error || "Save as failed.");
+      }
+
+      payload = await response.json();
     }
-
-    const payload = await response.json();
     if (payload.cancelled) {
       setStatus("Save as cancelled");
       return false;
@@ -7020,7 +7026,7 @@ async function prepareCurrentProjectForOpen() {
   window.clearTimeout(saveTimer);
   await saveNow();
   setStatus("Saving backup...");
-  await writeProjectBackupNow();
+  await writeProjectBackupNow({ allowLinkedTextFileFailure: true });
   return projectStateFromSnapshot(serializeProjectState());
 }
 
@@ -7034,28 +7040,45 @@ async function applyOpenedTextFilePayload(payload, previousLinkedTextPath = "", 
   });
 }
 
+async function requestOpenTextFilePayload() {
+  const failures = [];
+
+  if (window.draftDiffDesktop?.openTextFile) {
+    try {
+      return await window.draftDiffDesktop.openTextFile();
+    } catch (error) {
+      failures.push(error?.message || "desktop dialog failed");
+    }
+  }
+
+  try {
+    const response = await fetch("/api/open-text-file", { method: "POST" });
+    if (response.ok) return response.json();
+    failures.push(await response.text());
+  } catch (error) {
+    failures.push(error?.message || "server dialog failed");
+  }
+
+  if (els.fileOpenInput) {
+    setStatus("Native open failed; using browser file picker...");
+    els.fileOpenInput.click();
+    return null;
+  }
+
+  throw new Error(failures.filter(Boolean).join(" / ") || "No open dialog is available.");
+}
+
 async function openTextProject() {
   closeFileMenu();
 
   try {
     const previousLinkedTextPath = linkedTextPath;
     const previousState = await prepareCurrentProjectForOpen();
-    let payload = null;
-    try {
-      const response = await fetch("/api/open-text-file", { method: "POST" });
-      if (response.ok) {
-        payload = await response.json();
-      } else {
-        els.fileOpenInput.click();
-        return;
-      }
-    } catch (error) {
-      if (!window.draftDiffDesktop?.openTextFile) throw error;
-      payload = await window.draftDiffDesktop.openTextFile();
-    }
+    const payload = await requestOpenTextFilePayload();
 
     if (payload) {
       if (payload.cancelled) return;
+      if (payload.ok === false) throw new Error(payload.error || "Open failed");
 
       await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState);
       return;
@@ -7063,7 +7086,7 @@ async function openTextProject() {
   } catch (error) {
     if (isAbortError(error)) return;
     console.error(error);
-    setStatus("Open failed");
+    setStatus(`Open failed: ${error?.message || "Unknown error"}`);
   }
 }
 
@@ -7217,7 +7240,9 @@ function prepareClosePayload(options = {}) {
     filePath: linkedTextPath,
     fileName: projectFileName,
     waitForSummary: Boolean(options.waitForSummary),
-    skipSummary: Boolean(options.skipSummary)
+    skipSummary: Boolean(options.skipSummary),
+    allowLinkedTextFileFailure: Boolean(options.allowLinkedTextFileFailure),
+    allowMissingVersionHistoryFolder: Boolean(options.allowMissingVersionHistoryFolder)
   });
 }
 
@@ -7225,7 +7250,9 @@ async function writeProjectBackupNow(options = {}) {
   if (!state) return null;
 
   const body = prepareClosePayload({
-    skipSummary: options.skipSummary !== false
+    skipSummary: options.skipSummary !== false,
+    allowLinkedTextFileFailure: Boolean(options.allowLinkedTextFileFailure),
+    allowMissingVersionHistoryFolder: Boolean(options.allowMissingVersionHistoryFolder)
   });
   try {
     const response = await fetch("/api/backup/project", {
@@ -7592,15 +7619,19 @@ function renderTransferStoryLines(story = {}) {
 function transferMergeVerdict(merge = {}) {
   if (merge.status === "no-changes") {
     return {
-      title: "No story changes found",
-      body: "The USB copy and this computer both match the version that was exported.",
+      title: merge.localStoryMissing ? "Ready to import USB story" : "No story changes found",
+      body: merge.localStoryMissing
+        ? "No local story file exists yet. Proceed will import the USB story and saved versions."
+        : "The USB copy and this computer both match the version that was exported.",
       ready: true
     };
   }
   if (merge.status === "usb-only") {
     return {
-      title: "Only the USB copy changed",
-      body: "Proceed will back up this computer first, then bring in the USB story changes and saved versions.",
+      title: merge.localStoryMissing ? "Ready to import USB story" : "Only the USB copy changed",
+      body: merge.localStoryMissing
+        ? "No local story file exists yet. Proceed will import the USB story and saved versions."
+        : "Proceed will back up this computer first, then bring in the USB story changes and saved versions.",
       ready: true
     };
   }
@@ -7638,7 +7669,7 @@ function transferMergeSourceLabel(source) {
   return "newest copy";
 }
 
-function renderTransferMergeList(title, entries = [], mode) {
+function renderTransferMergeList(title, entries = [], mode, options = {}) {
   if (!entries.length) return "";
 
   return `
@@ -7648,7 +7679,9 @@ function renderTransferMergeList(title, entries = [], mode) {
         const detail = mode === "both"
           ? `${transferMergeSourceLabel(entry.currentSource)} stays current${entry.conflict ? "; the other copy is saved as a version" : ""}. USB: ${wordCountText(entry.usbWordCount)}. This computer: ${wordCountText(entry.localWordCount)}.`
           : mode === "usb"
-            ? `USB: ${wordCountText(entry.usbWordCount)}. This computer matches the exported copy.`
+            ? options.localStoryMissing
+              ? `USB: ${wordCountText(entry.usbWordCount)}. No local copy exists yet.`
+              : `USB: ${wordCountText(entry.usbWordCount)}. This computer matches the exported copy.`
             : `This computer: ${wordCountText(entry.localWordCount)}. USB matches the exported copy.`;
         return `
           <li>
@@ -7670,7 +7703,7 @@ function renderTransferMergeReview(merge = {}) {
   }
 
   return `
-    ${renderTransferMergeList("Changed only on USB", merge.usbOnly || [], "usb")}
+    ${renderTransferMergeList(merge.localStoryMissing ? "Will be imported from USB" : "Changed only on USB", merge.usbOnly || [], "usb", { localStoryMissing: merge.localStoryMissing })}
     ${renderTransferMergeList("Changed only on this computer", merge.localOnly || [], "local")}
     ${renderTransferMergeList("Changed on both; will be merged", merge.bothChanged || [], "both")}
   `;
@@ -7768,6 +7801,7 @@ function renderTransferReview(payload) {
         ${renderTransferFileGroup("Changed on this computer", files.localOnlyChanges || [])}
         ${renderTransferFileGroup("Deleted on USB", files.usbDeleted || [])}
         ${renderTransferFileGroup("Deleted on this computer", files.localDeleted || [])}
+        ${renderTransferFileGroup("Not yet on this computer", files.localMissing || [])}
         ${renderTransferFileGroup("Already matching", files.alreadyMatching || [])}
       </div>
     </details>
@@ -7797,6 +7831,9 @@ function importConfirmationText(review) {
   const conflictText = needsReviewCount
     ? `\n\n${needsReviewCount.toLocaleString("en-GB")} item${needsReviewCount === 1 ? "" : "s"} need review.`
     : "";
+  if (review?.merge?.localStoryMissing) {
+    return `Proceed with this USB import?\n\nNo local story file exists yet. DraftDiff will import the USB story and saved versions.${conflictText}`;
+  }
   return `Proceed with this USB import?\n\nDraftDiff will back up the current files on this computer, then merge the USB story with the local story. Newest drafts stay current; older conflicting copies are saved in version history.${conflictText}`;
 }
 
@@ -7805,6 +7842,7 @@ async function proceedTransferImport() {
   const review = latestTransferReview;
   if (!window.confirm(importConfirmationText(review))) return;
 
+  closeFileMenu();
   if (els.transferImportProceed) els.transferImportProceed.disabled = true;
   if (els.transferImportCancel) els.transferImportCancel.disabled = true;
   setStatus("Importing USB transfer...");
@@ -7820,17 +7858,19 @@ async function proceedTransferImport() {
     const payload = await response.json();
     if (!payload.ok) throw new Error(payload.error || "USB import failed");
 
+    hideTransferReview();
     updateStoragePathsFromPayload(payload);
     linkedTextPath = payload.filePath || linkedTextPath || "";
     await applyTextProject(payload.text || "", payload.fileName || projectFileName || "draft-history.txt", {
       preserveFormatsFrom: null,
       filePath: linkedTextPath
     });
-    hideTransferReview();
-    setStatus(`USB import complete; backup saved to ${payload.backup?.backupFolderPath || "backup folder"}`);
+    setStatus(payload.importDestination?.usedFallback
+      ? `USB import complete; imported to ${payload.filePath || "app data folder"}`
+      : `USB import complete; backup saved to ${payload.backup?.backupFolderPath || "backup folder"}`);
   } catch (error) {
     console.error(error);
-    setStatus("USB import failed");
+    setStatus(`USB import failed: ${error?.message || "Unknown error"}`);
     if (els.transferImportProceed) els.transferImportProceed.disabled = false;
   } finally {
     if (els.transferImportCancel) els.transferImportCancel.disabled = false;
@@ -7892,7 +7932,7 @@ async function reviewUsbTransfer() {
     setStatus("USB import review ready");
   } catch (error) {
     console.error(error);
-    setStatus("USB review failed");
+    setStatus(`USB review failed: ${error?.message || "Unknown error"}`);
   }
 }
 
@@ -8632,7 +8672,7 @@ els.fileOpenInput.addEventListener("change", async event => {
     await applyTextProject(await file.text(), file.name);
   } catch (error) {
     console.error(error);
-    setStatus("Open failed");
+    setStatus(`Open failed: ${error?.message || "Unknown error"}`);
   }
 });
 
