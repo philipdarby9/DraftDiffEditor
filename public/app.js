@@ -7561,7 +7561,7 @@ function transferStoryChangeCount(story = {}) {
     + Number(story.changedDraftNotes?.length || 0);
 }
 
-function renderTransferStoryLines(story = {}) {
+function renderTransferStoryLines(story = {}, options = {}) {
   const project = story.projectNotes || {};
   const projectChanged = Boolean(project.changed);
   const lines = [];
@@ -7601,7 +7601,13 @@ function renderTransferStoryLines(story = {}) {
     });
   });
 
-  if (!lines.length) return '<p class="transfer-review-empty">No story changes detected in the USB copy.</p>';
+  if (!lines.length) {
+    const merge = options.merge || {};
+    const mergeListsUsbChanges = Number(merge.counts?.usbOnly || 0) > 0 || Number(merge.counts?.bothChanged || 0) > 0;
+    return mergeListsUsbChanges
+      ? '<p class="transfer-review-empty">USB changes are listed in the story merge review above.</p>'
+      : '<p class="transfer-review-empty">No story changes detected in the USB copy.</p>';
+  }
 
   return `
     <ul class="transfer-review-plain-list">
@@ -7614,6 +7620,11 @@ function renderTransferStoryLines(story = {}) {
     </ul>
     ${lines.length > 14 ? `<p class="transfer-review-more">${countLabel(lines.length - 14, "more story change")}</p>` : ""}
   `;
+}
+
+function allMergeItemsUseSource(merge = {}, source) {
+  const items = merge.bothChanged || [];
+  return Boolean(items.length) && items.every(entry => entry.currentSource === source);
 }
 
 function transferMergeVerdict(merge = {}) {
@@ -7643,9 +7654,23 @@ function transferMergeVerdict(merge = {}) {
     };
   }
   if (merge.status === "both-changed") {
+    if (allMergeItemsUseSource(merge, "usb")) {
+      return {
+        title: "USB copy will update changed drafts",
+        body: "This computer also changed these drafts since export. Proceed will use the USB copy as current and save this computer's copy in version history.",
+        ready: false
+      };
+    }
+    if (allMergeItemsUseSource(merge, "local")) {
+      return {
+        title: "This computer has the newer changed drafts",
+        body: "The USB copy also changed these drafts since export. Proceed will keep this computer's copy current and save the USB copy in version history.",
+        ready: false
+      };
+    }
     return {
-      title: "Both copies changed; merge needed",
-      body: "Proceed will merge the USB story with this computer. For the same draft, the newest copy stays current and the older copy is saved in version history.",
+      title: "Both copies changed; newest drafts will be kept",
+      body: "Proceed will compare each changed draft. The newest copy stays current and the other copy is saved in version history.",
       ready: false
     };
   }
@@ -7663,10 +7688,67 @@ function transferMergeEntryLabel(entry = {}) {
   return entry.title || "Story item";
 }
 
-function transferMergeSourceLabel(source) {
+function transferMergeCopyLabel(source, sentenceStart = false) {
   if (source === "usb") return "USB copy";
-  if (source === "local") return "this computer";
-  return "newest copy";
+  if (source === "local") return sentenceStart ? "This computer's copy" : "this computer's copy";
+  return sentenceStart ? "Newest copy" : "newest copy";
+}
+
+function transferMergeEntryHasVersionHistory(entry = {}) {
+  return entry.type === "draft" || entry.type === "projectNotes";
+}
+
+function transferMergeEntryTime(entry = {}, source) {
+  if (source === "usb") return entry.usbCurrentAt || "";
+  if (source === "local") return entry.localCurrentAt || "";
+  if (source === "base") return entry.baseCurrentAt || "";
+  return "";
+}
+
+function transferMergeTimeText(value) {
+  return value ? formatVersionDate(value) : "";
+}
+
+function transferMergeCopyText(entry, source, sentenceStart = false) {
+  const time = transferMergeTimeText(transferMergeEntryTime(entry, source));
+  return `${transferMergeCopyLabel(source, sentenceStart)}${time ? ` from ${time}` : ""}`;
+}
+
+function transferMergeWordSummary(entry = {}) {
+  return `USB: ${wordCountText(entry.usbWordCount)}. This computer: ${wordCountText(entry.localWordCount)}.`;
+}
+
+function transferMergeListDetail(entry = {}, mode, options = {}) {
+  if (mode === "both") {
+    const currentSource = entry.currentSource === "usb" ? "usb" : "local";
+    const archivedSource = currentSource === "usb" ? "local" : "usb";
+    const currentCopy = transferMergeCopyText(entry, currentSource, true);
+    const archivedCopy = transferMergeCopyText(entry, archivedSource);
+
+    if (!entry.conflict) {
+      return `${currentCopy} stays current; saved versions are combined. ${transferMergeWordSummary(entry)}`;
+    }
+
+    if (transferMergeEntryHasVersionHistory(entry)) {
+      return `${currentCopy} stays current; ${archivedCopy} is saved in version history. ${transferMergeWordSummary(entry)}`;
+    }
+
+    return `${currentCopy} stays current; ${archivedCopy} is not made current. ${transferMergeWordSummary(entry)}`;
+  }
+
+  if (mode === "usb") {
+    const usbCopy = transferMergeCopyText(entry, "usb", true);
+    const localTime = transferMergeTimeText(entry.localCurrentAt);
+    const hasExistingCopy = Boolean(entry.localCurrentAt || entry.baseCurrentAt || Number(entry.localWordCount || 0) > 0);
+    if (options.localStoryMissing || !hasExistingCopy) {
+      return `${usbCopy} will be imported. USB: ${wordCountText(entry.usbWordCount)}.`;
+    }
+    return `${usbCopy} will become current, updating this computer's copy${localTime ? ` from ${localTime}` : ""}. ${transferMergeWordSummary(entry)}`;
+  }
+
+  const localCopy = transferMergeCopyText(entry, "local", true);
+  const baseTime = transferMergeTimeText(entry.baseCurrentAt);
+  return `${localCopy} stays current; the USB copy matches the exported copy${baseTime ? ` from ${baseTime}` : ""}. ${transferMergeWordSummary(entry)}`;
 }
 
 function renderTransferMergeList(title, entries = [], mode, options = {}) {
@@ -7676,13 +7758,7 @@ function renderTransferMergeList(title, entries = [], mode, options = {}) {
     <h4>${escapeHtml(title)}</h4>
     <ul class="transfer-review-plain-list">
       ${entries.map(entry => {
-        const detail = mode === "both"
-          ? `${transferMergeSourceLabel(entry.currentSource)} stays current${entry.conflict ? "; the other copy is saved as a version" : ""}. USB: ${wordCountText(entry.usbWordCount)}. This computer: ${wordCountText(entry.localWordCount)}.`
-          : mode === "usb"
-            ? options.localStoryMissing
-              ? `USB: ${wordCountText(entry.usbWordCount)}. No local copy exists yet.`
-              : `USB: ${wordCountText(entry.usbWordCount)}. This computer matches the exported copy.`
-            : `This computer: ${wordCountText(entry.localWordCount)}. USB matches the exported copy.`;
+        const detail = transferMergeListDetail(entry, mode, options);
         return `
           <li>
             <strong>${escapeHtml(transferMergeEntryLabel(entry))}</strong>
@@ -7705,7 +7781,7 @@ function renderTransferMergeReview(merge = {}) {
   return `
     ${renderTransferMergeList(merge.localStoryMissing ? "Will be imported from USB" : "Changed only on USB", merge.usbOnly || [], "usb", { localStoryMissing: merge.localStoryMissing })}
     ${renderTransferMergeList("Changed only on this computer", merge.localOnly || [], "local")}
-    ${renderTransferMergeList("Changed on both; will be merged", merge.bothChanged || [], "both")}
+    ${renderTransferMergeList("Changed on both; one copy stays current", merge.bothChanged || [], "both")}
   `;
 }
 
@@ -7755,7 +7831,7 @@ function renderTransferReview(payload) {
       <div>
         <span class="transfer-review-number">${Number(merge.counts?.bothChanged || 0).toLocaleString("en-GB")}</span>
         <strong>merge item${Number(merge.counts?.bothChanged || 0) === 1 ? "" : "s"}</strong>
-        <p>Story areas changed in both places and will be merged.</p>
+        <p>Story areas changed in both places; one copy will stay current.</p>
       </div>
     </section>
 
@@ -7766,7 +7842,7 @@ function renderTransferReview(payload) {
 
     <section class="transfer-review-section transfer-review-story">
       <h3>USB story details${storyChangeCount ? ` (${storyChangeCount.toLocaleString("en-GB")})` : ""}</h3>
-      ${renderTransferStoryLines(payload.story || {})}
+      ${renderTransferStoryLines(payload.story || {}, { merge })}
     </section>
 
     <section class="transfer-review-section">
@@ -7833,6 +7909,12 @@ function importConfirmationText(review) {
     : "";
   if (review?.merge?.localStoryMissing) {
     return `Proceed with this USB import?\n\nNo local story file exists yet. DraftDiff will import the USB story and saved versions.${conflictText}`;
+  }
+  if (allMergeItemsUseSource(review?.merge, "usb")) {
+    return `Proceed with this USB import?\n\nDraftDiff will back up this computer, then update the changed drafts from the USB copy. This computer's current copies are saved in version history.${conflictText}`;
+  }
+  if (allMergeItemsUseSource(review?.merge, "local")) {
+    return `Proceed with this USB import?\n\nDraftDiff will back up this computer and keep its newer changed drafts current. The USB copies are saved in version history.${conflictText}`;
   }
   return `Proceed with this USB import?\n\nDraftDiff will back up the current files on this computer, then merge the USB story with the local story. Newest drafts stay current; older conflicting copies are saved in version history.${conflictText}`;
 }

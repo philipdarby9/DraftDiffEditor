@@ -3500,6 +3500,45 @@ function transferItemDisplayPath(item, relativePath = "") {
     : item.sourcePath || item.label || item.id;
 }
 
+function normalizedTransferFileName(value) {
+  return asText(value).trim().toLowerCase();
+}
+
+function transferStoryFileNames(item, manifest) {
+  return new Set([
+    manifest?.source?.fileName,
+    item?.label,
+    item?.sourcePath ? path.basename(item.sourcePath) : ""
+  ].map(normalizedTransferFileName).filter(Boolean));
+}
+
+function currentLinkedStoryPathForTransfer(item, manifest) {
+  const linkedTextPath = readTextFileLink();
+  if (!linkedTextPath || !fileSnapshot(linkedTextPath).exists) return "";
+
+  const expectedNames = transferStoryFileNames(item, manifest);
+  const linkedName = normalizedTransferFileName(path.basename(linkedTextPath));
+  if (expectedNames.size && !expectedNames.has(linkedName)) return "";
+
+  return path.resolve(linkedTextPath);
+}
+
+function localSourcePathForTransferItem(item, manifest) {
+  const sourcePath = item?.sourcePath ? path.resolve(item.sourcePath) : "";
+
+  if (item?.role === "storyText") {
+    if (sourcePath && fileSnapshot(sourcePath).exists) return sourcePath;
+    return currentLinkedStoryPathForTransfer(item, manifest) || sourcePath;
+  }
+
+  if (item?.role === "backupFolder") {
+    if (sourcePath && directoryExists(sourcePath)) return sourcePath;
+    return existingVersionHistoryFolderPath() || sourcePath;
+  }
+
+  return sourcePath;
+}
+
 function compareTransferFileEntry(item, relativePath, baseline, usb, local, options = {}) {
   const status = transferChangeStatus(baseline, usb, local, options);
   return {
@@ -3516,27 +3555,29 @@ function compareTransferFileEntry(item, relativePath, baseline, usb, local, opti
   };
 }
 
-function compareTransferFileItem(item, packageFolderPath) {
+function compareTransferFileItem(item, packageFolderPath, manifest) {
   const usbPath = pathFromPortable(packageFolderPath, item.packagePath);
-  const localRootExists = fs.existsSync(path.resolve(item.sourcePath || ""));
+  const localSourcePath = localSourcePathForTransferItem(item, manifest);
+  const localRootExists = fs.existsSync(localSourcePath);
   return [compareTransferFileEntry(
     item,
     "",
     item.baseline,
     fileSnapshot(usbPath),
-    fileSnapshot(item.sourcePath),
+    fileSnapshot(localSourcePath),
     { localRootExists }
   )];
 }
 
-function compareTransferDirectoryItem(item, packageFolderPath) {
+function compareTransferDirectoryItem(item, packageFolderPath, manifest) {
   const usbPath = pathFromPortable(packageFolderPath, item.packagePath);
-  const localRootExists = directoryExists(item.sourcePath);
+  const localSourcePath = localSourcePathForTransferItem(item, manifest);
+  const localRootExists = directoryExists(localSourcePath);
   const baselineMap = snapshotByRelativePath(item.baseline);
   const usbMap = snapshotByRelativePath(directorySnapshot(usbPath));
   const localSnapshot = Array.isArray(item.managedRelativePaths)
-    ? subsetDirectorySnapshot(item.sourcePath, item.managedRelativePaths)
-    : directorySnapshot(item.sourcePath);
+    ? subsetDirectorySnapshot(localSourcePath, item.managedRelativePaths)
+    : directorySnapshot(localSourcePath);
   const localMap = snapshotByRelativePath(localSnapshot);
   const relativePaths = [...new Set([
     ...baselineMap.keys(),
@@ -3717,8 +3758,8 @@ function reviewUsbTransferFolder(folderPath) {
   const { manifestPath, packageFolderPath, manifest } = readUsbTransferManifest(folderPath);
   const entries = manifest.items.flatMap(item => (
     item.kind === "directory"
-      ? compareTransferDirectoryItem(item, packageFolderPath)
-      : compareTransferFileItem(item, packageFolderPath)
+      ? compareTransferDirectoryItem(item, packageFolderPath, manifest)
+      : compareTransferFileItem(item, packageFolderPath, manifest)
   ));
 
   const storyItem = manifest.items.find(item => item.role === "storyText");
@@ -3762,8 +3803,8 @@ function importBackupRootForManifest(manifest) {
   );
 }
 
-function backupCurrentTransferItem(item, backupRootPath) {
-  const sourcePath = path.resolve(item.sourcePath || "");
+function backupCurrentTransferItem(item, backupRootPath, manifest) {
+  const sourcePath = localSourcePathForTransferItem(item, manifest);
   const targetPath = path.join(backupRootPath, "current", safeFolderName(item.id || item.role || "item"));
   const snapshot = item.kind === "directory" && Array.isArray(item.managedRelativePaths)
     ? subsetDirectorySnapshot(sourcePath, item.managedRelativePaths)
@@ -3796,7 +3837,7 @@ function backupCurrentTransferItem(item, backupRootPath) {
 function createUsbTransferImportBackup(review) {
   const backupRootPath = importBackupRootForManifest(review.manifest);
   fs.mkdirSync(backupRootPath, { recursive: true });
-  const items = review.manifest.items.map(item => backupCurrentTransferItem(item, backupRootPath));
+  const items = review.manifest.items.map(item => backupCurrentTransferItem(item, backupRootPath, review.manifest));
   writeAtomicText(path.join(backupRootPath, "transfer-manifest.json"), `${JSON.stringify(review.manifest, null, 2)}\n`);
   writeAtomicText(path.join(backupRootPath, "import-review.json"), `${JSON.stringify({
     createdAt: nowIso(),
@@ -3825,8 +3866,8 @@ function validateTransferPackageItems(manifest, packageFolderPath) {
   });
 }
 
-function applyTransferItem(item, packageFolderPath) {
-  const sourcePath = path.resolve(item.sourcePath || "");
+function applyTransferItem(item, packageFolderPath, manifest) {
+  const sourcePath = localSourcePathForTransferItem(item, manifest);
   const packagePath = pathFromPortable(packageFolderPath, item.packagePath);
   if (!sourcePath) throw new Error(`Transfer item has no source path: ${item.id || item.role || "item"}`);
 
@@ -3901,7 +3942,7 @@ function transferPackageState(review, baselineState = null) {
 function localTransferState(review, baselineState = null) {
   const storyItem = transferStoryItem(review);
   const backupItem = transferBackupItem(review);
-  const storyPath = storyItem?.sourcePath ? path.resolve(storyItem.sourcePath) : "";
+  const storyPath = storyItem ? localSourcePathForTransferItem(storyItem, review.manifest) : "";
   const fileName = storyPath ? path.basename(storyPath) : review.manifest?.source?.fileName || "draft-history.txt";
   const currentState = readState();
   const currentSnapshot = storyPath ? fileSnapshot(storyPath) : { exists: false };
@@ -3914,7 +3955,8 @@ function localTransferState(review, baselineState = null) {
     const parsed = stateFromExportText(fs.readFileSync(storyPath, "utf8"), currentState, {
       changedAt: fileMtimeIso(storyPath)
     });
-    return stateWithVersionHistoryPayload(parsed, fileName, backupItem?.sourcePath || existingVersionHistoryFolderPath());
+    const backupPath = backupItem ? localSourcePathForTransferItem(backupItem, review.manifest) : existingVersionHistoryFolderPath();
+    return stateWithVersionHistoryPayload(parsed, fileName, backupPath || existingVersionHistoryFolderPath());
   } catch {
     return currentState;
   }
@@ -3947,6 +3989,11 @@ function pageCurrentTime(page, fallbackTitle) {
   });
 
   return times.length ? Math.max(...times) : null;
+}
+
+function pageCurrentIso(page, fallbackTitle) {
+  const time = pageCurrentTime(page, fallbackTitle);
+  return time === null ? "" : new Date(time).toISOString();
 }
 
 function clonePage(page) {
@@ -4189,6 +4236,9 @@ function createMergeReviewEntry(type, number, basePage, localPage, usbPage, fall
   const usbCurrentSignature = pageCurrentSignature(usbPage, fallbackTitle);
   const currentSource = chooseMergedPageSource(basePage, localPage, usbPage, fallbackTitle);
   const bothChanged = localChanged && usbChanged;
+  const baseCurrentAt = pageCurrentIso(basePage, fallbackTitle);
+  const localCurrentAt = pageCurrentIso(localPage, fallbackTitle);
+  const usbCurrentAt = pageCurrentIso(usbPage, fallbackTitle);
 
   return {
     type,
@@ -4199,6 +4249,9 @@ function createMergeReviewEntry(type, number, basePage, localPage, usbPage, fall
     bothChanged,
     conflict: bothChanged && Boolean(localCurrentSignature && usbCurrentSignature && localCurrentSignature !== usbCurrentSignature),
     currentSource,
+    baseCurrentAt,
+    localCurrentAt,
+    usbCurrentAt,
     baseWordCount: pageReviewWordCount(basePage),
     localWordCount: pageReviewWordCount(localPage),
     usbWordCount: pageReviewWordCount(usbPage)
@@ -4230,7 +4283,7 @@ function createUsbTransferMergeReview(review) {
   try {
     const base = normalizeState(baselineState);
     const storyItem = transferStoryItem(review);
-    const localStoryPath = storyItem?.sourcePath ? path.resolve(storyItem.sourcePath) : "";
+    const localStoryPath = storyItem ? localSourcePathForTransferItem(storyItem, review.manifest) : "";
     const localStoryMissing = Boolean(localStoryPath && !fileSnapshot(localStoryPath).exists);
     const local = localTransferState(review, base);
     const usb = transferPackageState(review, base);
@@ -4353,8 +4406,8 @@ function usbImportDestinationPaths(review) {
   const fallbackRoot = usbImportFallbackRoot(fileName);
   const fallbackStoryPath = path.join(fallbackRoot, fileName);
   const fallbackBackupPath = path.join(fallbackRoot, "DraftDiff backup");
-  const preferredStoryPath = storyItem?.sourcePath ? path.resolve(storyItem.sourcePath) : "";
-  const preferredBackupPath = backupItem?.sourcePath ? path.resolve(backupItem.sourcePath) : "";
+  const preferredStoryPath = storyItem ? localSourcePathForTransferItem(storyItem, review.manifest) : "";
+  const preferredBackupPath = backupItem ? localSourcePathForTransferItem(backupItem, review.manifest) : "";
   const storyPath = canPrepareWritableFile(preferredStoryPath)
     ? preferredStoryPath
     : fallbackStoryPath;

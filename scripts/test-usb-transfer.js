@@ -143,6 +143,8 @@ newComputerManifest.items = newComputerManifest.items.map(item => ({
     : path.join(dataDir, "new-computer", "story.txt")
 }));
 fs.writeFileSync(newComputerManifestPath, `${JSON.stringify(newComputerManifest, null, 2)}\n`, "utf8");
+__test.writeTextFileLink(null);
+__test.writeVersionHistoryFolderPath(null);
 const newComputerReview = __test.reviewUsbTransferFolder(newComputerPackagePath);
 assert.equal(newComputerReview.files.counts.localMissing > 0, true);
 assert.equal(newComputerReview.files.counts.localDeleted, 0);
@@ -150,6 +152,8 @@ assert.equal(
   newComputerReview.files.localMissing.every(entry => entry.statusLabel === "Not yet on this computer"),
   true
 );
+__test.writeTextFileLink(storyPath);
+__test.writeVersionHistoryFolderPath(backupFolder);
 
 const localState = stateWithDrafts([
   {
@@ -198,6 +202,10 @@ assert.equal(localOnlyReview.merge.status, "local-only");
 assert.equal(localOnlyReview.merge.localOnly.some(entry => entry.type === "draft" && entry.number === 1), true);
 assert.equal(localOnlyReview.merge.localOnly.some(entry => entry.type === "draft" && entry.number === 4), true);
 
+const currentLinkedReview = __test.reviewUsbTransferFolder(newComputerPackagePath);
+assert.equal(currentLinkedReview.merge.localStoryMissing, false);
+assert.equal(currentLinkedReview.merge.status, "local-only");
+
 const usbState = stateWithDrafts([
   {
     title: "Draft 1",
@@ -245,6 +253,8 @@ newComputerChangedManifest.items = newComputerChangedManifest.items.map(item => 
     : path.join(dataDir, "new-computer-changed", "story.txt")
 }));
 fs.writeFileSync(newComputerChangedManifestPath, `${JSON.stringify(newComputerChangedManifest, null, 2)}\n`, "utf8");
+__test.writeTextFileLink(null);
+__test.writeVersionHistoryFolderPath(null);
 const newComputerChangedReview = __test.reviewUsbTransferFolder(newComputerChangedPackagePath);
 assert.equal(newComputerChangedReview.merge.status, "usb-only");
 assert.equal(newComputerChangedReview.merge.localStoryMissing, true);
@@ -255,6 +265,8 @@ assert.equal(newComputerChangedReview.merge.usbOnly.some(entry => entry.type ===
 assert.equal(newComputerChangedReview.merge.usbOnly.some(entry => entry.type === "draftNotes" && entry.number === 4), true);
 assert.equal(newComputerChangedReview.files.counts.localMissing > 0, true);
 assert.equal(newComputerChangedReview.files.counts.localDeleted, 0);
+__test.writeTextFileLink(storyPath);
+__test.writeVersionHistoryFolderPath(backupFolder);
 
 const review = __test.reviewUsbTransferFolder(exported.packageFolderPath);
 
@@ -262,12 +274,14 @@ assert.equal(review.ok, true);
 assert.equal(review.merge.status, "both-changed");
 assert.equal(review.merge.usbOnly.some(entry => entry.type === "projectNotes"), true);
 assert.equal(review.merge.localOnly.some(entry => entry.type === "draft" && entry.number === 1), true);
-assert.equal(review.merge.bothChanged.some(entry => (
-  entry.type === "draft" &&
-  entry.number === 4 &&
-  entry.currentSource === "usb" &&
-  entry.conflict
-)), true);
+const projectNotesReview = review.merge.usbOnly.find(entry => entry.type === "projectNotes");
+assert.equal(projectNotesReview.localCurrentAt, "2026-01-01T00:00:00.000Z");
+assert.equal(projectNotesReview.usbCurrentAt, "2026-01-04T00:00:00.000Z");
+const draftFourReview = review.merge.bothChanged.find(entry => entry.type === "draft" && entry.number === 4);
+assert.equal(draftFourReview.currentSource, "usb");
+assert.equal(draftFourReview.conflict, true);
+assert.equal(draftFourReview.localCurrentAt, "2026-01-02T00:00:00.000Z");
+assert.equal(draftFourReview.usbCurrentAt, "2026-01-04T00:00:00.000Z");
 assert.equal(review.files.counts.conflicts >= 1, true);
 assert.equal(review.story.projectNotes.changed, true);
 assert.equal(review.story.projectNotes.newVersions, 1);
@@ -323,6 +337,8 @@ try {
   }));
   fs.writeFileSync(blockedManifestPath, `${JSON.stringify(blockedManifest, null, 2)}\n`, "utf8");
 
+  __test.writeTextFileLink(null);
+  __test.writeVersionHistoryFolderPath(null);
   const blockedImport = __test.applyUsbTransferFolder(blockedPackagePath);
   assert.equal(blockedImport.ok, true);
   assert.equal(blockedImport.importDestination.usedFallback, true);
