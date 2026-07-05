@@ -3071,7 +3071,7 @@ textarea {
   grid-template-areas:
     "kicker recorded"
     "title stats"
-    "restore restore";
+    "restore coalesced";
   align-content: stretch;
   align-items: start;
   gap: 3px 10px;
@@ -3133,6 +3133,21 @@ textarea {
   gap: 8px;
   min-width: 0;
   overflow: hidden;
+}
+
+.version-history-strip .version-coalesced {
+  grid-area: coalesced;
+  justify-self: end;
+  align-self: end;
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  color: var(--fg-subtle);
+  font-size: 11.5px;
+  line-height: 1.3;
+  text-align: right;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .version-history-strip .version-page-meta .stat {

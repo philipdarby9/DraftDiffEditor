@@ -5992,7 +5992,7 @@ function coalescedProjectNotesVersionRuns() {
 
 function versionCoalescedMetaHtml(count) {
   if (!(count > 1)) return "";
-  return `<div>${Number(count).toLocaleString("en-GB")} autosaves coalesced</div>`;
+  return `<div class="version-coalesced">${Number(count).toLocaleString("en-GB")} autosaves coalesced</div>`;
 }
 
 function baseVersionPageHtml(draft, version, index) {

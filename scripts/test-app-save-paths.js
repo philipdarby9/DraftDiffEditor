@@ -7,6 +7,7 @@ const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
 const appSource = fs.readFileSync(path.join(root, "public", "app.js"), "utf8").replace(/\r\n/g, "\n");
+const stylesSource = fs.readFileSync(path.join(root, "public", "styles.css"), "utf8").replace(/\r\n/g, "\n");
 
 function sourceBetween(startNeedle, endNeedle) {
   const start = appSource.indexOf(startNeedle);
@@ -22,6 +23,9 @@ function countOccurrences(source, pattern) {
 
 assert.doesNotMatch(appSource, /DIFF_MAX_(ALIGN_BLOCK|RANGE_TOKEN)_CELLS/, "browser diff rendering should not enforce comparison-cell limits");
 assert.doesNotMatch(appSource, /alignDiffLimitReason|diffRangeLimitReason|comparison cells; limit|too large to diff|Detailed comparison skipped/, "browser diff rendering should not skip detail because of size limits");
+assert.match(appSource, /class="version-coalesced"/, "coalesced version metadata should have a stable grid class");
+assert.match(stylesSource, /"restore coalesced"/, "version history headers should reserve a grid slot for coalesced metadata");
+assert.match(stylesSource, /\.version-history-strip \.version-coalesced\s*\{[\s\S]*?grid-area: coalesced;/, "coalesced metadata should use its reserved grid area");
 
 const viewSync = sourceBetween("function syncViewStateFromDom", "function scheduleSearchRefresh");
 assert.match(viewSync, /saveCurrentEditorViewState\(\)/, "view-only sync should preserve current editor selection");
