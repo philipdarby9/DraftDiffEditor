@@ -879,16 +879,178 @@ function missingVersionHistoryTextEntries(previousPayload, nextPayload) {
   return missing;
 }
 
+function versionHistoryEntryCountLosses(previousPayload, nextPayload) {
+  const nextPages = new Map();
+  versionHistoryPayloadPages(nextPayload).forEach(page => {
+    nextPages.set(page.key, Array.isArray(page.entries) ? page.entries.length : 0);
+  });
+
+  const losses = [];
+  versionHistoryPayloadPages(previousPayload).forEach(page => {
+    const previousCount = Array.isArray(page.entries) ? page.entries.length : 0;
+    if (!previousCount) return;
+    const nextCount = nextPages.get(page.key) || 0;
+    if (nextCount >= previousCount) return;
+    losses.push({
+      page: page.label,
+      previousCount,
+      nextCount
+    });
+  });
+  return losses;
+}
+
 function assertVersionHistoryPreservesExistingText(previousPayload, nextPayload, filePath) {
   const missing = missingVersionHistoryTextEntries(previousPayload, nextPayload);
-  if (!missing.length) return;
+  if (missing.length) {
+    const error = new Error(
+      `Refusing to write version history because it would drop ${missing.length} existing saved history text entr${missing.length === 1 ? "y" : "ies"}.`
+    );
+    error.code = "VERSION_HISTORY_TEXT_LOSS";
+    error.statusCode = 409;
+    error.filePath = filePath;
+    error.missingHistoryEntries = missing.slice(0, 20);
+    throw error;
+  }
+
+  const countLosses = versionHistoryEntryCountLosses(previousPayload, nextPayload);
+  if (!countLosses.length) return;
 
   const error = new Error(
-    `Refusing to write version history because it would drop ${missing.length} existing saved history text entr${missing.length === 1 ? "y" : "ies"}.`
+    `Refusing to write version history because it would reduce ${countLosses.length} existing saved history page count${countLosses.length === 1 ? "" : "s"}.`
   );
-  error.code = "VERSION_HISTORY_TEXT_LOSS";
+  error.code = "VERSION_HISTORY_COUNT_LOSS";
+  error.statusCode = 409;
   error.filePath = filePath;
-  error.missingHistoryEntries = missing.slice(0, 20);
+  error.historyCountLosses = countLosses.slice(0, 20);
+  throw error;
+}
+
+function versionHistoryPayloadEntryCount(payload) {
+  return versionHistoryPayloadPages(payload).reduce(
+    (total, page) => total + (Array.isArray(page.entries) ? page.entries.length : 0),
+    0
+  );
+}
+
+function versionHistoryJsonSearchFoldersForRoot(rootFolderPath) {
+  if (!rootFolderPath) return [];
+  const resolvedRoot = path.resolve(rootFolderPath);
+  return [...new Set([
+    path.join(resolvedRoot, "json"),
+    path.join(resolvedRoot, "jsons"),
+    resolvedRoot
+  ])];
+}
+
+function versionHistoryJsonCandidate(filePath) {
+  const payload = parseVersionHistoryFile(filePath);
+  let stats = null;
+  try {
+    stats = fs.statSync(filePath);
+  } catch {
+    return null;
+  }
+  return {
+    filePath,
+    fileName: path.basename(filePath),
+    payload,
+    entryCount: payload ? versionHistoryPayloadEntryCount(payload) : -1,
+    size: stats.size
+  };
+}
+
+function betterVersionHistoryJsonCandidate(left, right) {
+  if (!left) return right;
+  if (!right) return left;
+  if (right.entryCount !== left.entryCount) return right.entryCount > left.entryCount ? right : left;
+  if (right.size !== left.size) return right.size > left.size ? right : left;
+  return left;
+}
+
+function collectVersionHistoryJsonCandidates(rootFolderPath) {
+  const byName = new Map();
+  if (!rootFolderPath || !directoryExists(rootFolderPath)) return byName;
+
+  versionHistoryJsonSearchFoldersForRoot(rootFolderPath).forEach(folderPath => {
+    try {
+      fs.readdirSync(folderPath, { withFileTypes: true }).forEach(entry => {
+        if (!entry.isFile() || !entry.name.endsWith(VERSION_HISTORY_FILE_SUFFIX)) return;
+        const candidate = versionHistoryJsonCandidate(path.join(folderPath, entry.name));
+        if (!candidate) return;
+        byName.set(entry.name, betterVersionHistoryJsonCandidate(byName.get(entry.name), candidate));
+      });
+    } catch {
+      // Legacy folders are optional.
+    }
+  });
+
+  return byName;
+}
+
+function carryVersionHistoryJsonFiles(previousRootFolderPath, nextRootFolderPath) {
+  const previousRoot = previousRootFolderPath && directoryExists(previousRootFolderPath)
+    ? path.resolve(previousRootFolderPath)
+    : null;
+  const nextRoot = nextRootFolderPath ? path.resolve(nextRootFolderPath) : null;
+  if (!previousRoot || !nextRoot || sameHistoryPath(previousRoot, nextRoot)) {
+    return { copied: [], replaced: [], skipped: [], conflicts: [] };
+  }
+
+  const candidates = collectVersionHistoryJsonCandidates(previousRoot);
+  const targetFolderPath = path.join(nextRoot, "json");
+  fs.mkdirSync(targetFolderPath, { recursive: true });
+
+  const copied = [];
+  const replaced = [];
+  const skipped = [];
+  const conflicts = [];
+
+  candidates.forEach(candidate => {
+    const targetPath = path.join(targetFolderPath, candidate.fileName);
+    if (!fileExists(targetPath)) {
+      fs.copyFileSync(candidate.filePath, targetPath);
+      copied.push({ sourcePath: candidate.filePath, targetPath, entryCount: candidate.entryCount });
+      return;
+    }
+
+    const existing = versionHistoryJsonCandidate(targetPath);
+    if (!existing || existing.entryCount >= candidate.entryCount) {
+      skipped.push({ sourcePath: candidate.filePath, targetPath, reason: "target-kept" });
+      return;
+    }
+
+    try {
+      assertVersionHistoryPreservesExistingText(existing.payload, candidate.payload, targetPath);
+      const backupPath = backupExistingVersionHistoryJson(nextRoot, { fileName: candidate.fileName }, targetPath);
+      fs.copyFileSync(candidate.filePath, targetPath);
+      replaced.push({
+        sourcePath: candidate.filePath,
+        targetPath,
+        backupPath,
+        previousEntryCount: existing.entryCount,
+        entryCount: candidate.entryCount
+      });
+    } catch (error) {
+      conflicts.push({
+        sourcePath: candidate.filePath,
+        targetPath,
+        error: error.message
+      });
+    }
+  });
+
+  return { copied, replaced, skipped, conflicts };
+}
+
+function assertCarriedVersionHistoryFilesSafe(carriedHistoryFiles) {
+  const conflicts = carriedHistoryFiles?.conflicts || [];
+  if (!conflicts.length) return;
+
+  const error = new Error("Version-history folder selection was stopped because existing JSON files could not be safely carried forward.");
+  error.code = "VERSION_HISTORY_CARRY_CONFLICT";
+  error.statusCode = 409;
+  error.historyCarryConflicts = conflicts;
   throw error;
 }
 
@@ -3466,11 +3628,30 @@ function migrateStateVersionHistoryToFolder(state, options = {}, migrated = new 
     errors.push({
       filePath: options.filePath || null,
       fileName: options.fileName || null,
-      error: error.message
+      error: error.message,
+      code: error.code || null,
+      missingHistoryEntries: error.missingHistoryEntries || null,
+      historyCountLosses: error.historyCountLosses || null
     });
   }
 
   return { migrated, errors };
+}
+
+function versionHistoryMigrationHasLossError(migration) {
+  return Boolean((migration?.errors || []).some(error =>
+    error?.code === "VERSION_HISTORY_TEXT_LOSS" || error?.code === "VERSION_HISTORY_COUNT_LOSS"
+  ));
+}
+
+function assertVersionHistoryMigrationSafe(migration) {
+  if (!versionHistoryMigrationHasLossError(migration)) return;
+
+  const error = new Error("Version-history folder migration was stopped because it would drop existing saved history.");
+  error.code = "VERSION_HISTORY_MIGRATION_LOSS";
+  error.statusCode = 409;
+  error.migrationErrors = migration.errors;
+  throw error;
 }
 
 function migrateEmbeddedVersionHistoriesToFolder(currentState, options = {}) {
@@ -6032,6 +6213,9 @@ async function handleApi(req, res, pathname) {
       return;
     }
 
+    const previousVersionHistoryFolderPath = existingVersionHistoryFolderPath();
+    const carriedHistoryFiles = carryVersionHistoryJsonFiles(previousVersionHistoryFolderPath, folderPath);
+    assertCarriedVersionHistoryFilesSafe(carriedHistoryFiles);
     const versionHistoryFolderPath = writeVersionHistoryFolderPath(folderPath);
     const filePath = payload.filePath || readTextFileLink() || (payload.fileName ? "" : EXPORT_FILE);
     const migration = recoverMissingFolder
@@ -6040,6 +6224,7 @@ async function handleApi(req, res, pathname) {
           filePath,
           fileName: payload.fileName
         });
+    assertVersionHistoryMigrationSafe(migration);
     const result = applyExternalVersionHistory(payload.state, {
       filePath,
       fileName: payload.fileName
@@ -6057,6 +6242,7 @@ async function handleApi(req, res, pathname) {
       versionHistoryFolderPath,
       recoverMissingFolder,
       folderCheck: versionHistoryFolderCheck({ filePath, fileName: payload.fileName }),
+      carriedHistoryFiles,
       migratedCount: migration.migratedCount,
       migrationErrors: migration.errors,
       ...statePathPayload({ filePath, fileName: payload.fileName })
@@ -6197,7 +6383,11 @@ function createHttpServer() {
       sendJson(res, error.statusCode || 500, {
         error: error.message,
         code: error.code || null,
-        folderPath: error.folderPath || null
+        folderPath: error.folderPath || null,
+        migrationErrors: error.migrationErrors || null,
+        missingHistoryEntries: error.missingHistoryEntries || null,
+        historyCountLosses: error.historyCountLosses || null,
+        historyCarryConflicts: error.historyCarryConflicts || null
       });
     }
   });
@@ -6331,6 +6521,10 @@ module.exports = {
     writeTextFileLink,
     writeVersionHistoryFolderPath,
     versionHistoryFolderCheck,
+    carryVersionHistoryJsonFiles,
+    assertCarriedVersionHistoryFilesSafe,
+    migrateEmbeddedVersionHistoriesToFolder,
+    assertVersionHistoryMigrationSafe,
     macOpenFileDialogScript,
     macSaveFileDialogScript,
     macFolderDialogScript,

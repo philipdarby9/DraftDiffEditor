@@ -216,6 +216,147 @@ try {
   );
   assert.match(readText(path.join(historyDir, "json", "linked.version-history.json")), /Epsilon/);
 
+  const linkedHistoryPath = path.join(historyDir, "json", "linked.version-history.json");
+  fs.writeFileSync(linkedHistoryPath, `${JSON.stringify({
+    version: 1,
+    sourceFileName: "linked.txt",
+    sourceFilePath: linkedPath,
+    story: {
+      title: "Project notes",
+      history: []
+    },
+    drafts: [
+      {
+        id: "draft-a",
+        index: 0,
+        title: "Draft A",
+        history: [
+          { id: "empty-1", createdAt: "2026-01-01T00:00:00.000Z", title: "Draft A" },
+          { id: "empty-2", createdAt: "2026-01-01T00:01:00.000Z", title: "Draft A" }
+        ]
+      }
+    ]
+  }, null, 2)}\n`, "utf8");
+  assert.throws(
+    () => t.writeAll(fixtureState("Epsilon"), {
+      filePath: linkedPath,
+      fileName: "linked.txt",
+      mergeExisting: false
+    }),
+    /Refusing to write version history because it would reduce/,
+    "version-history writes should fail if existing saved entry counts would shrink"
+  );
+  assert.match(readText(linkedHistoryPath), /empty-2/);
+
+  assert.throws(
+    () => t.assertVersionHistoryMigrationSafe({
+      errors: [{ code: "VERSION_HISTORY_COUNT_LOSS", error: "would shrink history" }]
+    }),
+    /migration was stopped/,
+    "folder migration should stop if a sidecar write would shrink existing history"
+  );
+
+  const carryStoryPath = path.join(dataDir, "carry-story.txt");
+  const previousHistoryDir = path.join(dataDir, "previous-history");
+  const nextHistoryDir = path.join(dataDir, "next-history");
+  fs.mkdirSync(path.join(previousHistoryDir, "json"), { recursive: true });
+  fs.mkdirSync(path.join(nextHistoryDir, "json"), { recursive: true });
+  const fullCarryPayload = {
+    version: 1,
+    sourceFileName: "carry-story.txt",
+    sourceFilePath: carryStoryPath,
+    story: { title: "Project notes", history: [] },
+    drafts: [
+      {
+        id: "draft-a",
+        index: 0,
+        title: "Draft A",
+        history: [
+          {
+            id: "carry-1",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            title: "Draft A",
+            content: "Carry one",
+            contentHtml: "<p>Carry one</p>"
+          },
+          {
+            id: "carry-2",
+            createdAt: "2026-01-01T00:01:00.000Z",
+            title: "Draft A",
+            content: "Carry two",
+            contentHtml: "<p>Carry two</p>"
+          }
+        ]
+      }
+    ]
+  };
+  fs.writeFileSync(
+    path.join(previousHistoryDir, "json", "carry-story.version-history.json"),
+    `${JSON.stringify(fullCarryPayload, null, 2)}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(nextHistoryDir, "json", "carry-story.version-history.json"),
+    `${JSON.stringify({
+      ...fullCarryPayload,
+      drafts: [{ ...fullCarryPayload.drafts[0], history: [fullCarryPayload.drafts[0].history[0]] }]
+    }, null, 2)}\n`,
+    "utf8"
+  );
+  const carriedHistoryFiles = t.carryVersionHistoryJsonFiles(previousHistoryDir, nextHistoryDir);
+  t.assertCarriedVersionHistoryFilesSafe(carriedHistoryFiles);
+  assert.equal(carriedHistoryFiles.replaced.length, 1, "larger previous sidecar should replace smaller target sidecar");
+  assert.equal(
+    fs.readdirSync(path.join(nextHistoryDir, "version history JSON backups")).length,
+    1,
+    "replaced sidecar should be backed up inside the new backup folder"
+  );
+  const carriedTargetPath = path.join(nextHistoryDir, "json", "carry-story.version-history.json");
+  assert.match(readText(carriedTargetPath), /Carry two/, "carried full sidecar should be used in the new folder");
+  t.writeVersionHistoryFolderPath(nextHistoryDir);
+  t.writeTextFileLink(carryStoryPath);
+  t.writeAll(fixtureState("Carry current"), {
+    filePath: carryStoryPath,
+    fileName: "carry-story.txt",
+    allowCreateLinkedTextFile: true
+  });
+  assert.match(readText(carriedTargetPath), /Carry two/, "normal save after folder switch should preserve carried history");
+  t.writeVersionHistoryFolderPath(historyDir);
+
+  const conflictPreviousHistoryDir = path.join(dataDir, "conflict-previous-history");
+  const conflictNextHistoryDir = path.join(dataDir, "conflict-next-history");
+  fs.mkdirSync(path.join(conflictPreviousHistoryDir, "json"), { recursive: true });
+  fs.mkdirSync(path.join(conflictNextHistoryDir, "json"), { recursive: true });
+  fs.writeFileSync(
+    path.join(conflictPreviousHistoryDir, "json", "carry-story.version-history.json"),
+    `${JSON.stringify(fullCarryPayload, null, 2)}\n`,
+    "utf8"
+  );
+  fs.writeFileSync(
+    path.join(conflictNextHistoryDir, "json", "carry-story.version-history.json"),
+    `${JSON.stringify({
+      ...fullCarryPayload,
+      drafts: [{
+        ...fullCarryPayload.drafts[0],
+        history: [{
+          id: "target-only",
+          createdAt: "2026-01-01T00:02:00.000Z",
+          title: "Draft A",
+          content: "Target only",
+          contentHtml: "<p>Target only</p>"
+        }]
+      }]
+    }, null, 2)}\n`,
+    "utf8"
+  );
+  const conflictCarry = t.carryVersionHistoryJsonFiles(conflictPreviousHistoryDir, conflictNextHistoryDir);
+  assert.equal(conflictCarry.conflicts.length, 1, "carry-forward should report conflicts when target text would be lost");
+  assert.throws(
+    () => t.assertCarriedVersionHistoryFilesSafe(conflictCarry),
+    /could not be safely carried forward/,
+    "folder selection should stop when carry-forward cannot preserve target text"
+  );
+
   const inventoryStoryPath = path.join(dataDir, "inventory-story.txt");
   t.writeTextFileLink(inventoryStoryPath);
   t.writeAll(fixtureState("Inventory"), {
