@@ -197,6 +197,16 @@ function directoryExists(folderPath) {
   }
 }
 
+function fileExists(filePath) {
+  if (!filePath) return false;
+
+  try {
+    return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
+  } catch {
+    return false;
+  }
+}
+
 function readVersionHistoryFolderPath() {
   ensureDataDir();
 
@@ -787,6 +797,101 @@ function applyExternalVersionHistory(state, options = {}) {
   return { state: normalized, loaded, filePath };
 }
 
+function versionHistoryPayloadPages(payload) {
+  const pages = [];
+  if (!payload || typeof payload !== "object") return pages;
+
+  pages.push({
+    key: "story",
+    label: PROJECT_NOTES_TITLE,
+    entries: historyArrayFromPayloadEntry(payload.story || payload.initialNotes)
+  });
+
+  (Array.isArray(payload.drafts) ? payload.drafts : []).forEach((draft, fallbackIndex) => {
+    const index = Number.isFinite(Number(draft?.index)) ? Number(draft.index) : fallbackIndex;
+    const title = asText(draft?.title) || `Draft ${index + 1}`;
+    const key = `draft:${index}`;
+    pages.push({
+      key,
+      label: title,
+      entries: historyArrayFromPayloadEntry(draft)
+    });
+    pages.push({
+      key: `${key}:notes`,
+      label: asText(draft?.notes?.title) || `${title} Notes`,
+      entries: draftNotesHistoryFromPayloadEntry(draft) || []
+    });
+  });
+
+  return pages;
+}
+
+function normalizedHistoryTextValue(value) {
+  return asText(value).replace(/\r\n/g, "\n").replace(/\r/g, "\n").trim();
+}
+
+function incrementCount(map, key) {
+  map.set(key, (map.get(key) || 0) + 1);
+}
+
+function decrementCount(map, key) {
+  const count = map.get(key) || 0;
+  if (count <= 0) return false;
+  if (count === 1) map.delete(key);
+  else map.set(key, count - 1);
+  return true;
+}
+
+function historyTextValues(entry) {
+  return [
+    ["content", normalizedHistoryTextValue(entry?.content ?? entry?.text)],
+    ["contentHtml", normalizedHistoryTextValue(entry?.contentHtml ?? entry?.html)]
+  ].filter(([, value]) => value);
+}
+
+function missingVersionHistoryTextEntries(previousPayload, nextPayload) {
+  const nextPages = new Map();
+  versionHistoryPayloadPages(nextPayload).forEach(page => {
+    const values = new Map();
+    (page.entries || []).forEach(entry => {
+      historyTextValues(entry).forEach(([kind, value]) => incrementCount(values, `${kind}\0${value}`));
+    });
+    nextPages.set(page.key, values);
+  });
+
+  const missing = [];
+  versionHistoryPayloadPages(previousPayload).forEach(page => {
+    const nextValues = nextPages.get(page.key) || new Map();
+    (page.entries || []).forEach((entry, index) => {
+      historyTextValues(entry).forEach(([kind, value]) => {
+        if (decrementCount(nextValues, `${kind}\0${value}`)) return;
+        missing.push({
+          page: page.label,
+          index,
+          kind,
+          title: asText(entry?.title),
+          createdAt: asText(entry?.createdAt),
+          characters: value.length
+        });
+      });
+    });
+  });
+  return missing;
+}
+
+function assertVersionHistoryPreservesExistingText(previousPayload, nextPayload, filePath) {
+  const missing = missingVersionHistoryTextEntries(previousPayload, nextPayload);
+  if (!missing.length) return;
+
+  const error = new Error(
+    `Refusing to write version history because it would drop ${missing.length} existing saved history text entr${missing.length === 1 ? "y" : "ies"}.`
+  );
+  error.code = "VERSION_HISTORY_TEXT_LOSS";
+  error.filePath = filePath;
+  error.missingHistoryEntries = missing.slice(0, 20);
+  throw error;
+}
+
 function versionHistoryPayloadFromState(state, options = {}) {
   const source = historySourceInfo(options);
   return {
@@ -1235,6 +1340,29 @@ function persistVersionHistory(state, options = {}) {
   return write.filePath;
 }
 
+function versionHistoryJsonBackupFolderPath(rootFolderPath) {
+  return rootFolderPath ? path.join(rootFolderPath, "version history JSON backups") : null;
+}
+
+function versionHistoryBackupTimestamp() {
+  return nowIso().replace(/[:.]/g, "-");
+}
+
+function backupExistingVersionHistoryJson(rootFolderPath, source, filePath) {
+  if (!rootFolderPath || !fileExists(filePath)) return null;
+
+  const backupFolderPath = versionHistoryJsonBackupFolderPath(rootFolderPath);
+  if (!backupFolderPath) return null;
+  fs.mkdirSync(backupFolderPath, { recursive: true });
+
+  const backupPath = path.join(
+    backupFolderPath,
+    `${safeHistoryBaseName(source.fileName)}.${versionHistoryBackupTimestamp()}.${process.pid}${VERSION_HISTORY_FILE_SUFFIX}`
+  );
+  fs.copyFileSync(filePath, backupPath);
+  return backupPath;
+}
+
 function versionHistoryTransactionWrite(state, options = {}) {
   const rootFolderPath = requireVersionHistoryFolderPath();
   const folderPath = rootFolderPath ? path.join(rootFolderPath, "json") : null;
@@ -1243,12 +1371,24 @@ function versionHistoryTransactionWrite(state, options = {}) {
   fs.mkdirSync(folderPath, { recursive: true });
   const filePath = expectedVersionHistoryFilePath({ ...options, requireExistingRoot: true });
   const source = historySourceInfo(options);
+  const existingHistoryPath = findVersionHistoryFilePath(options);
+  const existingPayload = existingHistoryPath && fileExists(existingHistoryPath)
+    ? parseVersionHistoryFile(existingHistoryPath)
+    : null;
   const stateToWrite = options.mergeExisting === false
     ? state
     : applyExternalVersionHistory(state, options).state;
+  const nextPayload = versionHistoryPayloadFromState(stateToWrite, options);
+  if (existingPayload) {
+    assertVersionHistoryPreservesExistingText(existingPayload, nextPayload, existingHistoryPath);
+  }
+  const content = `${JSON.stringify(nextPayload, null, 2)}\n`;
+  if (fileExists(filePath) && fs.readFileSync(filePath, "utf8") !== content) {
+    backupExistingVersionHistoryJson(rootFolderPath, source, filePath);
+  }
   return {
     filePath,
-    content: `${JSON.stringify(versionHistoryPayloadFromState(stateToWrite, options), null, 2)}\n`,
+    content,
     onCommit: () => rememberVersionHistoryFilePath(rootFolderPath, source, filePath)
   };
 }
@@ -3404,6 +3544,10 @@ function writeTextFileLink(filePath) {
   return resolvedPath;
 }
 
+function linkedTextFileMissing(filePath = readTextFileLink()) {
+  return Boolean(filePath && !fileExists(filePath));
+}
+
 function textFileStateKey(filePath) {
   const resolvedPath = path.resolve(filePath);
   return process.platform === "win32" ? resolvedPath.toLowerCase() : resolvedPath;
@@ -3436,13 +3580,6 @@ function readTextFileState(filePath) {
 
 function recentTextFiles(limit = 12) {
   const files = new Map();
-  const fileExists = filePath => {
-    try {
-      return fs.existsSync(filePath) && fs.statSync(filePath).isFile();
-    } catch {
-      return false;
-    }
-  };
   const addFile = (filePath, updatedAt = "") => {
     if (!filePath) return;
     const resolvedPath = path.resolve(filePath);
@@ -3464,7 +3601,6 @@ function recentTextFiles(limit = 12) {
   addFile(readTextFileLink(), nowIso());
 
   return Array.from(files.values())
-    .filter(file => file.exists)
     .sort((left, right) => String(right.updatedAt || "").localeCompare(String(left.updatedAt || "")))
     .slice(0, limit);
 }
@@ -3504,7 +3640,9 @@ function writeProjectStateOnly(state, options = {}) {
   const writes = [
     {
       filePath: STATE_FILE,
-      content: `${JSON.stringify(stateForStorage(normalized), null, 2)}\n`
+      content: `${JSON.stringify(stateForStorage(normalized, {
+        embedVersionHistory: Boolean(options.embedVersionHistory)
+      }), null, 2)}\n`
     }
   ];
 
@@ -3524,6 +3662,7 @@ function writeAll(state, options = {}) {
   const normalized = normalizeState(state, { touch: true });
   const exportText = formatExport(normalized);
   const linkedTextPath = readTextFileLink();
+  const missingLinkedTextFile = !options.allowCreateLinkedTextFile && linkedTextFileMissing(linkedTextPath);
   const coreWrites = [
     {
       filePath: STATE_FILE,
@@ -3539,10 +3678,12 @@ function writeAll(state, options = {}) {
   const linkedWrites = [];
 
   if (linkedTextPath) {
-    linkedWrites.push({
-      filePath: linkedTextPath,
-      content: exportText
-    });
+    if (!missingLinkedTextFile) {
+      linkedWrites.push({
+        filePath: linkedTextPath,
+        content: exportText
+      });
+    }
     const cacheWrite = textFileStateTransactionWrite(linkedTextPath, normalized);
     if (cacheWrite) linkedWrites.push(cacheWrite);
   }
@@ -3553,7 +3694,8 @@ function writeAll(state, options = {}) {
     try {
       const versionHistoryWrite = versionHistoryTransactionWrite(normalized, {
         filePath: options.filePath || linkedTextPath || (options.fileName ? "" : EXPORT_FILE),
-        fileName: options.fileName
+        fileName: options.fileName,
+        mergeExisting: options.mergeExisting
       });
       if (versionHistoryWrite) versionHistoryWrites.push(versionHistoryWrite);
     } catch (error) {
@@ -4650,7 +4792,8 @@ function applyUsbTransferFolder(folderPath) {
   const savedState = writeAll(mergedState, {
     filePath: storyPath,
     fileName,
-    allowLinkedTextFileFailure: true
+    allowLinkedTextFileFailure: true,
+    allowCreateLinkedTextFile: true
   });
   return {
     ok: true,
@@ -4904,11 +5047,14 @@ function statePathPayload(options = {}) {
   const historySourcePath = options.filePath || linkedTextPath || (options.fileName ? "" : EXPORT_FILE);
   const versionHistoryFolderPath = readVersionHistoryFolderPath();
   const missingBackupFolder = versionHistoryFolderMissing();
+  const missingLinkedTextFile = linkedTextFileMissing(linkedTextPath);
   return {
     exportPath: EXPORT_FILE,
     statePath: STATE_FILE,
     linkedTextPath,
     linkedTextFileName: linkedTextPath ? path.basename(linkedTextPath) : null,
+    linkedTextFileMissing: missingLinkedTextFile,
+    linkedTextMissingPath: missingLinkedTextFile ? linkedTextPath : null,
     versionHistoryFolderPath,
     versionHistoryFolderMissing: missingBackupFolder,
     versionHistoryPath: findVersionHistoryFilePath({
@@ -5002,7 +5148,8 @@ function saveTextFileToPath(filePath, body) {
   writeTextFileLink(resolvedPath);
   const state = writeAll(normalized, {
     filePath: resolvedPath,
-    fileName: path.basename(resolvedPath)
+    fileName: path.basename(resolvedPath),
+    allowCreateLinkedTextFile: true
   });
   return {
     ok: true,
@@ -5030,11 +5177,23 @@ function openRecentTextFileFromRequestBody(body) {
 
   const resolvedPath = path.resolve(filePath);
   try {
-    if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isFile()) {
-      return { ok: false, error: "Recent file no longer exists", status: 404 };
+    if (!fileExists(resolvedPath)) {
+      return {
+        ok: false,
+        error: "Recent file no longer exists",
+        code: "LINKED_TEXT_FILE_MISSING",
+        filePath: resolvedPath,
+        status: 404
+      };
     }
   } catch {
-    return { ok: false, error: "Recent file no longer exists", status: 404 };
+    return {
+      ok: false,
+      error: "Recent file no longer exists",
+      code: "LINKED_TEXT_FILE_MISSING",
+      filePath: resolvedPath,
+      status: 404
+    };
   }
 
   return openedTextFilePayload(resolvedPath);
@@ -5043,6 +5202,169 @@ function openRecentTextFileFromRequestBody(body) {
 function backupProjectFromRequestBody(body) {
   const result = writeBackupFromRequestBody(body);
   return { ok: true, backup: result?.backup || null };
+}
+
+function versionHistorySourceKey(source) {
+  const filePath = asText(source?.filePath).trim();
+  if (filePath) return `path:${textFileStateKey(filePath)}`;
+  return `name:${normalizedHistoryName(source?.fileName)}`;
+}
+
+function knownVersionHistorySources(options = {}) {
+  const sources = new Map();
+  const addSource = source => {
+    const filePath = asText(source?.filePath).trim();
+    const fileName = asText(source?.fileName).trim() || (filePath ? path.basename(filePath) : "");
+    if (!filePath && !fileName) return;
+    const normalized = {
+      filePath: filePath ? path.resolve(filePath) : "",
+      fileName: fileName || "draft-history.txt"
+    };
+    sources.set(versionHistorySourceKey(normalized), normalized);
+  };
+
+  addSource(historySourceInfo(options));
+  addSource({ filePath: readTextFileLink() || "", fileName: "" });
+  Object.values(readTextFileStates()).forEach(entry => {
+    addSource({
+      filePath: entry?.filePath || "",
+      fileName: entry?.filePath ? path.basename(entry.filePath) : ""
+    });
+  });
+
+  return Array.from(sources.values())
+    .filter(source => normalizedHistoryName(source.fileName))
+    .sort((left, right) => normalizedHistoryName(left.fileName).localeCompare(normalizedHistoryName(right.fileName)));
+}
+
+function versionHistorySearchFolders(rootFolderPath) {
+  if (!rootFolderPath) return [];
+  return [...new Set([
+    path.join(rootFolderPath, "json"),
+    path.join(rootFolderPath, "jsons"),
+    rootFolderPath
+  ].map(folderPath => path.resolve(folderPath)))];
+}
+
+function scanVersionHistoryFolderJsonFiles(rootFolderPath) {
+  const files = [];
+  versionHistorySearchFolders(rootFolderPath).forEach(folderPath => {
+    try {
+      const entries = fs.readdirSync(folderPath, { withFileTypes: true });
+      entries.forEach(entry => {
+        if (!entry.isFile() || !entry.name.endsWith(VERSION_HISTORY_FILE_SUFFIX)) return;
+        const filePath = path.join(folderPath, entry.name);
+        const payload = parseVersionHistoryFile(filePath);
+        files.push({
+          filePath,
+          folderPath,
+          fileName: entry.name,
+          valid: Boolean(payload),
+          sourceFileName: payload?.sourceFileName || "",
+          sourceFilePath: payload?.sourceFilePath || "",
+          payload
+        });
+      });
+    } catch {
+      // Missing legacy folders are normal.
+    }
+  });
+  return files.sort((left, right) => left.filePath.localeCompare(right.filePath));
+}
+
+function versionHistoryFolderInventoryCheck(rootFolderPath, options = {}) {
+  const sources = knownVersionHistorySources(options);
+  const files = scanVersionHistoryFolderJsonFiles(rootFolderPath);
+  const matchedFilePaths = new Set();
+  const expectedStories = sources.map(source => {
+    const match = files.find(file => (
+      file.valid
+      && !matchedFilePaths.has(file.filePath)
+      && versionHistoryPayloadMatchesSource(file.payload, source)
+    ));
+    if (match) matchedFilePaths.add(match.filePath);
+    return {
+      fileName: source.fileName,
+      filePath: source.filePath,
+      found: Boolean(match),
+      versionHistoryPath: match?.filePath || "",
+      expectedFileName: `${safeHistoryBaseName(source.fileName)}${VERSION_HISTORY_FILE_SUFFIX}`
+    };
+  });
+
+  const invalidJsonFiles = files
+    .filter(file => !file.valid)
+    .map(file => ({
+      filePath: file.filePath,
+      fileName: file.fileName
+    }));
+  const extraJsonFiles = files
+    .filter(file => file.valid && !matchedFilePaths.has(file.filePath))
+    .map(file => ({
+      filePath: file.filePath,
+      fileName: file.fileName,
+      sourceFileName: file.sourceFileName,
+      sourceFilePath: file.sourceFilePath
+    }));
+  const readableJsonFiles = files
+    .filter(file => file.valid)
+    .map(file => ({
+      filePath: file.filePath,
+      fileName: file.fileName,
+      sourceFileName: file.sourceFileName,
+      sourceFilePath: file.sourceFilePath,
+      matchedKnownStory: matchedFilePaths.has(file.filePath)
+    }));
+
+  const missingStories = expectedStories.filter(story => !story.found);
+  return {
+    checkedAt: nowIso(),
+    rootFolderPath,
+    searchFolders: versionHistorySearchFolders(rootFolderPath),
+    knownStoryCount: expectedStories.length,
+    versionHistoryJsonCount: files.length,
+    readableJsonCount: readableJsonFiles.length,
+    invalidJsonCount: invalidJsonFiles.length,
+    missingKnownStoryCount: missingStories.length,
+    extraJsonCount: extraJsonFiles.length,
+    expectedStories,
+    missingStories,
+    readableJsonFiles,
+    invalidJsonFiles,
+    extraJsonFiles
+  };
+}
+
+function versionHistoryFolderCheck(options = {}) {
+  const rootFolderPath = existingVersionHistoryFolderPath();
+  const source = historySourceInfo(options);
+  const baseName = safeHistoryBaseName(source.fileName);
+  const textFileName = safeBackupFileName(source.fileName, "draft-history.txt");
+  const versionHistoryPath = findVersionHistoryFilePath(options);
+  const expectedVersionHistoryPath = expectedVersionHistoryFilePath(options);
+  const originalTextPath = rootFolderPath ? path.join(rootFolderPath, "original txt", textFileName) : "";
+  const summaryPath = rootFolderPath
+    ? path.join(rootFolderPath, "version history summaries", `${baseName}${CUT_HISTORY_REPORT_SUFFIX}`)
+    : "";
+  const fullSummaryPath = rootFolderPath
+    ? path.join(rootFolderPath, "version history summaries", `${baseName}${FULL_VERSION_HISTORY_REPORT_SUFFIX}`)
+    : "";
+
+  return {
+    rootFolderPath,
+    sourceFileName: source.fileName,
+    sourceFilePath: source.filePath,
+    versionHistoryPath,
+    expectedVersionHistoryPath,
+    versionHistoryJsonExists: Boolean(versionHistoryPath && fileExists(versionHistoryPath)),
+    originalTextPath,
+    originalTextExists: Boolean(originalTextPath && fileExists(originalTextPath)),
+    summaryPath,
+    summaryExists: Boolean(summaryPath && fileExists(summaryPath)),
+    fullSummaryPath,
+    fullSummaryExists: Boolean(fullSummaryPath && fileExists(fullSummaryPath)),
+    folderInventory: versionHistoryFolderInventoryCheck(rootFolderPath, options)
+  };
 }
 
 function parseDraftPageKey(key) {
@@ -5699,9 +6021,11 @@ async function handleApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/version-history-folder/select") {
     markClientActive();
     const body = await readBody(req);
+    const requestPayload = body ? JSON.parse(body) : {};
     const payload = body
       ? parseStatePayload(body)
       : { state: readState(), filePath: "", fileName: null };
+    const recoverMissingFolder = Boolean(requestPayload.recoverMissingFolder);
     const folderPath = await chooseVersionHistoryFolder();
     if (!folderPath) {
       sendJson(res, 200, { ok: false, cancelled: true });
@@ -5710,23 +6034,29 @@ async function handleApi(req, res, pathname) {
 
     const versionHistoryFolderPath = writeVersionHistoryFolderPath(folderPath);
     const filePath = payload.filePath || readTextFileLink() || (payload.fileName ? "" : EXPORT_FILE);
-    const migration = migrateEmbeddedVersionHistoriesToFolder(payload.state, {
-      filePath,
-      fileName: payload.fileName
-    });
+    const migration = recoverMissingFolder
+      ? { migrated: [], migratedCount: 0, errors: [] }
+      : migrateEmbeddedVersionHistoriesToFolder(payload.state, {
+          filePath,
+          fileName: payload.fileName
+        });
     const result = applyExternalVersionHistory(payload.state, {
       filePath,
       fileName: payload.fileName
     });
-    const state = writeAll(result.state, {
-      filePath,
-      fileName: payload.fileName
-    });
+    const state = recoverMissingFolder
+      ? writeProjectStateOnly(result.state, { embedVersionHistory: !result.loaded })
+      : writeAll(result.state, {
+          filePath,
+          fileName: payload.fileName
+        });
     sendJson(res, 200, {
       ok: true,
       state,
       loaded: result.loaded,
       versionHistoryFolderPath,
+      recoverMissingFolder,
+      folderCheck: versionHistoryFolderCheck({ filePath, fileName: payload.fileName }),
       migratedCount: migration.migratedCount,
       migrationErrors: migration.errors,
       ...statePathPayload({ filePath, fileName: payload.fileName })
@@ -5766,34 +6096,8 @@ async function handleApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/open-recent-text-file") {
     markClientActive();
     const body = await readBody(req);
-    const payload = body ? JSON.parse(body) : {};
-    const filePath = asText(payload.filePath);
-
-    if (!filePath || !isRecentTextFile(filePath)) {
-      sendJson(res, 404, { error: "Recent file not found" });
-      return;
-    }
-
-    const resolvedPath = path.resolve(filePath);
-    try {
-      if (!fs.existsSync(resolvedPath) || !fs.statSync(resolvedPath).isFile()) {
-        sendJson(res, 404, { error: "Recent file no longer exists" });
-        return;
-      }
-    } catch {
-      sendJson(res, 404, { error: "Recent file no longer exists" });
-      return;
-    }
-
-    writeTextFileLink(resolvedPath);
-    sendJson(res, 200, {
-      ok: true,
-      filePath: resolvedPath,
-      fileName: path.basename(resolvedPath),
-      text: fs.readFileSync(resolvedPath, "utf8"),
-      storedState: readTextFileState(resolvedPath),
-      ...statePathPayload({ filePath: resolvedPath, fileName: path.basename(resolvedPath) })
-    });
+    const payload = openRecentTextFileFromRequestBody(body);
+    sendJson(res, payload.ok === false ? payload.status || 404 : 200, payload);
     return;
   }
 
@@ -6026,6 +6330,7 @@ module.exports = {
     writeAll,
     writeTextFileLink,
     writeVersionHistoryFolderPath,
+    versionHistoryFolderCheck,
     macOpenFileDialogScript,
     macSaveFileDialogScript,
     macFolderDialogScript,

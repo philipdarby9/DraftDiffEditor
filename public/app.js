@@ -122,6 +122,9 @@ let versionHistoryPath = "";
 let backupFolderPath = "";
 let backupFolderMissing = false;
 let isPromptingForBackupFolder = false;
+let linkedTextFileMissing = false;
+let linkedTextMissingPath = "";
+let isPromptingForLinkedTextFile = false;
 let stateRevision = 0;
 let saveQueued = false;
 let pendingPageSaveKeys = new Set();
@@ -7021,6 +7024,12 @@ function updateStoragePathsFromPayload(payload = {}) {
   ) {
     backupFolderMissing = Boolean(payload.backupFolderMissing || payload.versionHistoryFolderMissing);
   }
+  if (Object.prototype.hasOwnProperty.call(payload, "linkedTextFileMissing")) {
+    linkedTextFileMissing = Boolean(payload.linkedTextFileMissing);
+  }
+  if (Object.prototype.hasOwnProperty.call(payload, "linkedTextMissingPath")) {
+    linkedTextMissingPath = payload.linkedTextMissingPath || "";
+  }
   if (Object.prototype.hasOwnProperty.call(payload, "backupFolderPath")) {
     backupFolderPath = payload.backupFolderPath || payload.versionHistoryFolderPath || "";
   }
@@ -7067,9 +7076,42 @@ async function promptForMissingBackupFolder() {
       return;
     }
 
-    await selectVersionHistoryFolder();
+    await selectVersionHistoryFolder({ recoverMissingFolder: true });
   } finally {
     isPromptingForBackupFolder = false;
+  }
+}
+
+async function promptForMissingLinkedTextFile(options = {}) {
+  if (!linkedTextFileMissing || isPromptingForLinkedTextFile) return false;
+  isPromptingForLinkedTextFile = true;
+
+  try {
+    const missingPath = linkedTextMissingPath || linkedTextPath || "the linked story file";
+    const chooseNow = window.confirm(
+      `Story file not found:\n\n${missingPath}\n\nChoose the moved story file now?`
+    );
+    if (!chooseNow) {
+      setStatus("Story file missing; choose the moved file before linked saves resume");
+      return false;
+    }
+
+    const previousLinkedTextPath = linkedTextPath;
+    const preserveState = options.preserveFormatsFrom
+      || projectStateFromSnapshot(serializeProjectState());
+    const payload = await requestOpenTextFilePayload();
+    if (!payload || payload.cancelled) {
+      setStatus("Story file still missing");
+      return false;
+    }
+    if (payload.ok === false) throw new Error(payload.error || "Open failed");
+
+    await applyOpenedTextFilePayload(payload, previousLinkedTextPath, preserveState, {
+      preserveFormatsFrom: preserveState
+    });
+    return true;
+  } finally {
+    isPromptingForLinkedTextFile = false;
   }
 }
 
@@ -7206,16 +7248,22 @@ function renderRecentFilesMenu(files = []) {
     return;
   }
 
-  els.fileOpenRecentMenu.innerHTML = files.map(file => `
-    <button class="recent-file-button" type="button" data-recent-file-path="${escapeHtml(file.filePath || "")}" title="${escapeHtml(file.filePath || "")}">
+  els.fileOpenRecentMenu.innerHTML = files.map(file => {
+    const missing = file.exists === false;
+    const filePath = file.filePath || "";
+    const fileName = file.fileName || recentFileLabel(filePath);
+    const title = missing ? `Missing: ${filePath}` : filePath;
+    return `
+    <button class="recent-file-button" type="button" data-recent-file-path="${escapeHtml(filePath)}" title="${escapeHtml(title)}">
       <span class="menu-check" aria-hidden="true"></span>
       <span class="recent-file-text">
-        <span class="recent-file-name">${escapeHtml(file.fileName || recentFileLabel(file.filePath))}</span>
-        <span class="recent-file-path">${escapeHtml(recentFileDirectory(file.filePath))}</span>
+        <span class="recent-file-name">${escapeHtml(fileName)}${missing ? " <span aria-hidden=\"true\">(missing)</span>" : ""}</span>
+        <span class="recent-file-path">${escapeHtml(recentFileDirectory(filePath))}</span>
       </span>
       <span class="menu-shortcut" aria-hidden="true"></span>
     </button>
-  `).join("");
+  `;
+  }).join("");
 }
 
 async function refreshRecentFilesMenu() {
@@ -7257,18 +7305,20 @@ async function prepareCurrentProjectForOpen() {
   rememberLinkedProjectState();
   await cacheLinkedProjectStateOnServer();
   window.clearTimeout(saveTimer);
-  await saveNow();
+  await saveNow({ promptForMissingLinkedTextFile: false });
   setStatus("Saving backup...");
   await writeProjectBackupNow({ allowLinkedTextFileFailure: true });
   return projectStateFromSnapshot(serializeProjectState());
 }
 
-async function applyOpenedTextFilePayload(payload, previousLinkedTextPath = "", previousState = null) {
+async function applyOpenedTextFilePayload(payload, previousLinkedTextPath = "", previousState = null, options = {}) {
   linkedTextPath = payload.filePath || "";
   const storedState = cachedProjectStateForPath(linkedTextPath) || payload.storedState;
   updateStoragePathsFromPayload(payload);
   await applyTextProject(payload.text || "", payload.fileName || "draft-history.txt", {
-    preserveFormatsFrom: storedState || (filePathsMatch(previousLinkedTextPath, linkedTextPath) ? previousState : null),
+    preserveFormatsFrom: storedState
+      || options.preserveFormatsFrom
+      || (filePathsMatch(previousLinkedTextPath, linkedTextPath) ? previousState : null),
     filePath: linkedTextPath
   });
 }
@@ -7323,12 +7373,54 @@ async function openTextProject() {
   }
 }
 
+async function recentOpenErrorFromResponse(response) {
+  try {
+    const payload = await response.json();
+    const error = new Error(payload.error || response.statusText || "Recent file not found");
+    error.code = payload.code || null;
+    error.filePath = payload.filePath || "";
+    return error;
+  } catch {
+    return new Error(response.statusText || `HTTP ${response.status}`);
+  }
+}
+
+function isMissingRecentFileError(error) {
+  return error?.code === "LINKED_TEXT_FILE_MISSING"
+    || /recent file no longer exists|recent file not found/i.test(String(error?.message || ""));
+}
+
+async function promptForMovedRecentTextFile(missingPath, previousLinkedTextPath, previousState) {
+  const chooseNow = window.confirm(
+    `Recent file not found:\n\n${missingPath}\n\nChoose the moved story file now?`
+  );
+  if (!chooseNow) {
+    setStatus("Open recent cancelled");
+    return false;
+  }
+
+  const payload = await requestOpenTextFilePayload();
+  if (!payload || payload.cancelled) {
+    setStatus("Open recent cancelled");
+    return false;
+  }
+  if (payload.ok === false) throw new Error(payload.error || "Open failed");
+
+  const cachedState = cachedProjectStateForPath(missingPath);
+  await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState, {
+    preserveFormatsFrom: cachedState || previousState
+  });
+  return true;
+}
+
 async function openRecentTextProject(filePath) {
   closeFileMenu();
 
+  let previousLinkedTextPath = linkedTextPath;
+  let previousState = null;
   try {
-    const previousLinkedTextPath = linkedTextPath;
-    const previousState = await prepareCurrentProjectForOpen();
+    previousLinkedTextPath = linkedTextPath;
+    previousState = await prepareCurrentProjectForOpen();
     const body = JSON.stringify({ filePath });
     let payload;
     try {
@@ -7337,17 +7429,32 @@ async function openRecentTextProject(filePath) {
         headers: { "content-type": "application/json" },
         body
       });
-      if (!response.ok) throw new Error(await response.text());
+      if (!response.ok) throw await recentOpenErrorFromResponse(response);
       payload = await response.json();
     } catch (error) {
       if (!window.draftDiffDesktop?.openRecentTextFile) throw error;
       payload = await window.draftDiffDesktop.openRecentTextFile(body);
-      if (payload?.ok === false) throw new Error(payload.error || "Recent file not found");
+      if (payload?.ok === false) {
+        const failure = new Error(payload.error || "Recent file not found");
+        failure.code = payload.code || null;
+        failure.filePath = payload.filePath || "";
+        throw failure;
+      }
     }
 
     await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState);
   } catch (error) {
     if (isAbortError(error)) return;
+    if (isMissingRecentFileError(error)) {
+      try {
+        await promptForMovedRecentTextFile(error.filePath || filePath, previousLinkedTextPath, previousState);
+      } catch (promptError) {
+        if (isAbortError(promptError)) return;
+        console.error(promptError);
+        setStatus("Open recent failed");
+      }
+      return;
+    }
     console.error(error);
     setStatus("Open recent failed");
   }
@@ -7374,7 +7481,7 @@ async function openFileLocation() {
   }
 }
 
-async function selectVersionHistoryFolder() {
+async function selectVersionHistoryFolder(options = {}) {
   closeFileMenu();
 
   try {
@@ -7392,7 +7499,8 @@ async function selectVersionHistoryFolder() {
       body: JSON.stringify({
         state,
         filePath: linkedTextPath,
-        fileName: projectFileName
+        fileName: projectFileName,
+        recoverMissingFolder: Boolean(options.recoverMissingFolder || backupFolderMissing)
       })
     });
     if (!response.ok) throw new Error(await response.text());
@@ -7412,10 +7520,20 @@ async function selectVersionHistoryFolder() {
     render();
     if (versionHistoryDraftId) renderDiffSoon("Loading version history");
     const loadedText = payload.loaded ? "; loaded matching histories" : "";
+    const inventory = payload.folderCheck?.folderInventory || {};
+    const inventoryText = (() => {
+      if (!payload.recoverMissingFolder) return "";
+      const missing = Number(inventory.missingKnownStoryCount || 0);
+      const invalid = Number(inventory.invalidJsonCount || 0);
+      const checked = Number(inventory.versionHistoryJsonCount || 0);
+      if (invalid > 0) return `; ${invalid} unreadable history JSON file${invalid === 1 ? "" : "s"}`;
+      if (missing > 0) return `; ${missing} known story histor${missing === 1 ? "y is" : "ies are"} missing`;
+      return `; checked ${checked} history JSON file${checked === 1 ? "" : "s"}`;
+    })();
     const migratedText = Number(payload.migratedCount) > 0
       ? `; migrated ${payload.migratedCount} history file${Number(payload.migratedCount) === 1 ? "" : "s"}`
       : "";
-    setStatus(`Backup and version history folder set${migratedText}${loadedText}`);
+    setStatus(`Backup and version history folder set${migratedText}${loadedText}${inventoryText}`);
   } catch (error) {
     if (isAbortError(error)) return;
     console.error(error);
@@ -8372,7 +8490,7 @@ async function savePendingPagesNow() {
   }
 }
 
-async function saveNow() {
+async function saveNow(options = {}) {
   if (!state) return false;
 
   if (isSaving) {
@@ -8428,7 +8546,7 @@ async function saveNow() {
       saveQueued = false;
       setStatus("Unsaved changes");
       queueSave(0);
-      return Boolean(linkedTextPath);
+      return Boolean(linkedTextPath && !linkedTextFileMissing);
     }
 
     ensureDisplaySelection();
@@ -8436,9 +8554,17 @@ async function saveNow() {
       projectFileName = fileNameFromPath(exportPath) || projectFileName;
     }
     updateProjectTitle();
+    if (linkedTextFileMissing) {
+      setStatus("Story file missing; choose the moved file before linked saves resume");
+      if (options.promptForMissingLinkedTextFile !== false) {
+        window.setTimeout(promptForMissingLinkedTextFile, 0);
+      }
+      renderDraftTabs();
+      return false;
+    }
     setStatus(linkedTextPath ? `Saved ${formatDate(state.updatedAt)}` : "Saved companion; no text file linked");
     renderDraftTabs();
-    return Boolean(linkedTextPath);
+    return Boolean(linkedTextPath && !linkedTextFileMissing);
   } catch (error) {
     console.error(error);
     handleSaveFailure(readableSaveFailure(error?.message));
@@ -8459,17 +8585,24 @@ async function loadState() {
   versionHistoryPath = payload.versionHistoryPath || "";
   backupFolderPath = payload.backupFolderPath || payload.versionHistoryFolderPath || "";
   backupFolderMissing = Boolean(payload.backupFolderMissing || payload.versionHistoryFolderMissing);
+  linkedTextFileMissing = Boolean(payload.linkedTextFileMissing);
+  linkedTextMissingPath = payload.linkedTextMissingPath || "";
   projectFileName = payload.linkedTextFileName || fileNameFromPath(exportPath) || projectFileName;
   updateProjectTitle();
   syncBackupMenu();
   restoreViewStateForProject();
-  setStatus(linkedTextPath ? `Saved ${formatDate(state.updatedAt)}` : "Saved companion; no text file linked");
+  setStatus(linkedTextFileMissing
+    ? "Story file missing; choose the moved file"
+    : linkedTextPath ? `Saved ${formatDate(state.updatedAt)}` : "Saved companion; no text file linked");
   render();
   resetHistory();
   focusPageEditor(activeEditorKey);
+  if (linkedTextFileMissing) {
+    window.setTimeout(promptForMissingLinkedTextFile, 0);
+  }
   if (backupFolderMissing) {
     setStatus("Backup folder missing; choose the moved folder");
-    window.setTimeout(promptForMissingBackupFolder, 0);
+    window.setTimeout(promptForMissingBackupFolder, linkedTextFileMissing ? 250 : 0);
   }
   showProjectRecoveryNotice(payload.projectRecovery);
 }

@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const root = path.resolve(__dirname, "..");
-const appSource = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
+const appSource = fs.readFileSync(path.join(root, "public", "app.js"), "utf8").replace(/\r\n/g, "\n");
 
 function sourceBetween(startNeedle, endNeedle) {
   const start = appSource.indexOf(startNeedle);
@@ -140,7 +140,7 @@ assert.doesNotMatch(changesToggleSource, /saveCurrentViewState\(\)/, "changes-pa
   ["redo full history", "  syncFromInputs();\n  redoStack.pop();\n  const nextSnapshot", "function editableHistoryTarget"],
   ["addDraft", "function addDraft(copyFromSelected)", "function toolbarFormatValues"],
   ["deleteDraft", "function deleteDraft(draftId)", "function resizeNotesPane"],
-  ["saveNow", "async function saveNow()", "async function loadState()"]
+  ["saveNow", "async function saveNow", "async function loadState"]
 ].forEach(([label, start, end]) => {
   const snippet = sourceBetween(start, end);
   assert.match(snippet, /syncFromInputs\(\)/, `${label} should still perform full input sync`);

@@ -109,7 +109,7 @@ try {
   t.writeTextFileLink(linkedPath);
 
   const original = fixtureState("Alpha");
-  t.writeAll(original, { filePath: linkedPath, fileName: "linked.txt" });
+  t.writeAll(original, { filePath: linkedPath, fileName: "linked.txt", allowCreateLinkedTextFile: true });
   const sidecarPath = versionHistoryPath(historyDir);
   const persistedPaths = [
     t.STATE_FILE,
@@ -153,6 +153,115 @@ try {
   assert.match(readText(t.EXPORT_FILE), /Gamma/, "local companion export should still save when linked text file is blocked");
   assert.match(readText(sidecarPath), /Gamma/, "version history sidecar should still save when linked text file is blocked");
   assert.match(readText(linkedPath), /Alpha/, "blocked linked text file should be left untouched");
+
+  const missingLinkedPath = path.join(dataDir, "renamed-parent", "moved-story.txt");
+  t.writeTextFileLink(missingLinkedPath);
+  const missingLinkedResult = server.saveStateFromRequestBody(JSON.stringify({
+    state: fixtureState("Delta"),
+    filePath: missingLinkedPath,
+    fileName: "moved-story.txt"
+  }));
+  assert.equal(missingLinkedResult.linkedTextFileMissing, true, "missing linked text file should be reported");
+  assert.equal(missingLinkedResult.linkedTextMissingPath, missingLinkedPath);
+  assert.equal(
+    fs.existsSync(path.dirname(missingLinkedPath)),
+    false,
+    "autosave should not recreate a renamed/missing linked story folder"
+  );
+  const missingLinkedSidecarPath = path.join(historyDir, "json", "moved-story.version-history.json");
+  assert.match(readText(t.STATE_FILE), /Delta/, "project state should still save locally when linked file is missing");
+  assert.match(readText(t.EXPORT_FILE), /Delta/, "local companion export should still save when linked file is missing");
+  assert.match(readText(missingLinkedSidecarPath), /Delta/, "version history sidecar should still save when linked file is missing");
+
+  const recentFiles = server.recentTextFilesPayload().files;
+  const missingRecent = recentFiles.find(file => file.filePath === missingLinkedPath);
+  assert.equal(Boolean(missingRecent), true, "missing linked story should remain visible in recent files");
+  assert.equal(missingRecent.exists, false, "missing recent entry should be marked as missing");
+  const missingRecentOpen = server.openRecentTextFileFromRequestBody(JSON.stringify({ filePath: missingLinkedPath }));
+  assert.equal(missingRecentOpen.ok, false);
+  assert.equal(missingRecentOpen.code, "LINKED_TEXT_FILE_MISSING");
+  assert.equal(
+    fs.existsSync(path.dirname(missingLinkedPath)),
+    false,
+    "opening a missing recent entry should not recreate its old folder"
+  );
+
+  const historyBackupsDir = path.join(historyDir, "version history JSON backups");
+  const backupsBefore = fs.existsSync(historyBackupsDir) ? fs.readdirSync(historyBackupsDir).length : 0;
+  t.writeTextFileLink(linkedPath);
+  t.writeAll(fixtureState("Epsilon"), {
+    filePath: linkedPath,
+    fileName: "linked.txt"
+  });
+  const backupFiles = fs.existsSync(historyBackupsDir) ? fs.readdirSync(historyBackupsDir) : [];
+  assert.equal(
+    backupFiles.length > backupsBefore,
+    true,
+    "overwriting a version-history JSON should keep a permanent backup copy"
+  );
+  assert.equal(
+    backupFiles.some(fileName => readText(path.join(historyBackupsDir, fileName)).includes("Gamma")),
+    true,
+    "version-history backup should contain the previous JSON contents"
+  );
+
+  assert.throws(
+    () => t.writeAll(fixtureState("Zeta"), {
+      filePath: linkedPath,
+      fileName: "linked.txt",
+      mergeExisting: false
+    }),
+    /Refusing to write version history because it would drop/,
+    "version-history writes should fail if existing saved text would disappear"
+  );
+  assert.match(readText(path.join(historyDir, "json", "linked.version-history.json")), /Epsilon/);
+
+  const inventoryStoryPath = path.join(dataDir, "inventory-story.txt");
+  t.writeTextFileLink(inventoryStoryPath);
+  t.writeAll(fixtureState("Inventory"), {
+    filePath: inventoryStoryPath,
+    fileName: "inventory-story.txt",
+    allowCreateLinkedTextFile: true
+  });
+
+  let inventory = t.versionHistoryFolderCheck({
+    filePath: inventoryStoryPath,
+    fileName: "inventory-story.txt"
+  }).folderInventory;
+  assert.equal(
+    inventory.expectedStories.some(story => story.fileName === "inventory-story.txt" && story.found),
+    true,
+    "folder inventory should check every known story, not only the active story"
+  );
+  assert.equal(
+    inventory.expectedStories.some(story => story.fileName === "linked.txt" && story.found),
+    true,
+    "folder inventory should include other known story histories"
+  );
+
+  const corruptHistoryPath = path.join(historyDir, "json", "corrupt.version-history.json");
+  fs.writeFileSync(corruptHistoryPath, "{ broken json", "utf8");
+  inventory = t.versionHistoryFolderCheck({
+    filePath: inventoryStoryPath,
+    fileName: "inventory-story.txt"
+  }).folderInventory;
+  assert.equal(
+    inventory.invalidJsonFiles.some(file => file.filePath === corruptHistoryPath),
+    true,
+    "folder inventory should report unreadable version-history JSON files"
+  );
+
+  const inventorySidecarPath = path.join(historyDir, "json", "inventory-story.version-history.json");
+  fs.rmSync(inventorySidecarPath, { force: true });
+  inventory = t.versionHistoryFolderCheck({
+    filePath: inventoryStoryPath,
+    fileName: "inventory-story.txt"
+  }).folderInventory;
+  assert.equal(
+    inventory.missingStories.some(story => story.fileName === "inventory-story.txt"),
+    true,
+    "folder inventory should report missing JSON for every known story"
+  );
 
   console.log("persistence transaction tests passed");
 } finally {

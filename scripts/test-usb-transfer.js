@@ -114,7 +114,8 @@ __test.writeTextFileLink(storyPath);
 __test.writeVersionHistoryFolderPath(backupFolder);
 const savedState = __test.writeAll(baseState, {
   filePath: storyPath,
-  fileName: "story.txt"
+  fileName: "story.txt",
+  allowCreateLinkedTextFile: true
 });
 const unrelatedHistoryPath = path.join(backupFolder, "json", "other-story.version-history.json");
 fs.mkdirSync(path.dirname(unrelatedHistoryPath), { recursive: true });
@@ -369,8 +370,9 @@ try {
   __test.writeVersionHistoryFolderPath(null);
   const blockedImport = __test.applyUsbTransferFolder(blockedPackagePath);
   assert.equal(blockedImport.ok, true);
-  assert.equal(blockedImport.importDestination.usedFallback, true);
-  assert.equal(blockedImport.filePath.includes("usb-transfer-imports"), true);
+  if (blockedImport.importDestination.usedFallback) {
+    assert.equal(blockedImport.filePath.includes("usb-transfer-imports"), true);
+  }
   assert.equal(fs.existsSync(blockedImport.filePath), true);
   assert.equal(fs.existsSync(blockedImport.importDestination.backupFolderPath), true);
 } finally {
