@@ -5734,6 +5734,24 @@ function existingDirectory(filePath) {
   return fs.existsSync(directoryPath) ? directoryPath : DATA_DIR;
 }
 
+function existingFolderForDialog(preferredPath, fallbackPath = readTextFileLink() || EXPORT_FILE) {
+  const candidates = [preferredPath, fallbackPath, EXPORT_FILE, DATA_DIR].filter(Boolean);
+
+  for (const candidate of candidates) {
+    let currentPath = path.resolve(candidate);
+    if (fileExists(currentPath)) currentPath = path.dirname(currentPath);
+
+    while (currentPath && currentPath !== path.dirname(currentPath)) {
+      if (directoryExists(currentPath)) return currentPath;
+      currentPath = path.dirname(currentPath);
+    }
+
+    if (directoryExists(currentPath)) return currentPath;
+  }
+
+  return DATA_DIR;
+}
+
 function windowsFileDialogCommand(dialogType, initialDirectory, initialFileName = "") {
   const dialogClass = dialogType === "save"
     ? "System.Windows.Forms.SaveFileDialog"
@@ -5943,12 +5961,12 @@ async function chooseFolderWithNativeDialog(initialDirectory, description) {
 }
 
 async function chooseVersionHistoryFolder() {
-  const initialDirectory = readVersionHistoryFolderPath() || existingDirectory(readTextFileLink() || EXPORT_FILE);
+  const initialDirectory = existingFolderForDialog(readVersionHistoryFolderPath());
   return chooseFolderWithNativeDialog(initialDirectory, "Select the backup and version history folder");
 }
 
 async function chooseBackupFolder() {
-  const initialDirectory = readVersionHistoryFolderPath() || existingDirectory(readTextFileLink() || EXPORT_FILE);
+  const initialDirectory = existingFolderForDialog(readVersionHistoryFolderPath());
   return chooseFolderWithNativeDialog(initialDirectory, "Select the backup and version history folder");
 }
 
@@ -6524,6 +6542,7 @@ module.exports = {
     writeTextFileLink,
     writeVersionHistoryFolderPath,
     versionHistoryFolderCheck,
+    existingFolderForDialog,
     carryVersionHistoryJsonFiles,
     assertCarriedVersionHistoryFilesSafe,
     migrateEmbeddedVersionHistoriesToFolder,

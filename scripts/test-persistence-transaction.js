@@ -103,6 +103,15 @@ function writeInterruptedJournal(paths, snapshotBefore) {
 }
 
 try {
+  const missingBackupParent = path.join(dataDir, "renamed-backup-parent");
+  const missingBackupFolder = path.join(missingBackupParent, "backup-folder-before-rename");
+  fs.mkdirSync(missingBackupParent, { recursive: true });
+  assert.equal(
+    t.existingFolderForDialog(missingBackupFolder),
+    missingBackupParent,
+    "folder dialogs should start from an existing parent when the saved backup folder was moved"
+  );
+
   const historyDir = path.join(dataDir, "history");
   const linkedPath = path.join(dataDir, "linked.txt");
   t.writeVersionHistoryFolderPath(historyDir);
