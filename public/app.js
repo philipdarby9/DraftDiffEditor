@@ -4256,28 +4256,35 @@ function preservedFormat(previousPage) {
   return previousPage?.format ? { ...normalizeFormat(previousPage.format) } : { ...DEFAULT_FORMAT };
 }
 
-function pageFromImportedBlock(block, fallbackTitle, previousPage = null) {
+function pageFromImportedBlock(block, fallbackTitle, previousPage = null, options = {}) {
+  const preserveIdentity = options.preserveIdentity !== false;
   const title = block?.title || fallbackTitle;
   const content = block?.content || "";
   const importedCreatedAt = block?.createdAt || nowIso();
   const importedUpdatedAt = block?.updatedAt || importedCreatedAt;
-  const createdAt = previousPage?.createdAt || importedCreatedAt;
-  const previousContent = previousPage
+  const createdAt = preserveIdentity && previousPage?.createdAt ? previousPage.createdAt : importedCreatedAt;
+  const previousContent = preserveIdentity && previousPage
     ? previousPage.content || plainTextFromHtml(previousPage.contentHtml || "")
     : null;
-  const contentChanged = previousPage && previousContent !== content;
+  const contentChanged = preserveIdentity && previousPage && previousContent !== content;
   return {
-    id: previousPage?.id || makeId("page"),
+    id: preserveIdentity && previousPage?.id ? previousPage.id : makeId("page"),
     title,
     createdAt,
-    updatedAt: contentChanged ? nowIso() : previousPage?.updatedAt || importedUpdatedAt || createdAt,
+    updatedAt: contentChanged
+      ? nowIso()
+      : preserveIdentity && previousPage?.updatedAt
+      ? previousPage.updatedAt
+      : importedUpdatedAt || createdAt,
     content,
     contentHtml: textToHtml(content),
     format: preservedFormat(previousPage)
   };
 }
 
-function stateFromExportText(text, previousState = null) {
+function stateFromExportText(text, previousState = null, options = {}) {
+  const preserveIdentity = options.preserveIdentity !== false;
+  const preserveHistory = options.preserveHistory !== false;
   const blocks = String(text || "")
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -4313,19 +4320,19 @@ function stateFromExportText(text, previousState = null) {
 
     const draftNumber = drafts.length + 1;
     const previousDraft = previousState?.drafts?.[draftNumber - 1] || null;
-    const draft = pageFromImportedBlock(draftBlock, `Draft ${draftNumber}`, previousDraft);
-    if (Array.isArray(previousDraft?.versionHistory)) {
+    const draft = pageFromImportedBlock(draftBlock, `Draft ${draftNumber}`, previousDraft, { preserveIdentity });
+    if (preserveHistory && Array.isArray(previousDraft?.versionHistory)) {
       draft.versionHistory = previousDraft.versionHistory;
     }
-    const notes = pageFromImportedBlock(notesBlock, `${draft.title} Notes`, previousDraft?.notes);
-    notes.id = previousDraft?.notes?.id || makeId("notes");
+    const notes = pageFromImportedBlock(notesBlock, `${draft.title} Notes`, previousDraft?.notes, { preserveIdentity });
+    notes.id = preserveIdentity && previousDraft?.notes?.id ? previousDraft.notes.id : makeId("notes");
     notes.title = `${draft.title} Notes`;
-    if (Array.isArray(previousDraft?.notes?.versionHistory)) {
+    if (preserveHistory && Array.isArray(previousDraft?.notes?.versionHistory)) {
       notes.versionHistory = previousDraft.notes.versionHistory;
     }
     const importedDraft = {
       ...draft,
-      id: previousDraft?.id || makeId("draft"),
+      id: preserveIdentity && previousDraft?.id ? previousDraft.id : makeId("draft"),
       notes
     };
     ensureDraftVersionHistory(importedDraft);
@@ -4340,11 +4347,11 @@ function stateFromExportText(text, previousState = null) {
   if (!drafts.length) drafts.push(createDraft(null, 1));
 
   const initialNotes = {
-    ...pageFromImportedBlock(storyBlock, PROJECT_NOTES_TITLE, previousState?.initialNotes),
+    ...pageFromImportedBlock(storyBlock, PROJECT_NOTES_TITLE, previousState?.initialNotes, { preserveIdentity }),
     id: "initial-notes",
     title: PROJECT_NOTES_TITLE
   };
-  if (Array.isArray(previousState?.initialNotes?.versionHistory)) {
+  if (preserveHistory && Array.isArray(previousState?.initialNotes?.versionHistory)) {
     initialNotes.versionHistory = previousState.initialNotes.versionHistory;
   }
   ensurePageVersionHistory(initialNotes, PROJECT_NOTES_TITLE);
@@ -4355,9 +4362,9 @@ function stateFromExportText(text, previousState = null) {
     version: 1,
     formatDefaultVersion: FORMAT_DEFAULT_VERSION,
     defaultFormat: currentDefaultFormat(previousState),
-    createdAt,
+    createdAt: preserveIdentity ? createdAt : storyBlock.createdAt || nowIso(),
     updatedAt: nowIso(),
-    viewState: previousState?.viewState || null,
+    viewState: preserveIdentity ? previousState?.viewState || null : null,
     initialNotes,
     drafts
   };
@@ -7116,7 +7123,10 @@ async function promptForMissingLinkedTextFile(options = {}) {
 }
 
 async function applyTextProject(text, fileName, options = {}) {
-  state = stateFromExportText(text, options.preserveFormatsFrom || null);
+  state = stateFromExportText(text, options.preserveFormatsFrom || null, {
+    preserveIdentity: Boolean(options.preserveIdentity),
+    preserveHistory: Boolean(options.preserveHistory)
+  });
   const historyResult = await applyExternalVersionHistory(state, {
     filePath: options.filePath || "",
     fileName

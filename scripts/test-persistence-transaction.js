@@ -248,6 +248,154 @@ try {
   );
   assert.match(readText(linkedHistoryPath), /empty-2/);
 
+  fs.writeFileSync(linkedHistoryPath, `${JSON.stringify({
+    version: 1,
+    sourceFileName: "linked.txt",
+    sourceFilePath: linkedPath,
+    story: {
+      title: "Project notes",
+      history: []
+    },
+    drafts: [
+      {
+        id: "draft-a",
+        index: 0,
+        title: "Draft A",
+        history: [
+          {
+            id: "same-text-1",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            title: "Draft A",
+            content: "Same saved text",
+            contentHtml: "<p>Same saved text</p>"
+          },
+          {
+            id: "same-text-2",
+            createdAt: "2026-01-01T00:01:00.000Z",
+            title: "Draft A",
+            content: "Same saved text",
+            contentHtml: "<p>Same saved text</p>"
+          }
+        ]
+      }
+    ]
+  }, null, 2)}\n`, "utf8");
+  t.writeAll(fixtureState("Theta"), {
+    filePath: linkedPath,
+    fileName: "linked.txt"
+  });
+  const sameTextAfterSave = JSON.parse(readText(linkedHistoryPath));
+  const sameTextHistoryIds = sameTextAfterSave.drafts[0].history.map(version => version.id);
+  assert.equal(
+    sameTextHistoryIds.includes("same-text-1") && sameTextHistoryIds.includes("same-text-2"),
+    true,
+    "normal save should preserve separate saved versions even when their text is identical"
+  );
+
+  fs.writeFileSync(linkedHistoryPath, `${JSON.stringify({
+    version: 1,
+    sourceFileName: "linked.txt",
+    sourceFilePath: linkedPath,
+    story: {
+      id: "letters-story",
+      title: "Project notes",
+      history: [{
+        id: "letters-story-v1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        title: "Project notes",
+        content: "Dear story notes",
+        contentHtml: "<p>Dear story notes</p>"
+      }]
+    },
+    drafts: [
+      {
+        id: "letters-draft-1",
+        index: 0,
+        title: "Draft A",
+        history: [{
+          id: "letters-draft-v1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          title: "Draft A",
+          content: "Dear Mischa,",
+          contentHtml: "<p>Dear Mischa,</p>"
+        }],
+        notes: {
+          id: "letters-notes-1",
+          title: "Draft A Notes",
+          history: []
+        }
+      }
+    ]
+  }, null, 2)}\n`, "utf8");
+  const contaminatedCachedState = StateCore.normalizeState({
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-02T00:00:00.000Z",
+    initialNotes: {
+      id: "initial-notes",
+      title: "Project notes",
+      content: "Dear story notes updated",
+      contentHtml: "<p>Dear story notes updated</p>",
+      versionHistory: [{
+        id: "suicide-story-v1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        title: "Project notes",
+        content: "William Roster story notes",
+        contentHtml: "<p>William Roster story notes</p>"
+      }]
+    },
+    drafts: [
+      {
+        id: "suicide-draft-1",
+        title: "Draft A",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+        content: "Dear Mischa, updated",
+        contentHtml: "<p>Dear Mischa, updated</p>",
+        versionHistory: [{
+          id: "suicide-draft-v1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          title: "Draft A",
+          content: "William Roster draft text",
+          contentHtml: "<p>William Roster draft text</p>"
+        }],
+        notes: {
+          id: "suicide-notes-1",
+          title: "Draft A Notes",
+          content: "",
+          contentHtml: "",
+          versionHistory: [{
+            id: "suicide-notes-v1",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            title: "Draft A Notes",
+            content: "William Roster notes",
+            contentHtml: "<p>William Roster notes</p>"
+          }]
+        }
+      }
+    ]
+  });
+  t.writeAll(contaminatedCachedState, {
+    filePath: linkedPath,
+    fileName: "linked.txt",
+    allowCreateLinkedTextFile: true
+  });
+  const cleanedAfterSave = JSON.parse(readText(linkedHistoryPath));
+  assert.equal(
+    JSON.stringify(cleanedAfterSave).includes("William Roster"),
+    false,
+    "existing sidecar saves should not import stale histories from another in-memory story"
+  );
+  assert.equal(
+    cleanedAfterSave.drafts[0].id,
+    "letters-draft-1",
+    "existing sidecar draft IDs should remain authoritative when matching by title or index"
+  );
+  assert.equal(
+    cleanedAfterSave.drafts[0].history.some(version => version.content === "Dear Mischa, updated"),
+    true,
+    "existing sidecar saves should still add the current target story text"
+  );
+
   assert.throws(
     () => t.assertVersionHistoryMigrationSafe({
       errors: [{ code: "VERSION_HISTORY_COUNT_LOSS", error: "would shrink history" }]

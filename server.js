@@ -638,6 +638,15 @@ function versionHistorySignature(version) {
   return StateCore.pageVersionSignature(version);
 }
 
+function versionHistoryIdentityKey(version) {
+  const createdAt = asText(version?.createdAt);
+  const signature = versionHistorySignature(version);
+  if (createdAt) return `created:${createdAt}\0${signature}`;
+
+  const idValue = asText(version?.id);
+  return idValue ? `id:${idValue}` : `signature:${signature}`;
+}
+
 function versionHistoryTime(version) {
   return StateCore.versionHistoryTime(version);
 }
@@ -671,26 +680,13 @@ function mergePageVersionHistories(existingHistory, incomingHistory, page, fallb
   if (!Array.isArray(incomingHistory) || !incomingHistory.length) return existing;
 
   const merged = [];
-  const seenIds = new Set();
-  const signatureIndexes = new Map();
+  const seenKeys = new Set();
 
   const addEntries = entries => {
     entries.forEach(entry => {
-      const idValue = asText(entry?.id);
-      const signature = versionHistorySignature(entry);
-      if (idValue && seenIds.has(idValue)) return;
-      if (signatureIndexes.has(signature)) {
-        const existingIndex = signatureIndexes.get(signature);
-        const existingTime = versionHistoryTime(merged[existingIndex]);
-        const incomingTime = versionHistoryTime(entry);
-        if (incomingTime !== null && (existingTime === null || incomingTime > existingTime)) {
-          merged[existingIndex] = entry;
-          if (idValue) seenIds.add(idValue);
-        }
-        return;
-      }
-      if (idValue) seenIds.add(idValue);
-      signatureIndexes.set(signature, merged.length);
+      const key = versionHistoryIdentityKey(entry);
+      if (seenKeys.has(key)) return;
+      seenKeys.add(key);
       merged.push(entry);
     });
   };
@@ -758,6 +754,9 @@ function applyVersionHistoryPayloadToState(state, payload) {
     const matchingDraft = byId.get(draft.id)
       || (titleKey ? titles.get(titleKey) : null)
       || byIndex.get(index);
+    const matchingDraftId = asText(matchingDraft?.id || matchingDraft?.draftId);
+    if (matchingDraftId) draft.id = matchingDraftId;
+
     const history = Array.isArray(matchingDraft?.history)
       ? matchingDraft.history
       : matchingDraft?.versionHistory;
@@ -773,6 +772,8 @@ function applyVersionHistoryPayloadToState(state, payload) {
 
     const notesHistory = draftNotesHistoryFromPayloadEntry(matchingDraft);
     if (draft.notes && Array.isArray(notesHistory)) {
+      const matchingNotesId = asText(matchingDraft?.notes?.id || matchingDraft?.notesId || matchingDraft?.draftNotesId);
+      if (matchingNotesId) draft.notes.id = matchingNotesId;
       const notesTitle = draft.notes.title || `${draft.title || "Untitled draft"} Notes`;
       draft.notes.versionHistory = mergePageVersionHistories(
         draft.notes.versionHistory,
@@ -793,8 +794,9 @@ function applyExternalVersionHistory(state, options = {}) {
   if (!filePath || !fs.existsSync(filePath)) return { state: normalized, loaded: false, filePath: null };
 
   const payload = parseVersionHistoryFile(filePath);
-  const loaded = applyVersionHistoryPayloadToState(normalized, payload);
-  return { state: normalized, loaded, filePath };
+  const mergedState = normalizeState(stateWithoutVersionHistory(normalized));
+  const loaded = applyVersionHistoryPayloadToState(mergedState, payload);
+  return { state: mergedState, loaded, filePath };
 }
 
 function versionHistoryPayloadPages(payload) {
@@ -1537,9 +1539,10 @@ function versionHistoryTransactionWrite(state, options = {}) {
   const existingPayload = existingHistoryPath && fileExists(existingHistoryPath)
     ? parseVersionHistoryFile(existingHistoryPath)
     : null;
+  const sourceState = existingPayload ? normalizeState(stateWithoutVersionHistory(state)) : state;
   const stateToWrite = options.mergeExisting === false
-    ? state
-    : applyExternalVersionHistory(state, options).state;
+    ? sourceState
+    : applyExternalVersionHistory(sourceState, options).state;
   const nextPayload = versionHistoryPayloadFromState(stateToWrite, options);
   if (existingPayload) {
     assertVersionHistoryPreservesExistingText(existingPayload, nextPayload, existingHistoryPath);
@@ -4740,8 +4743,8 @@ function pageReviewSignature(page, fallbackTitle) {
 
   return JSON.stringify({
     current: pageCurrentSignature(page, fallbackTitle),
-    history: historyWithCurrentPage(page, fallbackTitle)
-      .map(version => versionHistorySignature(version))
+    history: [...new Set(historyWithCurrentPage(page, fallbackTitle)
+      .map(version => versionHistorySignature(version)))]
       .sort((left, right) => left.localeCompare(right))
   });
 }
