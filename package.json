@@ -59,7 +59,7 @@
       ]
     },
     "linux": {
-      "icon": "icon.png",
+      "icon": "build/icons",
       "category": "Office",
       "maintainer": "Philip Darby <draft-diff-editor@localhost>",
       "target": [

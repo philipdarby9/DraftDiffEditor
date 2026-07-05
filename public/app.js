@@ -6941,6 +6941,24 @@ function readableUsbExportFailure(message = "") {
   return text ? `USB export failed: ${text.slice(0, 90)}` : "USB export failed";
 }
 
+function readableBackupFolderFailure(message = "") {
+  const text = String(message || "");
+  if (/EACCES|EPERM|access is denied|denied/i.test(text)) {
+    return "Backup folder failed: access denied";
+  }
+  if (/Failed to fetch|NetworkError|Load failed/i.test(text)) {
+    return "Backup folder failed: local server unavailable";
+  }
+  return text ? `Backup folder failed: ${text.slice(0, 90)}` : "Backup and version history folder failed";
+}
+
+function assertBackupFolderPayload(payload) {
+  if (payload?.ok === false && !payload.cancelled) {
+    throw new Error(payload.error || payload.message || "Backup folder operation failed");
+  }
+  return payload;
+}
+
 async function responseSaveFailure(response) {
   try {
     const payload = await response.json();
@@ -7503,19 +7521,25 @@ async function selectVersionHistoryFolder(options = {}) {
     window.clearTimeout(saveTimer);
     setStatus("Choose a backup and version history folder...");
 
-    const response = await fetch("/api/version-history-folder/select", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        state,
-        filePath: linkedTextPath,
-        fileName: projectFileName,
-        recoverMissingFolder: Boolean(options.recoverMissingFolder || backupFolderMissing)
-      })
+    const body = JSON.stringify({
+      state,
+      filePath: linkedTextPath,
+      fileName: projectFileName,
+      recoverMissingFolder: Boolean(options.recoverMissingFolder || backupFolderMissing)
     });
-    if (!response.ok) throw new Error(await response.text());
-
-    const payload = await response.json();
+    let payload = null;
+    try {
+      const response = await fetch("/api/version-history-folder/select", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body
+      });
+      if (!response.ok) throw new Error(await response.text());
+      payload = await response.json();
+    } catch (error) {
+      if (!window.draftDiffDesktop?.selectVersionHistoryFolder) throw error;
+      payload = assertBackupFolderPayload(await window.draftDiffDesktop.selectVersionHistoryFolder(body));
+    }
     if (payload.cancelled) {
       setStatus("Backup and version history folder unchanged");
       return;
@@ -7533,11 +7557,9 @@ async function selectVersionHistoryFolder(options = {}) {
     const inventory = payload.folderCheck?.folderInventory || {};
     const inventoryText = (() => {
       if (!payload.recoverMissingFolder) return "";
-      const missing = Number(inventory.missingKnownStoryCount || 0);
       const invalid = Number(inventory.invalidJsonCount || 0);
       const checked = Number(inventory.versionHistoryJsonCount || 0);
       if (invalid > 0) return `; ${invalid} unreadable history JSON file${invalid === 1 ? "" : "s"}`;
-      if (missing > 0) return `; ${missing} known story histor${missing === 1 ? "y is" : "ies are"} missing`;
       return `; checked ${checked} history JSON file${checked === 1 ? "" : "s"}`;
     })();
     const migratedText = Number(payload.migratedCount) > 0
@@ -7547,7 +7569,7 @@ async function selectVersionHistoryFolder(options = {}) {
   } catch (error) {
     if (isAbortError(error)) return;
     console.error(error);
-    setStatus("Backup and version history folder failed");
+    setStatus(readableBackupFolderFailure(error?.message));
   }
 }
 
@@ -7561,20 +7583,30 @@ async function toggleBackup() {
     }
 
     if (backupFolderPath) {
-      const response = await fetch("/api/backup/deactivate", { method: "POST" });
-      if (!response.ok) throw new Error(await response.text());
-
-      const payload = await response.json();
+      let payload = null;
+      try {
+        const response = await fetch("/api/backup/deactivate", { method: "POST" });
+        if (!response.ok) throw new Error(await response.text());
+        payload = await response.json();
+      } catch (error) {
+        if (!window.draftDiffDesktop?.deactivateBackup) throw error;
+        payload = assertBackupFolderPayload(await window.draftDiffDesktop.deactivateBackup());
+      }
       updateStoragePathsFromPayload(payload);
       setStatus("Backup deactivated");
       return;
     }
 
     setStatus("Choose a backup and version history folder...");
-    const response = await fetch("/api/backup/activate", { method: "POST" });
-    if (!response.ok) throw new Error(await response.text());
-
-    const payload = await response.json();
+    let payload = null;
+    try {
+      const response = await fetch("/api/backup/activate", { method: "POST" });
+      if (!response.ok) throw new Error(await response.text());
+      payload = await response.json();
+    } catch (error) {
+      if (!window.draftDiffDesktop?.activateBackup) throw error;
+      payload = assertBackupFolderPayload(await window.draftDiffDesktop.activateBackup());
+    }
     if (payload.cancelled) {
       setStatus("Backup and version history folder unchanged");
       return;
@@ -7585,7 +7617,7 @@ async function toggleBackup() {
   } catch (error) {
     if (isAbortError(error)) return;
     console.error(error);
-    setStatus("Backup setup failed");
+    setStatus(readableBackupFolderFailure(error?.message));
   }
 }
 

@@ -412,6 +412,16 @@ try {
     /migration was stopped/,
     "folder migration should stop if a sidecar write would shrink existing history"
   );
+  assert.doesNotThrow(
+    () => t.assertVersionHistoryMigrationSafe({
+      errors: [{
+        code: "VERSION_HISTORY_COUNT_LOSS",
+        error: "would shrink history",
+        skipped: true
+      }]
+    }),
+    "folder migration should allow skipped embedded histories when existing sidecars preserve more history"
+  );
 
   const carryStoryPath = path.join(dataDir, "carry-story.txt");
   const previousHistoryDir = path.join(dataDir, "previous-history");

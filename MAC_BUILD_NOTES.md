@@ -2,6 +2,8 @@
 
 Build macOS releases from the latest branch that includes the native macOS picker fixes. The fixes are in `server.js`: `Open...` and `Save as...` must route through `chooseTextFileWithNativeDialog`, and `Backup folder`, `Activate backup`, and USB transfer folder selection must route through `chooseFolderWithNativeDialog`. These helpers use `osascript` on macOS.
 
+Backup-folder activation also has an Electron IPC fallback in `desktop/main.js` and `desktop/preload.js`. The fallback is used only if the renderer cannot complete the normal HTTP route, so the macOS `osascript` folder picker remains the primary path. If the fallback is used, it should return a structured `{ ok: false, error }` payload instead of the generic Electron `Error invoking remote method` message.
+
 ## Prerequisites
 
 - macOS
@@ -58,7 +60,7 @@ Applications
 To confirm the packaged app contains the mac picker fixes:
 
 ```sh
-node -e "const asar=require('@electron/asar'); const text=asar.extractFile('dist/mac/Draft Diff Editor.app/Contents/Resources/app.asar','server.js').toString(); console.log({hasMacFolderDialog:text.includes('choose folder with prompt promptText default location initialFolder'),hasMacOpenDialog:text.includes('choose file with prompt promptText default location initialFolder'),hasMacSaveDialog:text.includes('choose file name with prompt promptText default name initialName default location initialFolder'),hasOldBackupError:text.includes('Backup folder selection is only available in the desktop Windows dialog right now.')});"
+node -e "const asar=require('@electron/asar'); const server=asar.extractFile('dist/mac/Draft Diff Editor.app/Contents/Resources/app.asar','server.js').toString(); const main=asar.extractFile('dist/mac/Draft Diff Editor.app/Contents/Resources/app.asar','desktop/main.js').toString(); const app=asar.extractFile('dist/mac/Draft Diff Editor.app/Contents/Resources/app.asar','public/app.js').toString(); console.log({hasMacFolderDialog:server.includes('choose folder with prompt promptText default location initialFolder'),hasMacOpenDialog:server.includes('choose file with prompt promptText default location initialFolder'),hasMacSaveDialog:server.includes('choose file name with prompt promptText default name initialName default location initialFolder'),backupFolderIpc:main.includes('draft-diff:activate-backup')&&main.includes('draft-diff:select-version-history-folder'),rendererBackupFallback:app.includes('draftDiffDesktop?.activateBackup')&&app.includes('draftDiffDesktop?.selectVersionHistoryFolder'),hasOldBackupError:server.includes('Backup folder selection is only available in the desktop Windows dialog right now.')});"
 ```
 
 Expected result:
@@ -68,6 +70,8 @@ Expected result:
   hasMacFolderDialog: true,
   hasMacOpenDialog: true,
   hasMacSaveDialog: true,
+  backupFolderIpc: true,
+  rendererBackupFallback: true,
   hasOldBackupError: false
 }
 ```

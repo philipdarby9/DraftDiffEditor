@@ -50,6 +50,8 @@ To create a Windows build:
 npm run package:win
 ```
 
+Build this package from Windows when possible. See `WINDOWS_BUILD_NOTES.md` for picker and backup-folder verification.
+
 To create a macOS build:
 
 ```sh

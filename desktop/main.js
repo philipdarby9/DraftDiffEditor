@@ -324,6 +324,31 @@ async function saveTextFileWithDesktopDialog(body) {
   return api.saveTextFileToPath(result.filePath, String(body || ""));
 }
 
+async function chooseBackupFolderWithDesktopDialog() {
+  const result = await dialog.showOpenDialog(mainWindow || undefined, {
+    title: "Select the backup and version history folder",
+    defaultPath: app.getPath("documents"),
+    properties: ["openDirectory", "createDirectory"]
+  });
+
+  if (result.canceled) return "";
+  return result.filePaths?.[0] || "";
+}
+
+async function ipcFailurePayload(operation, callback) {
+  try {
+    return await callback();
+  } catch (error) {
+    console.error(`${operation} failed`, error);
+    return {
+      ok: false,
+      error: error?.message || String(error || `${operation} failed`),
+      stack: error?.stack || "",
+      operation
+    };
+  }
+}
+
 async function createWindow() {
   const { startServer } = loadServerApi();
   serverHandle = await startServer({ port: 0, host: "127.0.0.1" });
@@ -476,6 +501,26 @@ app.whenReady()
     ipcMain.handle("draft-diff:backup-project", (_event, body) => {
       const api = loadServerApi();
       return api.backupProjectFromRequestBody(String(body || ""));
+    });
+    ipcMain.handle("draft-diff:activate-backup", () => {
+      return ipcFailurePayload("activate backup folder", async () => {
+        const api = loadServerApi();
+        const folderPath = await chooseBackupFolderWithDesktopDialog();
+        return api.activateBackupFolderPath(folderPath);
+      });
+    });
+    ipcMain.handle("draft-diff:deactivate-backup", () => {
+      return ipcFailurePayload("deactivate backup folder", () => {
+        const api = loadServerApi();
+        return api.deactivateBackupFolder();
+      });
+    });
+    ipcMain.handle("draft-diff:select-version-history-folder", (_event, body) => {
+      return ipcFailurePayload("select version history folder", async () => {
+        const api = loadServerApi();
+        const folderPath = await chooseBackupFolderWithDesktopDialog();
+        return api.selectVersionHistoryFolderPathFromRequestBody(folderPath, String(body || ""));
+      });
     });
     ipcMain.handle("draft-diff:version-history-summary-start", (_event, body) => {
       const api = loadServerApi();

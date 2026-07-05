@@ -3628,11 +3628,16 @@ function migrateStateVersionHistoryToFolder(state, options = {}, migrated = new 
       });
     }
   } catch (error) {
+    const isLossError = (
+      error.code === "VERSION_HISTORY_TEXT_LOSS" ||
+      error.code === "VERSION_HISTORY_COUNT_LOSS"
+    );
     errors.push({
       filePath: options.filePath || null,
       fileName: options.fileName || null,
       error: error.message,
       code: error.code || null,
+      skipped: isLossError,
       missingHistoryEntries: error.missingHistoryEntries || null,
       historyCountLosses: error.historyCountLosses || null
     });
@@ -3643,7 +3648,10 @@ function migrateStateVersionHistoryToFolder(state, options = {}, migrated = new 
 
 function versionHistoryMigrationHasLossError(migration) {
   return Boolean((migration?.errors || []).some(error =>
-    error?.code === "VERSION_HISTORY_TEXT_LOSS" || error?.code === "VERSION_HISTORY_COUNT_LOSS"
+    !error?.skipped && (
+      error?.code === "VERSION_HISTORY_TEXT_LOSS" ||
+      error?.code === "VERSION_HISTORY_COUNT_LOSS"
+    )
   ));
 }
 
@@ -5325,6 +5333,79 @@ async function openTextFileFromDialog() {
     : { ok: false, cancelled: true };
 }
 
+async function activateBackupFolderFromDialog() {
+  const folderPath = await chooseBackupFolder();
+  return activateBackupFolderPath(folderPath);
+}
+
+function activateBackupFolderPath(folderPath) {
+  if (!folderPath) return { ok: false, cancelled: true };
+  const backupFolderPath = writeVersionHistoryFolderPath(folderPath);
+  return {
+    ok: true,
+    backupFolderPath,
+    ...statePathPayload()
+  };
+}
+
+function deactivateBackupFolder() {
+  writeVersionHistoryFolderPath(null);
+  return {
+    ok: true,
+    backupFolderPath: null,
+    ...statePathPayload()
+  };
+}
+
+async function selectVersionHistoryFolderFromRequestBody(body) {
+  const folderPath = await chooseVersionHistoryFolder();
+  return selectVersionHistoryFolderPathFromRequestBody(folderPath, body);
+}
+
+function selectVersionHistoryFolderPathFromRequestBody(folderPath, body) {
+  const requestPayload = body ? JSON.parse(body) : {};
+  const payload = body
+    ? parseStatePayload(body)
+    : { state: readState(), filePath: "", fileName: null };
+  const recoverMissingFolder = Boolean(requestPayload.recoverMissingFolder);
+  if (!folderPath) return { ok: false, cancelled: true };
+
+  const previousVersionHistoryFolderPath = existingVersionHistoryFolderPath();
+  const carriedHistoryFiles = carryVersionHistoryJsonFiles(previousVersionHistoryFolderPath, folderPath);
+  assertCarriedVersionHistoryFilesSafe(carriedHistoryFiles);
+  const versionHistoryFolderPath = writeVersionHistoryFolderPath(folderPath);
+  const filePath = payload.filePath || readTextFileLink() || (payload.fileName ? "" : EXPORT_FILE);
+  const migration = recoverMissingFolder
+    ? { migrated: [], migratedCount: 0, errors: [] }
+    : migrateEmbeddedVersionHistoriesToFolder(payload.state, {
+        filePath,
+        fileName: payload.fileName
+      });
+  assertVersionHistoryMigrationSafe(migration);
+  const result = applyExternalVersionHistory(payload.state, {
+    filePath,
+    fileName: payload.fileName
+  });
+  const state = recoverMissingFolder
+    ? writeProjectStateOnly(result.state, { embedVersionHistory: !result.loaded })
+    : writeAll(result.state, {
+        filePath,
+        fileName: payload.fileName
+      });
+  return {
+    ok: true,
+    state,
+    loaded: result.loaded,
+    versionHistoryFolderPath,
+    recoverMissingFolder,
+    folderCheck: versionHistoryFolderCheck({ filePath, fileName: payload.fileName }),
+    carriedHistoryFiles,
+    migratedCount: migration.migratedCount,
+    migrationErrors: migration.errors,
+    ...statePathPayload({ filePath, fileName: payload.fileName })
+  };
+}
+
 function saveTextFileToPath(filePath, body) {
   const payload = parseStatePayload(body);
   const normalized = normalizeState(payload.state, { touch: true });
@@ -6173,29 +6254,13 @@ async function handleApi(req, res, pathname) {
 
   if (req.method === "POST" && pathname === "/api/backup/activate") {
     markClientActive();
-    const folderPath = await chooseBackupFolder();
-    if (!folderPath) {
-      sendJson(res, 200, { ok: false, cancelled: true });
-      return;
-    }
-
-    const backupFolderPath = writeVersionHistoryFolderPath(folderPath);
-    sendJson(res, 200, {
-      ok: true,
-      backupFolderPath,
-      ...statePathPayload()
-    });
+    sendJson(res, 200, await activateBackupFolderFromDialog());
     return;
   }
 
   if (req.method === "POST" && pathname === "/api/backup/deactivate") {
     markClientActive();
-    writeVersionHistoryFolderPath(null);
-    sendJson(res, 200, {
-      ok: true,
-      backupFolderPath: null,
-      ...statePathPayload()
-    });
+    sendJson(res, 200, deactivateBackupFolder());
     return;
   }
 
@@ -6223,51 +6288,7 @@ async function handleApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/version-history-folder/select") {
     markClientActive();
     const body = await readBody(req);
-    const requestPayload = body ? JSON.parse(body) : {};
-    const payload = body
-      ? parseStatePayload(body)
-      : { state: readState(), filePath: "", fileName: null };
-    const recoverMissingFolder = Boolean(requestPayload.recoverMissingFolder);
-    const folderPath = await chooseVersionHistoryFolder();
-    if (!folderPath) {
-      sendJson(res, 200, { ok: false, cancelled: true });
-      return;
-    }
-
-    const previousVersionHistoryFolderPath = existingVersionHistoryFolderPath();
-    const carriedHistoryFiles = carryVersionHistoryJsonFiles(previousVersionHistoryFolderPath, folderPath);
-    assertCarriedVersionHistoryFilesSafe(carriedHistoryFiles);
-    const versionHistoryFolderPath = writeVersionHistoryFolderPath(folderPath);
-    const filePath = payload.filePath || readTextFileLink() || (payload.fileName ? "" : EXPORT_FILE);
-    const migration = recoverMissingFolder
-      ? { migrated: [], migratedCount: 0, errors: [] }
-      : migrateEmbeddedVersionHistoriesToFolder(payload.state, {
-          filePath,
-          fileName: payload.fileName
-        });
-    assertVersionHistoryMigrationSafe(migration);
-    const result = applyExternalVersionHistory(payload.state, {
-      filePath,
-      fileName: payload.fileName
-    });
-    const state = recoverMissingFolder
-      ? writeProjectStateOnly(result.state, { embedVersionHistory: !result.loaded })
-      : writeAll(result.state, {
-          filePath,
-          fileName: payload.fileName
-        });
-    sendJson(res, 200, {
-      ok: true,
-      state,
-      loaded: result.loaded,
-      versionHistoryFolderPath,
-      recoverMissingFolder,
-      folderCheck: versionHistoryFolderCheck({ filePath, fileName: payload.fileName }),
-      carriedHistoryFiles,
-      migratedCount: migration.migratedCount,
-      migrationErrors: migration.errors,
-      ...statePathPayload({ filePath, fileName: payload.fileName })
-    });
+    sendJson(res, 200, await selectVersionHistoryFolderFromRequestBody(body));
     return;
   }
 
@@ -6522,6 +6543,11 @@ module.exports = {
   openedTextFilePayload,
   saveTextFileToPath,
   openTextFileFromDialog,
+  activateBackupFolderFromDialog,
+  activateBackupFolderPath,
+  deactivateBackupFolder,
+  selectVersionHistoryFolderFromRequestBody,
+  selectVersionHistoryFolderPathFromRequestBody,
   recentTextFilesPayload,
   openRecentTextFileFromRequestBody,
   exportUsbTransferFromRequestBody,

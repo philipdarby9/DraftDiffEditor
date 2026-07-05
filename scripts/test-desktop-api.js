@@ -13,17 +13,26 @@ const appSource = fs.readFileSync(path.join(root, "public", "app.js"), "utf8");
 
 assert.match(preloadSource, /openGeneratedReport:/, "preload should expose generated-report opening only");
 assert.match(preloadSource, /showGeneratedReportInFolder:/, "preload should expose generated-report reveal only");
+assert.match(preloadSource, /activateBackup:/, "preload should expose backup activation");
+assert.match(preloadSource, /deactivateBackup:/, "preload should expose backup deactivation");
+assert.match(preloadSource, /selectVersionHistoryFolder:/, "preload should expose version-history folder selection");
 assert.doesNotMatch(preloadSource, /\bopenPath\s*:/, "preload should not expose a generic path opener");
 assert.doesNotMatch(preloadSource, /\bshowItemInFolder\s*:/, "preload should not expose a generic folder revealer");
 
 assert.match(mainSource, /resolveGeneratedReportPath/, "desktop opener should validate generated report paths");
 assert.match(mainSource, /draft-diff:open-generated-report/, "main should register report-specific open IPC");
 assert.match(mainSource, /draft-diff:show-generated-report-in-folder/, "main should register report-specific reveal IPC");
+assert.match(mainSource, /draft-diff:activate-backup/, "main should register backup activation IPC");
+assert.match(mainSource, /draft-diff:deactivate-backup/, "main should register backup deactivation IPC");
+assert.match(mainSource, /draft-diff:select-version-history-folder/, "main should register version-history folder selection IPC");
 assert.doesNotMatch(mainSource, /draft-diff:open-path/, "main should not register generic open-path IPC");
 assert.doesNotMatch(mainSource, /draft-diff:show-item-in-folder/, "main should not register generic folder IPC");
 
 assert.match(appSource, /draftDiffDesktop\?\.openGeneratedReport/, "browser should call report-specific open API");
 assert.match(appSource, /draftDiffDesktop\?\.showGeneratedReportInFolder/, "browser should call report-specific reveal API");
+assert.match(appSource, /draftDiffDesktop\?\.activateBackup/, "browser should fall back to desktop backup activation");
+assert.match(appSource, /draftDiffDesktop\?\.deactivateBackup/, "browser should fall back to desktop backup deactivation");
+assert.match(appSource, /draftDiffDesktop\?\.selectVersionHistoryFolder/, "browser should fall back to desktop version-history folder selection");
 assert.doesNotMatch(appSource, /draftDiffDesktop\.(openPath|showItemInFolder)/, "browser should not call generic path APIs");
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "draft-diff-report-api-"));
