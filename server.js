@@ -709,6 +709,11 @@ function draftNotesHistoryFromPayloadEntry(entry) {
   return null;
 }
 
+function versionHistoryDraftPageKey(draft, index) {
+  const idValue = asText(draft?.id || draft?.draftId);
+  return idValue ? `draft-id:${idValue}` : `draft-index:${index}`;
+}
+
 function applyVersionHistoryPayloadToState(state, payload) {
   if (!state || !payload || typeof payload !== "object") return false;
 
@@ -812,7 +817,7 @@ function versionHistoryPayloadPages(payload) {
   (Array.isArray(payload.drafts) ? payload.drafts : []).forEach((draft, fallbackIndex) => {
     const index = Number.isFinite(Number(draft?.index)) ? Number(draft.index) : fallbackIndex;
     const title = asText(draft?.title) || `Draft ${index + 1}`;
-    const key = `draft:${index}`;
+    const key = versionHistoryDraftPageKey(draft, index);
     pages.push({
       key,
       label: title,

@@ -306,6 +306,105 @@ try {
     sourceFileName: "linked.txt",
     sourceFilePath: linkedPath,
     story: {
+      title: "Project notes",
+      history: []
+    },
+    drafts: [
+      {
+        id: "draft-stable-1",
+        index: 0,
+        title: "Draft 1",
+        history: []
+      },
+      {
+        id: "draft-empty-8",
+        index: 7,
+        title: "Draft 8",
+        history: []
+      },
+      {
+        id: "draft-copied-9",
+        index: 8,
+        title: "Draft 9",
+        history: [{
+          id: "copied-draft-v1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          title: "Draft 9",
+          content: "Copied draft history",
+          contentHtml: "<p>Copied draft history</p>"
+        }]
+      }
+    ]
+  }, null, 2)}\n`, "utf8");
+  const renamedAfterDeletedDraftState = StateCore.normalizeState({
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-02T00:00:00.000Z",
+    initialNotes: {
+      title: "Project notes",
+      content: "",
+      contentHtml: ""
+    },
+    drafts: [
+      {
+        id: "draft-stable-1",
+        title: "Draft 1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+        content: "Draft 1 current",
+        contentHtml: "<p>Draft 1 current</p>",
+        notes: {
+          title: "Draft 1 Notes",
+          content: "",
+          contentHtml: ""
+        }
+      },
+      {
+        id: "draft-copied-9",
+        title: "Draft 8",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-02T00:00:00.000Z",
+        content: "Copied draft current",
+        contentHtml: "<p>Copied draft current</p>",
+        notes: {
+          title: "Draft 8 Notes",
+          content: "",
+          contentHtml: ""
+        }
+      }
+    ]
+  });
+  t.writeAll(renamedAfterDeletedDraftState, {
+    filePath: linkedPath,
+    fileName: "linked.txt",
+    allowCreateLinkedTextFile: true
+  });
+  const renamedAfterDeletedDraftHistory = JSON.parse(readText(linkedHistoryPath));
+  assert.equal(
+    renamedAfterDeletedDraftHistory.drafts.length,
+    2,
+    "deleted empty drafts should not leave an extra sidecar draft"
+  );
+  assert.equal(
+    renamedAfterDeletedDraftHistory.drafts[1].id,
+    "draft-copied-9",
+    "renumbered copied draft should keep its stable draft ID"
+  );
+  assert.equal(
+    renamedAfterDeletedDraftHistory.drafts[1].title,
+    "Draft 8",
+    "renumbered copied draft history should be saved under the current draft title"
+  );
+  assert.equal(
+    renamedAfterDeletedDraftHistory.drafts[1].history.some(version => version.id === "copied-draft-v1"),
+    true,
+    "renumbered copied draft should preserve history saved under its old draft number"
+  );
+
+  fs.writeFileSync(linkedHistoryPath, `${JSON.stringify({
+    version: 1,
+    sourceFileName: "linked.txt",
+    sourceFilePath: linkedPath,
+    story: {
       id: "letters-story",
       title: "Project notes",
       history: [{
