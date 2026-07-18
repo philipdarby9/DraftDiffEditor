@@ -166,6 +166,52 @@ function normalizeState(input, options = {}) {
   return StateCore.normalizeState(input, options);
 }
 
+function viewStateUpdatedAtMs(viewState) {
+  const time = Date.parse(viewState?.updatedAt || "");
+  return Number.isFinite(time) ? time : 0;
+}
+
+function newestViewState(left, right) {
+  if (!left) return right || null;
+  if (!right) return left;
+  return viewStateUpdatedAtMs(right) > viewStateUpdatedAtMs(left) ? right : left;
+}
+
+function readStoredProjectStateForViewStateMerge() {
+  try {
+    if (!fs.existsSync(STATE_FILE)) return null;
+    return parseJsonFile(STATE_FILE);
+  } catch {
+    return null;
+  }
+}
+
+function projectViewStateMergeKey(projectState) {
+  if (!projectState || typeof projectState !== "object" || Array.isArray(projectState)) return "";
+  const parts = [
+    asText(projectState.createdAt),
+    asText(projectState.initialNotes?.id),
+    asText(projectState.initialNotes?.createdAt),
+    asText(projectState.drafts?.[0]?.id),
+    asText(projectState.drafts?.[0]?.createdAt)
+  ];
+  return parts.some(Boolean) ? parts.join("|") : "";
+}
+
+function projectViewStateMergeEligible(left, right) {
+  const leftKey = projectViewStateMergeKey(left);
+  const rightKey = projectViewStateMergeKey(right);
+  return Boolean(leftKey && rightKey && leftKey === rightKey);
+}
+
+function stateWithNewestStoredViewState(state) {
+  if (!state || typeof state !== "object" || Array.isArray(state)) return state;
+  const storedState = readStoredProjectStateForViewStateMerge();
+  if (!projectViewStateMergeEligible(state, storedState)) return state;
+  const viewState = newestViewState(state.viewState, storedState?.viewState);
+  return viewState && viewState !== state.viewState ? { ...state, viewState } : state;
+}
+
 function formatDate(iso) {
   const date = new Date(iso);
   if (Number.isNaN(date.valueOf())) return iso;
@@ -3833,7 +3879,7 @@ function textFileStateTransactionWrite(filePath, state) {
 function writeProjectStateOnly(state, options = {}) {
   ensureDataDir();
   recoverPersistenceTransaction();
-  const normalized = normalizeState(state, { touch: Boolean(options.touch) });
+  const normalized = normalizeState(stateWithNewestStoredViewState(state), { touch: Boolean(options.touch) });
   const writes = [
     {
       filePath: STATE_FILE,
@@ -3856,7 +3902,7 @@ function writeProjectStateOnly(state, options = {}) {
 function writeAll(state, options = {}) {
   ensureDataDir();
   recoverPersistenceTransaction();
-  const normalized = normalizeState(state, { touch: true });
+  const normalized = normalizeState(stateWithNewestStoredViewState(state), { touch: true });
   const exportText = formatExport(normalized);
   const linkedTextPath = readTextFileLink();
   const missingLinkedTextFile = !options.allowCreateLinkedTextFile && linkedTextFileMissing(linkedTextPath);

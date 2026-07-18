@@ -157,6 +157,10 @@ assert.match(
   "openSearch should sync one page for page-scoped search and full inputs for global search"
 );
 
+const openedTextPayloadSource = sourceBetween("async function applyOpenedTextFilePayload", "async function requestOpenTextFilePayload");
+assert.match(openedTextPayloadSource, /const identityState = storedState \|\| sameFilePreviousState \|\| options\.preserveFormatsFrom \|\| null;/, "reopened or moved text files should keep the cached project identity");
+assert.match(openedTextPayloadSource, /preserveIdentity: Boolean\(identityState\)/, "reopened text files should preserve draft IDs and view state");
+
 const allowedSyncFromInputsRanges = [
   ["syncFromInputs definition", "function syncFromInputs()", "function syncPageFromDom"],
   ["undo compact draft structure", "  if (isDraftStructureHistoryEntry(previousEntry))", "  if (isProjectFormatHistoryEntry(previousEntry))"],

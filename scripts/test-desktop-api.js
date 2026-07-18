@@ -25,6 +25,11 @@ assert.match(mainSource, /draft-diff:show-generated-report-in-folder/, "main sho
 assert.match(mainSource, /draft-diff:activate-backup/, "main should register backup activation IPC");
 assert.match(mainSource, /draft-diff:deactivate-backup/, "main should register backup deactivation IPC");
 assert.match(mainSource, /draft-diff:select-version-history-folder/, "main should register version-history folder selection IPC");
+assert.match(mainSource, /WINDOW_STATE_FILE = "window-state\.json"/, "desktop should persist window state");
+assert.match(mainSource, /readWindowState\(\)/, "desktop should restore saved window state before creating the window");
+assert.match(mainSource, /persistWindowStateNow\(mainWindow\)/, "desktop should persist window state while closing");
+assert.match(mainSource, /setFullScreen\(true\)/, "desktop should restore fullscreen windows");
+assert.match(mainSource, /isFullScreen: browserWindow\.isFullScreen\(\)/, "desktop should save fullscreen state");
 assert.doesNotMatch(mainSource, /draft-diff:open-path/, "main should not register generic open-path IPC");
 assert.doesNotMatch(mainSource, /draft-diff:show-item-in-folder/, "main should not register generic folder IPC");
 

@@ -573,9 +573,9 @@ function updatePagesOnScreenControls() {
   });
 }
 
-function syncPagesOnScreenToDisplaySelection() {
+function syncPagesOnScreenToDisplaySelection(options = {}) {
   const normalizedPagesOnScreen = normalizePagesOnScreenForSelection(pagesOnScreen);
-  if (normalizedPagesOnScreen !== pagesOnScreen) setPagesOnScreen(normalizedPagesOnScreen);
+  if (normalizedPagesOnScreen !== pagesOnScreen) setPagesOnScreen(normalizedPagesOnScreen, options);
   else updatePagesOnScreenControls();
 }
 
@@ -2584,11 +2584,12 @@ function restoreViewStateForProject(options = {}) {
     : null;
 
   restoreStoredViewState(stored || fallback);
-  ensureDisplaySelection();
-  setPagesOnScreen(pagesOnScreen);
+  ensureDisplaySelection({ persist: false, align: false });
+  setPagesOnScreen(pagesOnScreen, { persist: false, align: false });
+  saveCurrentViewState({ syncDom: false });
 }
 
-function ensureDisplaySelection() {
+function ensureDisplaySelection(options = {}) {
   const validKeys = new Set(displayKeys());
   const validDraftIds = new Set(state.drafts.map(draft => draft.id));
   displayedPageKeys = new Set([...displayedPageKeys].filter(key => validKeys.has(key)));
@@ -2606,8 +2607,8 @@ function ensureDisplaySelection() {
     displayedPageKeys = new Set(defaultDisplayKeys());
   }
 
-  saveLayoutViewState();
-  syncPagesOnScreenToDisplaySelection();
+  if (options.persist !== false) saveLayoutViewState();
+  syncPagesOnScreenToDisplaySelection(options);
 }
 
 function displayPage(key, shouldDisplay = true) {
@@ -2720,17 +2721,19 @@ function resetPagePanePercents(keys = topLevelDisplayPageKeys()) {
   queueViewStateSave(250);
 }
 
-function setPagesOnScreen(value) {
+function setPagesOnScreen(value, options = {}) {
   pagesOnScreen = normalizePagesOnScreenForSelection(value);
   normalizePagePanePercentsForLayout();
   applyPagePaneStyles();
   updatePagesOnScreenControls();
-  persistViewStateChange(500);
+  if (options.persist !== false) persistViewStateChange(500);
   if (changesPanelIsOpen()) renderDiffSoon();
-  window.requestAnimationFrame(() => {
-    alignPageInCanvas(activeDisplayKey());
-    updateAllNotesHeadingDensity();
-  });
+  if (options.align !== false) {
+    window.requestAnimationFrame(() => {
+      alignPageInCanvas(activeDisplayKey());
+      updateAllNotesHeadingDensity();
+    });
+  }
 }
 
 function syncPanelDragMenu() {
@@ -7342,11 +7345,12 @@ async function prepareCurrentProjectForOpen() {
 async function applyOpenedTextFilePayload(payload, previousLinkedTextPath = "", previousState = null, options = {}) {
   linkedTextPath = payload.filePath || "";
   const storedState = cachedProjectStateForPath(linkedTextPath) || payload.storedState;
+  const sameFilePreviousState = filePathsMatch(previousLinkedTextPath, linkedTextPath) ? previousState : null;
+  const identityState = storedState || sameFilePreviousState || options.preserveFormatsFrom || null;
   updateStoragePathsFromPayload(payload);
   await applyTextProject(payload.text || "", payload.fileName || "draft-history.txt", {
-    preserveFormatsFrom: storedState
-      || options.preserveFormatsFrom
-      || (filePathsMatch(previousLinkedTextPath, linkedTextPath) ? previousState : null),
+    preserveFormatsFrom: identityState,
+    preserveIdentity: Boolean(identityState),
     filePath: linkedTextPath
   });
 }

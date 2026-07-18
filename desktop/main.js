@@ -1,6 +1,7 @@
 const path = require("node:path");
+const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
-const { app, BrowserWindow, Menu, ipcMain, shell, dialog } = require("electron");
+const { app, BrowserWindow, Menu, ipcMain, shell, dialog, screen } = require("electron");
 const nspell = require("nspell");
 
 let mainWindow = null;
@@ -12,6 +13,7 @@ let pendingCloseSummaryBody = "";
 let spellCheckerPromise = null;
 let customSpellings = new Set();
 let spellcheckCache = new Map();
+let windowStateSaveTimer = null;
 
 const MIN_ZOOM_FACTOR = 0.5;
 const MAX_ZOOM_FACTOR = 2;
@@ -21,6 +23,11 @@ const MAX_SPELLCHECK_CACHE_ENTRIES = 5000;
 const DATA_DIR_ENV_VAR = "DRAFT_DIFF_DATA_DIR";
 const DATA_DIR_ARG = "--data-dir";
 const WINDOW_CLOSE_PERSIST_TIMEOUT_MS = 30 * 60_000;
+const WINDOW_STATE_FILE = "window-state.json";
+const DEFAULT_WINDOW_BOUNDS = Object.freeze({
+  width: 1320,
+  height: 860
+});
 
 if (process.platform === "win32") {
   app.setAppUserModelId(APP_USER_MODEL_ID);
@@ -78,6 +85,104 @@ function resolveConfiguredDataDir() {
   if (fromEnv) return path.resolve(fromEnv);
 
   return app.isPackaged ? path.join(app.getPath("userData"), "data") : "";
+}
+
+function windowStatePath() {
+  return path.join(app.getPath("userData"), WINDOW_STATE_FILE);
+}
+
+function finiteInteger(value) {
+  const number = Number(value);
+  return Number.isFinite(number) ? Math.round(number) : null;
+}
+
+function windowBoundsIntersectDisplay(bounds) {
+  const displays = screen.getAllDisplays();
+  return displays.some(display => {
+    const area = display.workArea;
+    const right = bounds.x + bounds.width;
+    const bottom = bounds.y + bounds.height;
+    return right > area.x + 80
+      && bounds.x < area.x + area.width - 80
+      && bottom > area.y + 80
+      && bounds.y < area.y + area.height - 80;
+  });
+}
+
+function normalizeWindowState(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+
+  const width = finiteInteger(value.width);
+  const height = finiteInteger(value.height);
+  const x = finiteInteger(value.x);
+  const y = finiteInteger(value.y);
+  const bounds = {
+    width: Math.max(960, width || DEFAULT_WINDOW_BOUNDS.width),
+    height: Math.max(640, height || DEFAULT_WINDOW_BOUNDS.height)
+  };
+
+  if (x !== null && y !== null) {
+    const positionedBounds = { ...bounds, x, y };
+    if (windowBoundsIntersectDisplay(positionedBounds)) {
+      bounds.x = x;
+      bounds.y = y;
+    }
+  }
+
+  return {
+    ...bounds,
+    isMaximized: Boolean(value.isMaximized),
+    isFullScreen: Boolean(value.isFullScreen)
+  };
+}
+
+async function readWindowState() {
+  try {
+    const raw = await fs.readFile(windowStatePath(), "utf8");
+    return normalizeWindowState(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+function captureWindowState(browserWindow) {
+  if (!browserWindow || browserWindow.isDestroyed()) return null;
+  const bounds = browserWindow.isMaximized() || browserWindow.isFullScreen() || browserWindow.isMinimized()
+    ? browserWindow.getNormalBounds()
+    : browserWindow.getBounds();
+  return normalizeWindowState({
+    ...bounds,
+    isMaximized: browserWindow.isMaximized(),
+    isFullScreen: browserWindow.isFullScreen()
+  });
+}
+
+function persistWindowStateNow(browserWindow) {
+  const state = captureWindowState(browserWindow);
+  if (!state) return;
+  const filePath = windowStatePath();
+  fsSync.mkdirSync(path.dirname(filePath), { recursive: true });
+  fsSync.writeFileSync(filePath, `${JSON.stringify(state, null, 2)}\n`, "utf8");
+}
+
+function queueWindowStateSave(browserWindow, delay = 500) {
+  if (!browserWindow || browserWindow.isDestroyed()) return;
+  if (windowStateSaveTimer) clearTimeout(windowStateSaveTimer);
+  windowStateSaveTimer = setTimeout(() => {
+    windowStateSaveTimer = null;
+    try {
+      persistWindowStateNow(browserWindow);
+    } catch (error) {
+      console.error("window state save failed", error);
+    }
+  }, delay);
+  windowStateSaveTimer.unref?.();
+}
+
+function attachWindowStatePersistence(browserWindow) {
+  ["move", "resize", "maximize", "unmaximize", "restore", "enter-full-screen", "leave-full-screen"].forEach(eventName => {
+    browserWindow.on(eventName, () => queueWindowStateSave(browserWindow));
+  });
 }
 
 function resolveGeneratedReportPath(value) {
@@ -353,10 +458,15 @@ async function createWindow() {
   const { startServer } = loadServerApi();
   serverHandle = await startServer({ port: 0, host: "127.0.0.1" });
   allowWindowClose = false;
+  const savedWindowState = await readWindowState();
+  const windowBounds = savedWindowState || DEFAULT_WINDOW_BOUNDS;
 
   mainWindow = new BrowserWindow({
-    width: 1320,
-    height: 860,
+    width: windowBounds.width,
+    height: windowBounds.height,
+    ...(Number.isFinite(windowBounds.x) && Number.isFinite(windowBounds.y)
+      ? { x: windowBounds.x, y: windowBounds.y }
+      : {}),
     minWidth: 960,
     minHeight: 640,
     title: "Draft Diff Editor",
@@ -375,11 +485,22 @@ async function createWindow() {
   mainWindow.removeMenu();
   configureSpellChecker(mainWindow.webContents.session);
   attachEditorContextMenu(mainWindow);
+  attachWindowStatePersistence(mainWindow);
+  if (savedWindowState?.isMaximized) mainWindow.maximize();
+  if (savedWindowState?.isFullScreen) mainWindow.setFullScreen(true);
   mainWindow.webContents.on("did-create-window", childWindow => {
     attachEditorContextMenu(childWindow);
   });
   mainWindow.once("ready-to-show", () => mainWindow.show());
   mainWindow.on("close", event => {
+    try {
+      if (windowStateSaveTimer) clearTimeout(windowStateSaveTimer);
+      windowStateSaveTimer = null;
+      persistWindowStateNow(mainWindow);
+    } catch (error) {
+      console.error("window state save failed", error);
+    }
+
     if (allowWindowClose) return;
 
     event.preventDefault();

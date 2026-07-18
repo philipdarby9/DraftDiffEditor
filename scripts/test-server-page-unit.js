@@ -356,6 +356,73 @@ async function run() {
     assert.equal(afterView.drafts[1].content, "Beta");
     assert.equal(afterView.viewState.activeEditorKey, "draft:draft-a:notes");
 
+    const newerViewStateResult = await api(baseUrl, "/api/view-state", {
+      method: "POST",
+      body: JSON.stringify({
+        viewState: {
+          updatedAt: "2099-02-01T00:00:00.000Z",
+          displayedStory: false,
+          displayedDraftIds: ["draft-b"],
+          selectedDraftId: "draft-b",
+          activeArea: "draft",
+          activeDraftId: "draft-b",
+          activePageType: "content",
+          pagesOnScreen: 1,
+          pagePanePercents: {
+            "draft:draft-b:content": 72
+          }
+        }
+      })
+    });
+    assert.equal(newerViewStateResult.viewState.selectedDraftId, "draft-b");
+    assert.equal(newerViewStateResult.viewState.pagePanePercents["draft:draft-b:content"], 72);
+
+    const staleFullSaveState = {
+      ...(await api(baseUrl, "/api/state")).state,
+      viewState: {
+        updatedAt: "2026-01-01T00:00:00.000Z",
+        displayedStory: false,
+        displayedDraftIds: ["draft-a"],
+        selectedDraftId: "draft-a",
+        activeArea: "draft",
+        activeDraftId: "draft-a",
+        activePageType: "notes",
+        pagesOnScreen: 3,
+        pagePanePercents: {
+          "draft:draft-a:content": 44
+        }
+      }
+    };
+    const staleSaveResult = await api(baseUrl, "/api/state", {
+      method: "PUT",
+      body: JSON.stringify({ state: staleFullSaveState, fileName: "server-page-unit-test.txt" })
+    });
+    assert.equal(staleSaveResult.state.viewState.selectedDraftId, "draft-b");
+    assert.equal(staleSaveResult.state.viewState.pagePanePercents["draft:draft-b:content"], 72);
+
+    const freshFullSaveState = {
+      ...staleSaveResult.state,
+      viewState: {
+        updatedAt: "2100-03-01T00:00:00.000Z",
+        displayedStory: false,
+        displayedDraftIds: ["draft-a"],
+        selectedDraftId: "draft-a",
+        activeArea: "draft",
+        activeDraftId: "draft-a",
+        activePageType: "content",
+        pagesOnScreen: 2,
+        pagePanePercents: {
+          "draft:draft-a:content": 61
+        }
+      }
+    };
+    const freshSaveResult = await api(baseUrl, "/api/state", {
+      method: "PUT",
+      body: JSON.stringify({ state: freshFullSaveState, fileName: "server-page-unit-test.txt" })
+    });
+    assert.equal(freshSaveResult.state.viewState.selectedDraftId, "draft-a");
+    assert.equal(freshSaveResult.state.viewState.pagePanePercents["draft:draft-a:content"], 61);
+
     const exportResponse = await fetch(new URL("/api/export", baseUrl));
     assert.equal(exportResponse.status, 200);
     assert.match(await exportResponse.text(), /Alpha from unit/);
