@@ -155,6 +155,8 @@ const exported = __test.createUsbTransferPackage({
   filePath: storyPath,
   fileName: "story.txt"
 }, usbRoot);
+exported.manifest.baselineCreatedAt = "2026-01-01T12:00:00.000Z";
+fs.writeFileSync(exported.manifestPath, `${JSON.stringify(exported.manifest, null, 2)}\n`, "utf8");
 assert.equal(
   fs.existsSync(path.join(exported.backupFolderPath, "json", "other-story.version-history.json")),
   false,
@@ -445,6 +447,7 @@ const outboundRoundTrip = __test.createUsbTransferPackage({
 
 const outboundManifest = outboundRoundTrip.manifest;
 outboundManifest.computerName = "computer-a";
+outboundManifest.baselineCreatedAt = "2026-07-17T11:00:00.000Z";
 outboundManifest.items = outboundManifest.items.map(item => ({
   ...item,
   sourcePath: item.kind === "directory"
@@ -456,13 +459,13 @@ fs.writeFileSync(outboundRoundTrip.manifestPath, `${JSON.stringify(outboundManif
 const remoteExistingState = stateWithDrafts([
   {
     title: "Draft 1",
-    content: "Shared first draft",
+    content: "Old copy on computer B",
     notes: "",
-    updatedAt: "2026-07-17T10:00:00.000Z",
-    versionHistory: [version("round-trip-remote-current", "Shared first draft", "2026-07-17T10:00:00.000Z")]
+    updatedAt: "2026-07-15T10:00:00.000Z",
+    versionHistory: [version("round-trip-remote-old", "Old copy on computer B", "2026-07-15T10:00:00.000Z")]
   }
-], "Round trip notes", [
-  version("round-trip-remote-notes", "Round trip notes", "2026-07-17T10:00:00.000Z", "Project notes")
+], "Old notes on computer B", [
+  version("round-trip-remote-notes", "Old notes on computer B", "2026-07-15T10:00:00.000Z", "Project notes")
 ]);
 __test.writeTextFileLink(roundTripRemoteStoryPath);
 __test.writeVersionHistoryFolderPath(roundTripRemoteBackupFolder);
@@ -478,13 +481,13 @@ assert.equal(remoteImport.importDestination.backupFolderPath, roundTripRemoteBac
 const importedRemoteState = __test.readState();
 assert.deepEqual(
   [...new Set(importedRemoteState.drafts[0].versionHistory.map(entry => entry.content))],
-  ["Earlier first draft", "Shared first draft"],
-  "computer B should import every version from computer A into its incomplete local sidecar"
+  ["Old copy on computer B", "Earlier first draft", "Shared first draft"],
+  "computer B should retain its older local version and import every version from computer A"
 );
 assert.deepEqual(
   [...new Set(importedRemoteState.initialNotes.versionHistory.map(entry => entry.content))],
-  ["Earlier round trip notes", "Round trip notes"],
-  "computer B should import project-note history from computer A into its incomplete local sidecar"
+  ["Old notes on computer B", "Earlier round trip notes", "Round trip notes"],
+  "computer B should retain older project notes and import project-note history from computer A"
 );
 
 const returnedRoundTripState = StateCore.normalizeState(importedRemoteState);
@@ -534,7 +537,7 @@ assert.equal(returnedRoundTripReview.merge.status, "usb-only");
 assert.deepEqual(
   returnedRoundTripReview.merge.usbOnly.map(entry => `${entry.type}:${entry.number || 0}`),
   ["draft:2"],
-  "after a real two-computer round trip, only the newly added draft should be reported"
+  "pre-transfer unmatched histories should be preserved silently while only the newly added draft is reported"
 );
 assert.equal(returnedRoundTripReview.merge.localOnly.length, 0);
 assert.equal(returnedRoundTripReview.merge.bothChanged.length, 0);
@@ -549,6 +552,8 @@ const legacyReturnedRoundTrip = __test.createUsbTransferPackage({
 });
 const legacyManifest = legacyReturnedRoundTrip.manifest;
 legacyManifest.computerName = "other-computer";
+legacyManifest.baselineCreatedAt = "2026-07-17T11:00:00.000Z";
+legacyManifest.baselineState = StateCore.normalizeState(roundTripBaseState);
 legacyManifest.items = legacyManifest.items.map(item => ({
   ...item,
   sourcePath: item.kind === "directory"

@@ -4381,9 +4381,11 @@ function createUsbTransferPackage(payload, destinationRootPath, options = {}) {
     }
   }
 
+  const createdAt = nowIso();
   const manifest = {
     version: 1,
-    createdAt: nowIso(),
+    createdAt,
+    baselineCreatedAt: previousManifest?.baselineCreatedAt || previousManifest?.createdAt || createdAt,
     appBuild: SERVER_BUILD,
     computerName: os.hostname(),
     source: {
@@ -4966,14 +4968,29 @@ function pageSavedVersionsBySignature(page, fallbackTitle) {
   historyWithCurrentPage(page, fallbackTitle).forEach(version => {
     const signature = normalizedHistoryTextValue(textForHistoryVersion(version));
     if (!signature) return;
-    if (!versions.has(signature)) versions.set(signature, version);
+    const existing = versions.get(signature);
+    if (!existing) {
+      versions.set(signature, version);
+      return;
+    }
+    const existingTime = versionHistoryTime(existing);
+    const incomingTime = versionHistoryTime(version);
+    if (incomingTime !== null && (existingTime === null || incomingTime > existingTime)) {
+      versions.set(signature, version);
+    }
   });
   return versions;
 }
 
-function uniqueSavedVersionDetails(versions, otherVersions) {
+function uniqueSavedVersionDetails(versions, otherVersions, baselineVersions, baselineCutoffAt) {
+  const baselineCutoffTime = Date.parse(baselineCutoffAt || "");
   return [...versions.entries()]
-    .filter(([signature]) => !otherVersions.has(signature))
+    .filter(([signature, version]) => {
+      if (otherVersions.has(signature) || baselineVersions.has(signature)) return false;
+      if (Number.isNaN(baselineCutoffTime)) return true;
+      const savedTime = versionHistoryTime(version);
+      return savedTime === null || savedTime > baselineCutoffTime;
+    })
     .map(([, version]) => ({
       savedAt: asText(version?.createdAt),
       wordCount: wordCountForText(textForHistoryVersion(version))
@@ -4988,11 +5005,23 @@ function pageLatestSavedAt(page, fallbackTitle) {
   return times.length ? new Date(Math.max(...times)).toISOString() : "";
 }
 
-function createDirectMergeReviewEntry(type, number, localPage, usbPage, fallbackTitle) {
+function createDirectMergeReviewEntry(type, number, baselinePage, localPage, usbPage, fallbackTitle, baselineCreatedAt = "") {
+  const baselineVersions = pageSavedVersionsBySignature(baselinePage, fallbackTitle);
   const localVersions = pageSavedVersionsBySignature(localPage, fallbackTitle);
   const usbVersions = pageSavedVersionsBySignature(usbPage, fallbackTitle);
-  const localUniqueVersionDetails = uniqueSavedVersionDetails(localVersions, usbVersions);
-  const usbUniqueVersionDetails = uniqueSavedVersionDetails(usbVersions, localVersions);
+  const baselineCutoffAt = baselineCreatedAt || pageLatestSavedAt(baselinePage, fallbackTitle);
+  const localUniqueVersionDetails = uniqueSavedVersionDetails(
+    localVersions,
+    usbVersions,
+    baselineVersions,
+    baselineCutoffAt
+  );
+  const usbUniqueVersionDetails = uniqueSavedVersionDetails(
+    usbVersions,
+    localVersions,
+    baselineVersions,
+    baselineCutoffAt
+  );
   const localOnlyVersions = localUniqueVersionDetails.length;
   const usbOnlyVersions = usbUniqueVersionDetails.length;
   if (!localOnlyVersions && !usbOnlyVersions) return null;
@@ -5046,15 +5075,19 @@ function createUsbTransferMergeReview(review) {
     const storyItem = transferStoryItem(review);
     const localStoryPath = storyItem ? localSourcePathForTransferItem(storyItem, review.manifest) : "";
     const localStoryMissing = Boolean(localStoryPath && !fileSnapshot(localStoryPath).exists);
+    const baseline = baselineStateFromManifest(review.manifest);
+    const baselineCreatedAt = asText(review.manifest?.baselineCreatedAt);
     const local = localTransferState(review, null);
     const usb = transferPackageState(review, null);
     const entries = [];
     const projectNotesEntry = createDirectMergeReviewEntry(
       "projectNotes",
       null,
+      baseline?.initialNotes,
       local?.initialNotes,
       usb.initialNotes,
-      PROJECT_NOTES_TITLE
+      PROJECT_NOTES_TITLE,
+      baselineCreatedAt
     );
     if (projectNotesEntry) entries.push(projectNotesEntry);
 
@@ -5069,18 +5102,22 @@ function createUsbTransferMergeReview(review) {
       const draftEntry = createDirectMergeReviewEntry(
         "draft",
         index + 1,
+        baseline?.drafts?.[index] || null,
         localDraft,
         usbDraft,
-        title
+        title,
+        baselineCreatedAt
       );
       if (draftEntry) entries.push(draftEntry);
 
       const notesEntry = createDirectMergeReviewEntry(
         "draftNotes",
         index + 1,
+        baseline?.drafts?.[index]?.notes || null,
         localDraft?.notes,
         usbDraft?.notes,
-        `${title} Notes`
+        `${title} Notes`,
+        baselineCreatedAt
       );
       if (notesEntry) entries.push(notesEntry);
     }
