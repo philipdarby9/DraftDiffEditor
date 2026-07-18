@@ -839,6 +839,53 @@ function applyVersionHistoryPayloadToState(state, payload) {
   return true;
 }
 
+function stateWithVersionHistoriesCompatibleWithPayload(state, payload) {
+  const normalized = normalizeState(state);
+  if (!payload || typeof payload !== "object") return normalized;
+
+  const storyId = asText(payload.story?.id);
+  const stateStoryId = asText(normalized.initialNotes?.id);
+  if (storyId && stateStoryId && storyId !== stateStoryId) {
+    normalized.initialNotes.versionHistory = [];
+  }
+
+  const incomingDrafts = Array.isArray(payload.drafts) ? payload.drafts : [];
+  const byId = new Map();
+  const byIndex = new Map();
+  const titles = new Map();
+  incomingDrafts.forEach((entry, index) => {
+    const idValue = asText(entry?.id || entry?.draftId);
+    if (idValue) byId.set(idValue, entry);
+    byIndex.set(Number.isInteger(entry?.index) ? entry.index : index, entry);
+    const titleKey = normalizeHistoryTitle(entry?.title);
+    if (!titleKey) return;
+    if (titles.has(titleKey)) titles.set(titleKey, null);
+    else titles.set(titleKey, entry);
+  });
+
+  normalized.drafts.forEach((draft, index) => {
+    const draftId = asText(draft.id);
+    const titleKey = normalizeHistoryTitle(draft.title);
+    const matchingDraft = byId.get(draftId)
+      || (titleKey ? titles.get(titleKey) : null)
+      || byIndex.get(index);
+    if (!matchingDraft) return;
+
+    const matchingDraftId = asText(matchingDraft.id || matchingDraft.draftId);
+    if (matchingDraftId && draftId && matchingDraftId !== draftId) {
+      draft.versionHistory = [];
+    }
+
+    const matchingNotesId = asText(matchingDraft?.notes?.id || matchingDraft?.notesId || matchingDraft?.draftNotesId);
+    const notesId = asText(draft.notes?.id);
+    if (draft.notes && matchingNotesId && notesId && matchingNotesId !== notesId) {
+      draft.notes.versionHistory = [];
+    }
+  });
+
+  return normalized;
+}
+
 function applyExternalVersionHistory(state, options = {}) {
   const normalized = normalizeState(state);
   const filePath = findVersionHistoryFilePath(options);
@@ -1590,10 +1637,13 @@ function versionHistoryTransactionWrite(state, options = {}) {
   const existingPayload = existingHistoryPath && fileExists(existingHistoryPath)
     ? parseVersionHistoryFile(existingHistoryPath)
     : null;
-  const sourceState = existingPayload ? normalizeState(stateWithoutVersionHistory(state)) : state;
-  const stateToWrite = options.mergeExisting === false
-    ? sourceState
-    : applyExternalVersionHistory(sourceState, options).state;
+  const sourceState = existingPayload
+    ? stateWithVersionHistoriesCompatibleWithPayload(state, existingPayload)
+    : normalizeState(state);
+  if (existingPayload && options.mergeExisting !== false) {
+    applyVersionHistoryPayloadToState(sourceState, existingPayload);
+  }
+  const stateToWrite = normalizeState(sourceState);
   const nextPayload = versionHistoryPayloadFromState(stateToWrite, options);
   if (existingPayload) {
     assertVersionHistoryPreservesExistingText(existingPayload, nextPayload, existingHistoryPath);

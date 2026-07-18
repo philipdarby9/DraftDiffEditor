@@ -423,9 +423,13 @@ const roundTripBaseState = stateWithDrafts([
     content: "Shared first draft",
     notes: "",
     updatedAt: "2026-07-17T10:00:00.000Z",
-    versionHistory: [version("round-trip-draft-1", "Shared first draft", "2026-07-17T10:00:00.000Z")]
+    versionHistory: [
+      version("round-trip-draft-1-older", "Earlier first draft", "2026-07-16T10:00:00.000Z"),
+      version("round-trip-draft-1", "Shared first draft", "2026-07-17T10:00:00.000Z")
+    ]
   }
 ], "Round trip notes", [
+  version("round-trip-notes-older", "Earlier round trip notes", "2026-07-16T10:00:00.000Z", "Project notes"),
   version("round-trip-notes", "Round trip notes", "2026-07-17T10:00:00.000Z", "Project notes")
 ]);
 __test.writeAll(roundTripBaseState, {
@@ -439,14 +443,52 @@ const outboundRoundTrip = __test.createUsbTransferPackage({
   fileName: "round-trip.txt"
 }, roundTripUsbRoot);
 
-const returnedRoundTripState = stateWithDrafts([
+const outboundManifest = outboundRoundTrip.manifest;
+outboundManifest.computerName = "computer-a";
+outboundManifest.items = outboundManifest.items.map(item => ({
+  ...item,
+  sourcePath: item.kind === "directory"
+    ? path.join(dataDir, "unmounted-computer-a", "DraftDiff backup")
+    : path.join(dataDir, "unmounted-computer-a", "round-trip.txt")
+}));
+fs.writeFileSync(outboundRoundTrip.manifestPath, `${JSON.stringify(outboundManifest, null, 2)}\n`, "utf8");
+
+const remoteExistingState = stateWithDrafts([
   {
     title: "Draft 1",
     content: "Shared first draft",
     notes: "",
     updatedAt: "2026-07-17T10:00:00.000Z",
-    versionHistory: [version("round-trip-draft-1", "Shared first draft", "2026-07-17T10:00:00.000Z")]
-  },
+    versionHistory: [version("round-trip-remote-current", "Shared first draft", "2026-07-17T10:00:00.000Z")]
+  }
+], "Round trip notes", [
+  version("round-trip-remote-notes", "Round trip notes", "2026-07-17T10:00:00.000Z", "Project notes")
+]);
+__test.writeTextFileLink(roundTripRemoteStoryPath);
+__test.writeVersionHistoryFolderPath(roundTripRemoteBackupFolder);
+__test.writeAll(remoteExistingState, {
+  filePath: roundTripRemoteStoryPath,
+  fileName: "round-trip.txt",
+  allowCreateLinkedTextFile: true
+});
+
+const remoteImport = __test.applyUsbTransferFolder(outboundRoundTrip.packageFolderPath);
+assert.equal(remoteImport.importDestination.storyPath, roundTripRemoteStoryPath);
+assert.equal(remoteImport.importDestination.backupFolderPath, roundTripRemoteBackupFolder);
+const importedRemoteState = __test.readState();
+assert.deepEqual(
+  [...new Set(importedRemoteState.drafts[0].versionHistory.map(entry => entry.content))],
+  ["Earlier first draft", "Shared first draft"],
+  "computer B should import every version from computer A into its incomplete local sidecar"
+);
+assert.deepEqual(
+  [...new Set(importedRemoteState.initialNotes.versionHistory.map(entry => entry.content))],
+  ["Earlier round trip notes", "Round trip notes"],
+  "computer B should import project-note history from computer A into its incomplete local sidecar"
+);
+
+const returnedRoundTripState = StateCore.normalizeState(importedRemoteState);
+const newRemoteDraft = stateWithDrafts([
   {
     title: "Draft 2",
     content: "Draft made today on the other computer",
@@ -454,15 +496,10 @@ const returnedRoundTripState = stateWithDrafts([
     updatedAt: "2026-07-18T12:00:00.000Z",
     versionHistory: [version("round-trip-draft-2", "Draft made today on the other computer", "2026-07-18T12:00:00.000Z", "Draft 2")]
   }
-], "Round trip notes", [
-  version("round-trip-notes", "Round trip notes", "2026-07-17T10:00:00.000Z", "Project notes")
-]);
-returnedRoundTripState.drafts[0].versionHistory[0].format = { fontFamily: "Arial" };
-returnedRoundTripState.drafts[0].versionHistory.push(
-  version("round-trip-draft-1-duplicate", "Shared first draft", "2026-07-18T09:00:00.000Z", "Draft 1")
-);
-__test.writeTextFileLink(roundTripRemoteStoryPath);
-__test.writeVersionHistoryFolderPath(roundTripRemoteBackupFolder);
+], "", []).drafts[0];
+newRemoteDraft.id = "draft-2";
+newRemoteDraft.notes.id = "notes-2";
+returnedRoundTripState.drafts.push(newRemoteDraft);
 __test.writeAll(returnedRoundTripState, {
   filePath: roundTripRemoteStoryPath,
   fileName: "round-trip.txt",
@@ -478,6 +515,29 @@ assert.equal(
   1,
   "return exports should preserve the last shared story as their merge baseline"
 );
+
+const returnedManifest = returnedRoundTrip.manifest;
+returnedManifest.computerName = "computer-b";
+returnedManifest.items = returnedManifest.items.map(item => ({
+  ...item,
+  sourcePath: item.kind === "directory"
+    ? path.join(dataDir, "unmounted-computer-b", "DraftDiff backup")
+    : path.join(dataDir, "unmounted-computer-b", "round-trip.txt")
+}));
+fs.writeFileSync(returnedRoundTrip.manifestPath, `${JSON.stringify(returnedManifest, null, 2)}\n`, "utf8");
+
+__test.writeTextFileLink(roundTripLocalStoryPath);
+__test.writeVersionHistoryFolderPath(roundTripLocalBackupFolder);
+fs.writeFileSync(__test.STATE_FILE, `${JSON.stringify(StateCore.normalizeState(roundTripBaseState), null, 2)}\n`, "utf8");
+const returnedRoundTripReview = __test.reviewUsbTransferFolder(returnedRoundTrip.packageFolderPath);
+assert.equal(returnedRoundTripReview.merge.status, "usb-only");
+assert.deepEqual(
+  returnedRoundTripReview.merge.usbOnly.map(entry => `${entry.type}:${entry.number || 0}`),
+  ["draft:2"],
+  "after a real two-computer round trip, only the newly added draft should be reported"
+);
+assert.equal(returnedRoundTripReview.merge.localOnly.length, 0);
+assert.equal(returnedRoundTripReview.merge.bothChanged.length, 0);
 
 const legacyReturnedRoundTrip = __test.createUsbTransferPackage({
   state: returnedRoundTripState,
