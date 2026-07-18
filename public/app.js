@@ -8022,55 +8022,36 @@ function renderTransferStoryLines(story = {}, options = {}) {
   `;
 }
 
-function allMergeItemsUseSource(merge = {}, source) {
-  const items = merge.bothChanged || [];
-  return Boolean(items.length) && items.every(entry => entry.currentSource === source);
-}
-
 function transferMergeVerdict(merge = {}) {
   if (merge.status === "no-changes") {
     return {
-      title: merge.localStoryMissing ? "Ready to import USB story" : "No story changes found",
+      title: merge.localStoryMissing ? "Ready to import USB story" : "The files contain the same saved versions",
       body: merge.localStoryMissing
         ? "No local story file exists yet. Proceed will import the USB story and saved versions."
-        : "The USB copy and this computer both match the version that was exported.",
+        : "This computer already contains every saved version found on the USB, and the USB contains every version found here.",
       ready: true
     };
   }
   if (merge.status === "usb-only") {
     return {
-      title: merge.localStoryMissing ? "Ready to import USB story" : "Only the USB copy changed",
+      title: merge.localStoryMissing ? "Ready to import USB story" : "The USB contains saved versions missing from this computer",
       body: merge.localStoryMissing
         ? "No local story file exists yet. Proceed will import the USB story and saved versions."
-        : "Proceed will back up this computer first, then bring in the USB story changes and saved versions.",
+        : "Proceed will back up this computer, add the missing USB versions, and keep the version with the latest save time current.",
       ready: true
     };
   }
   if (merge.status === "local-only") {
     return {
-      title: "Only this computer changed",
-      body: "The USB copy has no newer story changes. Proceed will keep this computer's story current and preserve the backup.",
+      title: "This computer already contains all USB versions",
+      body: "There are no saved versions on the USB that need to be added. This computer also contains additional local versions.",
       ready: true
     };
   }
   if (merge.status === "both-changed") {
-    if (allMergeItemsUseSource(merge, "usb")) {
-      return {
-        title: "USB copy will update changed drafts",
-        body: "This computer also changed these drafts since export. Proceed will use the USB copy as current and save this computer's copy in version history.",
-        ready: false
-      };
-    }
-    if (allMergeItemsUseSource(merge, "local")) {
-      return {
-        title: "This computer has the newer changed drafts",
-        body: "The USB copy also changed these drafts since export. Proceed will keep this computer's copy current and save the USB copy in version history.",
-        ready: false
-      };
-    }
     return {
-      title: "Both copies changed; newest drafts will be kept",
-      body: "Proceed will compare each changed draft. The newest copy stays current and the other copy is saved in version history.",
+      title: "Both files contain saved versions missing from the other",
+      body: "A merge is required. This computer's file will be preserved, USB versions will be added, and each history will be ordered by save time. The latest saved version stays current.",
       ready: false
     };
   }
@@ -8094,13 +8075,9 @@ function transferMergeCopyLabel(source, sentenceStart = false) {
   return sentenceStart ? "Newest copy" : "newest copy";
 }
 
-function transferMergeEntryHasVersionHistory(entry = {}) {
-  return entry.type === "draft" || entry.type === "draftNotes" || entry.type === "projectNotes";
-}
-
 function transferMergeEntryTime(entry = {}, source) {
-  if (source === "usb") return entry.usbCurrentAt || "";
-  if (source === "local") return entry.localCurrentAt || "";
+  if (source === "usb") return entry.usbLatestAt || entry.usbCurrentAt || "";
+  if (source === "local") return entry.localLatestAt || entry.localCurrentAt || "";
   if (source === "base") return entry.baseCurrentAt || "";
   return "";
 }
@@ -8114,41 +8091,30 @@ function transferMergeCopyText(entry, source, sentenceStart = false) {
   return `${transferMergeCopyLabel(source, sentenceStart)}${time ? ` from ${time}` : ""}`;
 }
 
-function transferMergeWordSummary(entry = {}) {
-  return `USB: ${wordCountText(entry.usbWordCount)}. This computer: ${wordCountText(entry.localWordCount)}.`;
-}
-
 function transferMergeListDetail(entry = {}, mode, options = {}) {
+  const usbMissing = Number(entry.usbUniqueVersions || 0);
+  const localMissing = Number(entry.localUniqueVersions || 0);
+  const usbLatest = transferMergeCopyText(entry, "usb", true);
+  const localLatest = transferMergeCopyText(entry, "local", true);
+  const wordCounts = `Current word counts - USB: ${wordCountText(entry.usbWordCount)}; this computer: ${wordCountText(entry.localWordCount)}.`;
+  const missingUsbDates = (entry.usbUniqueVersionDetails || [])
+    .map(version => version.savedAt ? transferMergeTimeText(version.savedAt) : "unknown date")
+    .join(", ");
   if (mode === "both") {
-    const currentSource = entry.currentSource === "usb" ? "usb" : "local";
-    const archivedSource = currentSource === "usb" ? "local" : "usb";
-    const currentCopy = transferMergeCopyText(entry, currentSource, true);
-    const archivedCopy = transferMergeCopyText(entry, archivedSource);
-
-    if (!entry.conflict) {
-      return `${currentCopy} stays current; saved versions are combined. ${transferMergeWordSummary(entry)}`;
-    }
-
-    if (transferMergeEntryHasVersionHistory(entry)) {
-      return `${currentCopy} stays current; ${archivedCopy} is saved in version history. ${transferMergeWordSummary(entry)}`;
-    }
-
-    return `${currentCopy} stays current; ${archivedCopy} is not made current. ${transferMergeWordSummary(entry)}`;
+    return `USB has ${countLabel(usbMissing, "version")} missing locally; this computer has ${countLabel(localMissing, "version")} missing from USB. ${usbLatest}; ${localLatest}. ${wordCounts} Both histories will be combined by timestamp, with the latest save current.`;
   }
 
   if (mode === "usb") {
-    const usbCopy = transferMergeCopyText(entry, "usb", true);
-    const localTime = transferMergeTimeText(entry.localCurrentAt);
-    const hasExistingCopy = Boolean(entry.localCurrentAt || entry.baseCurrentAt || Number(entry.localWordCount || 0) > 0);
-    if (options.localStoryMissing || !hasExistingCopy) {
-      return `${usbCopy} will be imported. USB: ${wordCountText(entry.usbWordCount)}.`;
+    if (options.localStoryMissing || !entry.localCurrentAt) {
+      return `USB has ${countLabel(usbMissing, "saved version")} to import. ${usbLatest}. ${wordCounts}`;
     }
-    return `${usbCopy} will become current, updating this computer's copy${localTime ? ` from ${localTime}` : ""}. ${transferMergeWordSummary(entry)}`;
+    if (entry.currentTextMatches) {
+      return `The current text matches on both files, but the USB contains ${countLabel(usbMissing, "additional saved history entry")} not stored locally${missingUsbDates ? `, saved ${missingUsbDates}` : ""}. ${wordCounts} The missing history will be added without changing the current draft text.`;
+    }
+    return `USB has ${countLabel(usbMissing, "saved version")} not on this computer. ${usbLatest}; ${localLatest}. ${wordCounts} The missing versions will be added and the latest save will stay current.`;
   }
 
-  const localCopy = transferMergeCopyText(entry, "local", true);
-  const baseTime = transferMergeTimeText(entry.baseCurrentAt);
-  return `${localCopy} stays current; the USB copy matches the exported copy${baseTime ? ` from ${baseTime}` : ""}. ${transferMergeWordSummary(entry)}`;
+  return `This computer already contains every USB version and has ${countLabel(localMissing, "additional local version")}. ${localLatest}; ${usbLatest}. ${wordCounts} Nothing is missing from the USB import.`;
 }
 
 function renderTransferMergeList(title, entries = [], mode, options = {}) {
@@ -8175,13 +8141,13 @@ function renderTransferMergeReview(merge = {}) {
     return `<p class="transfer-review-empty">${escapeHtml(merge.reason || "Story-level merge review is unavailable for this package.")}</p>`;
   }
   if (merge.status === "no-changes") {
-    return '<p class="transfer-review-empty">No project notes, drafts, draft notes, or saved draft versions changed on either side.</p>';
+    return '<p class="transfer-review-empty">The USB and this computer contain the same saved versions.</p>';
   }
 
   return `
-    ${renderTransferMergeList(merge.localStoryMissing ? "Will be imported from USB" : "Changed only on USB", merge.usbOnly || [], "usb", { localStoryMissing: merge.localStoryMissing })}
-    ${renderTransferMergeList("Changed only on this computer", merge.localOnly || [], "local")}
-    ${renderTransferMergeList("Changed on both; one copy stays current", merge.bothChanged || [], "both")}
+    ${renderTransferMergeList(merge.localStoryMissing ? "Will be imported from USB" : "USB versions missing from this computer", merge.usbOnly || [], "usb", { localStoryMissing: merge.localStoryMissing })}
+    ${renderTransferMergeList("This computer already contains all USB versions", merge.localOnly || [], "local")}
+    ${renderTransferMergeList("Versions exist on both sides and must be merged", merge.bothChanged || [], "both")}
   `;
 }
 
@@ -8205,7 +8171,6 @@ function renderTransferReview(payload) {
     ...(files.localDeleted || [])
   ];
   const usbDeleteEntries = files.usbDeleted || [];
-  const storyChangeCount = transferStoryChangeCount(payload.story || {});
   const exportedAt = payload.manifest?.createdAt ? formatDate(payload.manifest.createdAt) : "";
   if (els.transferReviewTitle) {
     els.transferReviewTitle.textContent = mergeVerdict.title;
@@ -8220,29 +8185,24 @@ function renderTransferReview(payload) {
     <section class="transfer-review-simple-grid">
       <div>
         <span class="transfer-review-number">${Number(merge.counts?.usbOnly || 0).toLocaleString("en-GB")}</span>
-        <strong>USB-only change${Number(merge.counts?.usbOnly || 0) === 1 ? "" : "s"}</strong>
-        <p>Story areas changed on the USB copy but not on this computer.</p>
+        <strong>area${Number(merge.counts?.usbOnly || 0) === 1 ? "" : "s"} with missing USB versions</strong>
+        <p>The USB contains saved versions that this computer does not contain.</p>
       </div>
       <div>
         <span class="transfer-review-number">${Number(merge.counts?.localOnly || 0).toLocaleString("en-GB")}</span>
-        <strong>local-only change${Number(merge.counts?.localOnly || 0) === 1 ? "" : "s"}</strong>
-        <p>Story areas changed on this computer but not on the USB copy.</p>
+        <strong>area${Number(merge.counts?.localOnly || 0) === 1 ? "" : "s"} already ahead locally</strong>
+        <p>This computer contains every USB version plus additional local versions.</p>
       </div>
       <div>
         <span class="transfer-review-number">${Number(merge.counts?.bothChanged || 0).toLocaleString("en-GB")}</span>
-        <strong>merge item${Number(merge.counts?.bothChanged || 0) === 1 ? "" : "s"}</strong>
-        <p>Story areas changed in both places; one copy will stay current.</p>
+        <strong>area${Number(merge.counts?.bothChanged || 0) === 1 ? "" : "s"} requiring a merge</strong>
+        <p>Each file contains saved versions missing from the other.</p>
       </div>
     </section>
 
     <section class="transfer-review-section transfer-review-story">
       <h3>Story merge review</h3>
       ${renderTransferMergeReview(merge)}
-    </section>
-
-    <section class="transfer-review-section transfer-review-story">
-      <h3>USB story details${storyChangeCount ? ` (${storyChangeCount.toLocaleString("en-GB")})` : ""}</h3>
-      ${renderTransferStoryLines(payload.story || {}, { merge })}
     </section>
 
     <section class="transfer-review-section">
@@ -8260,7 +8220,8 @@ function renderTransferReview(payload) {
       <ul class="transfer-review-plain-list">
         <li><strong>Back up this computer first</strong><span>The current story file and this story's matching history files are copied to a dated backup folder.</span></li>
         <li><strong>Import only this story</strong><span>Other stories in the shared backup folder are left alone.</span></li>
-        <li><strong>Merge by newest draft</strong><span>If both computers changed the same draft, the newest copy stays current and the older copy is saved in that draft's version history.</span></li>
+        <li><strong>Preserve this computer's file</strong><span>The local story is not overwritten wholesale; missing USB versions are merged into it.</span></li>
+        <li><strong>Combine histories by timestamp</strong><span>All unique local and USB versions are retained, ordered by their saved timestamps, and the latest saved version stays current.</span></li>
       </ul>
     </section>
 
@@ -8310,13 +8271,7 @@ function importConfirmationText(review) {
   if (review?.merge?.localStoryMissing) {
     return `Proceed with this USB import?\n\nNo local story file exists yet. DraftDiff will import the USB story and saved versions.${conflictText}`;
   }
-  if (allMergeItemsUseSource(review?.merge, "usb")) {
-    return `Proceed with this USB import?\n\nDraftDiff will back up this computer, then update the changed drafts from the USB copy. This computer's current copies are saved in version history.${conflictText}`;
-  }
-  if (allMergeItemsUseSource(review?.merge, "local")) {
-    return `Proceed with this USB import?\n\nDraftDiff will back up this computer and keep its newer changed drafts current. The USB copies are saved in version history.${conflictText}`;
-  }
-  return `Proceed with this USB import?\n\nDraftDiff will back up the current files on this computer, then merge the USB story with the local story. Newest drafts stay current; older conflicting copies are saved in version history.${conflictText}`;
+  return `Proceed with this USB import?\n\nDraftDiff will back up this computer, preserve the local story file, add versions missing from the USB, and combine each version history in timestamp order. The latest saved version stays current.${conflictText}`;
 }
 
 async function proceedTransferImport() {

@@ -3255,7 +3255,11 @@ function isOneDrivePath(filePath) {
 function writeAtomicText(filePath, content, options = {}) {
   fs.mkdirSync(path.dirname(filePath), { recursive: true });
 
-  if (isOneDrivePath(filePath) || (options.temporaryFolderPath && isOneDrivePath(options.temporaryFolderPath))) {
+  if (
+    options.preserveFileIdentity
+    || isOneDrivePath(filePath)
+    || (options.temporaryFolderPath && isOneDrivePath(options.temporaryFolderPath))
+  ) {
     fs.writeFileSync(filePath, content, "utf8");
     return;
   }
@@ -3311,7 +3315,10 @@ function rollbackPersistenceTransaction(manifest) {
       if (entry.existed) {
         if (!entry.backupPath) throw new Error("Missing transaction backup path.");
         const backupText = fs.readFileSync(entry.backupPath, "utf8");
-        writeAtomicText(filePath, backupText, { temporaryFolderPath: PERSISTENCE_TRANSACTION_DIR });
+        writeAtomicText(filePath, backupText, {
+          temporaryFolderPath: PERSISTENCE_TRANSACTION_DIR,
+          preserveFileIdentity: Boolean(entry.preserveFileIdentity)
+        });
       } else {
         fs.rmSync(filePath, { force: true });
       }
@@ -3368,6 +3375,7 @@ function normalizeTransactionWrites(writes = []) {
       filePath,
       content,
       temporaryFolderPath: write.temporaryFolderPath,
+      preserveFileIdentity: Boolean(write.preserveFileIdentity),
       onCommit: typeof write.onCommit === "function" ? [write.onCommit] : []
     });
   });
@@ -3391,7 +3399,8 @@ function preparePersistenceTransactionJournal(writes) {
       return {
         filePath: write.filePath,
         existed,
-        backupPath
+        backupPath,
+        preserveFileIdentity: Boolean(write.preserveFileIdentity)
       };
     })
   };
@@ -3426,7 +3435,8 @@ function writeTransactionalTextFiles(writes = [], options = {}) {
       if (shouldFailTransactionWrite(write, options)) throw transactionWriteFailure(write);
       try {
         writeAtomicText(write.filePath, write.content, {
-          temporaryFolderPath: write.temporaryFolderPath
+          temporaryFolderPath: write.temporaryFolderPath,
+          preserveFileIdentity: write.preserveFileIdentity
         });
       } catch (error) {
         error.filePath = error.filePath || write.filePath;
@@ -3924,7 +3934,8 @@ function writeAll(state, options = {}) {
     if (!missingLinkedTextFile) {
       linkedWrites.push({
         filePath: linkedTextPath,
-        content: exportText
+        content: exportText,
+        preserveFileIdentity: Boolean(options.preserveExternalFileIdentity)
       });
     }
     const cacheWrite = textFileStateTransactionWrite(linkedTextPath, normalized);
@@ -3940,7 +3951,10 @@ function writeAll(state, options = {}) {
         fileName: options.fileName,
         mergeExisting: options.mergeExisting
       });
-      if (versionHistoryWrite) versionHistoryWrites.push(versionHistoryWrite);
+      if (versionHistoryWrite) {
+        versionHistoryWrite.preserveFileIdentity = Boolean(options.preserveExternalFileIdentity);
+        versionHistoryWrites.push(versionHistoryWrite);
+      }
     } catch (error) {
       if (!options.allowMissingVersionHistoryFolder || !isBackupFolderMissingError(error)) throw error;
     }
@@ -4226,7 +4240,25 @@ function summarizeTransferFileEntries(entries) {
   };
 }
 
-function createUsbTransferPackage(payload, destinationRootPath) {
+function existingUsbTransferManifest(packageFolderPath) {
+  const manifestPath = path.join(packageFolderPath, USB_TRANSFER_MANIFEST_FILE);
+  if (!fileExists(manifestPath)) return null;
+
+  try {
+    const manifest = parseJsonFile(manifestPath);
+    return manifest?.version === 1 && Array.isArray(manifest.items) ? manifest : null;
+  } catch {
+    return null;
+  }
+}
+
+function previousTransferItem(previousManifest, item) {
+  return previousManifest?.items?.find(previous => (
+    previous?.id === item.id && previous?.role === item.role && previous?.kind === item.kind
+  )) || null;
+}
+
+function createUsbTransferPackage(payload, destinationRootPath, options = {}) {
   const destinationRoot = path.resolve(destinationRootPath);
   if (!directoryExists(destinationRoot)) fs.mkdirSync(destinationRoot, { recursive: true });
 
@@ -4242,7 +4274,15 @@ function createUsbTransferPackage(payload, destinationRootPath) {
   const linkedTextPath = readTextFileLink();
   const storyTextPath = sourceInfo.filePath || linkedTextPath || EXPORT_FILE;
   const backupFolderPath = existingVersionHistoryFolderPath();
-  const packageFolderPath = path.join(destinationRoot, usbTransferPackageFolderName(sourceInfo.fileName));
+  const packageFolderPath = options.packageFolderPath
+    ? path.resolve(options.packageFolderPath)
+    : path.join(destinationRoot, usbTransferPackageFolderName(sourceInfo.fileName));
+  const existingManifest = options.resetBaseline
+    ? null
+    : existingUsbTransferManifest(packageFolderPath)
+      || latestUsbTransferManifest(destinationRoot, sourceInfo.fileName)?.manifest
+      || null;
+  const previousManifest = existingManifest?.source?.fileName === sourceInfo.fileName ? existingManifest : null;
 
   assertTransferDestinationSafe(packageFolderPath, [backupFolderPath]);
   fs.mkdirSync(packageFolderPath, { recursive: true });
@@ -4251,7 +4291,7 @@ function createUsbTransferPackage(payload, destinationRootPath) {
   const storyPackagePath = portablePath(USB_TRANSFER_FILES_DIR, "story", path.basename(storyTextPath));
   const packageStoryTextPath = pathFromPortable(packageFolderPath, storyPackagePath);
   writeAtomicText(packageStoryTextPath, formatExport(normalized));
-  items.push({
+  const storyItem = {
     id: "story-text",
     role: "storyText",
     kind: "file",
@@ -4259,7 +4299,9 @@ function createUsbTransferPackage(payload, destinationRootPath) {
     sourcePath: path.resolve(storyTextPath),
     packagePath: storyPackagePath,
     baseline: fileSnapshot(storyTextPath)
-  });
+  };
+  storyItem.baseline = previousTransferItem(previousManifest, storyItem)?.baseline || storyItem.baseline;
+  items.push(storyItem);
 
   let backupPackagePath = "";
   if (backupFolderPath) {
@@ -4274,7 +4316,7 @@ function createUsbTransferPackage(payload, destinationRootPath) {
         pathFromPortable(packageFolderPath, backupPackagePath),
         managedRelativePaths
       );
-      items.push({
+      const backupItem = {
         id: "backup-folder",
         role: "backupFolder",
         kind: "directory",
@@ -4283,7 +4325,9 @@ function createUsbTransferPackage(payload, destinationRootPath) {
         packagePath: backupPackagePath,
         managedRelativePaths,
         baseline: subsetDirectorySnapshot(backupFolderPath, managedRelativePaths)
-      });
+      };
+      backupItem.baseline = previousTransferItem(previousManifest, backupItem)?.baseline || backupItem.baseline;
+      items.push(backupItem);
     }
   }
 
@@ -4298,8 +4342,8 @@ function createUsbTransferPackage(payload, destinationRootPath) {
       backupFolderPath: backupFolderPath ? path.resolve(backupFolderPath) : null
     },
     items,
-    baselineState: normalizeState(normalized),
-    storySummary: storySummaryFromState(normalized, {
+    baselineState: previousManifest?.baselineState || normalizeState(normalized),
+    storySummary: previousManifest?.storySummary || storySummaryFromState(normalized, {
       filePath: storyTextPath,
       fileName: sourceInfo.fileName
     })
@@ -4319,22 +4363,42 @@ function createUsbTransferPackage(payload, destinationRootPath) {
 }
 
 function findUsbTransferManifestPath(folderPath) {
+  return latestUsbTransferManifest(folderPath)?.manifestPath || null;
+}
+
+function latestUsbTransferManifest(folderPath, sourceFileName = "") {
   const root = path.resolve(folderPath);
-  const direct = path.join(root, USB_TRANSFER_MANIFEST_FILE);
-  if (fs.existsSync(direct)) return direct;
+  const manifestPaths = [path.join(root, USB_TRANSFER_MANIFEST_FILE)];
 
   try {
-    const entries = fs.readdirSync(root, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory()) continue;
-      const candidate = path.join(root, entry.name, USB_TRANSFER_MANIFEST_FILE);
-      if (fs.existsSync(candidate)) return candidate;
-    }
+    fs.readdirSync(root, { withFileTypes: true }).forEach(entry => {
+      if (entry.isDirectory()) manifestPaths.push(path.join(root, entry.name, USB_TRANSFER_MANIFEST_FILE));
+    });
   } catch {
-    // The caller will report the missing manifest below.
+    return null;
   }
 
-  return null;
+  const expectedFileName = asText(sourceFileName);
+  const candidates = manifestPaths.flatMap(manifestPath => {
+    if (!fileExists(manifestPath)) return [];
+    try {
+      const manifest = parseJsonFile(manifestPath);
+      if (manifest?.version !== 1 || !Array.isArray(manifest.items)) return [];
+      if (expectedFileName && manifest?.source?.fileName !== expectedFileName) return [];
+      const createdTime = Date.parse(manifest.createdAt || "");
+      const modifiedTime = fs.statSync(manifestPath).mtimeMs;
+      return [{
+        manifestPath,
+        manifest,
+        time: Number.isNaN(createdTime) ? modifiedTime : createdTime
+      }];
+    } catch {
+      return [];
+    }
+  });
+
+  candidates.sort((left, right) => right.time - left.time || right.manifestPath.localeCompare(left.manifestPath));
+  return candidates[0] || null;
 }
 
 function readUsbTransferManifest(folderPath) {
@@ -4545,7 +4609,7 @@ function localTransferState(review, baselineState = null) {
   const currentSnapshot = storyPath ? fileSnapshot(storyPath) : { exists: false };
   const storyFileChanged = storyPath && currentSnapshot.exists && fileSnapshotChanged(storyItem?.baseline, currentSnapshot);
 
-  if (storyPath && !currentSnapshot.exists && baselineState) return normalizeState(baselineState);
+  if (storyPath && !currentSnapshot.exists) return baselineState ? normalizeState(baselineState) : null;
   if (!storyFileChanged) return currentState;
 
   try {
@@ -4638,6 +4702,18 @@ function historyWithCurrentPage(page, fallbackTitle) {
   return addCurrentPageToHistoryIfMissing(normalized, page, fallbackTitle);
 }
 
+function chooseNewerPageSource(localPage, usbPage, fallbackTitle) {
+  if (localPage && !usbPage) return "local";
+  if (!localPage && usbPage) return "usb";
+  if (!localPage && !usbPage) return "";
+
+  const localTime = pageCurrentTime(localPage, fallbackTitle);
+  const usbTime = pageCurrentTime(usbPage, fallbackTitle);
+  if (usbTime !== null && localTime !== null) return usbTime > localTime ? "usb" : "local";
+  if (usbTime !== null) return "usb";
+  return "local";
+}
+
 function chooseMergedPageSource(basePage, localPage, usbPage, fallbackTitle) {
   if (localPage && !usbPage) return "local";
   if (!localPage && usbPage) return "usb";
@@ -4649,11 +4725,7 @@ function chooseMergedPageSource(basePage, localPage, usbPage, fallbackTitle) {
   if (localChanged && !usbChanged) return "local";
   if (!localChanged && !usbChanged) return "local";
 
-  const localTime = pageCurrentTime(localPage, fallbackTitle);
-  const usbTime = pageCurrentTime(usbPage, fallbackTitle);
-  if (usbTime !== null && localTime !== null) return usbTime > localTime ? "usb" : "local";
-  if (usbTime !== null) return "usb";
-  return "local";
+  return chooseNewerPageSource(localPage, usbPage, fallbackTitle);
 }
 
 function mergeVersionedPage(basePage, localPage, usbPage, fallbackTitle, options = {}) {
@@ -4681,6 +4753,7 @@ function mergeVersionedPage(basePage, localPage, usbPage, fallbackTitle, options
     content: ""
   });
   normalizedPage.versionHistory = page.versionHistory;
+  promotePageToNewestHistoryVersion(normalizedPage, fallbackTitle);
 
   return {
     page: normalizedPage,
@@ -4707,11 +4780,11 @@ function mergePlainPage(basePage, localPage, usbPage, fallbackTitle, options = {
   });
 }
 
-function mergeDraftAtIndex(baseDraft, localDraft, usbDraft, index, summary) {
+function mergeDraftAtIndex(baseDraft, localDraft, usbDraft, index, summary, options = {}) {
   if (!baseDraft && !localDraft && !usbDraft) return null;
 
   const fallbackTitle = localDraft?.title || usbDraft?.title || baseDraft?.title || `Draft ${index + 1}`;
-  const mergedDraft = mergeVersionedPage(baseDraft, localDraft, usbDraft, fallbackTitle);
+  const mergedDraft = mergeVersionedPage(baseDraft, localDraft, usbDraft, fallbackTitle, options);
   if (!mergedDraft?.page) return null;
 
   const draft = mergedDraft.page;
@@ -4722,7 +4795,10 @@ function mergeDraftAtIndex(baseDraft, localDraft, usbDraft, index, summary) {
     localDraft?.notes,
     usbDraft?.notes,
     notesTitle,
-    { fixedId: localDraft?.notes?.id || baseDraft?.notes?.id || usbDraft?.notes?.id || id("notes") }
+    {
+      ...options,
+      fixedId: localDraft?.notes?.id || baseDraft?.notes?.id || usbDraft?.notes?.id || id("notes")
+    }
   );
   draft.notes = mergedNotes?.page || {
     id: localDraft?.notes?.id || baseDraft?.notes?.id || usbDraft?.notes?.id || id("notes"),
@@ -4751,7 +4827,7 @@ function mergeDraftAtIndex(baseDraft, localDraft, usbDraft, index, summary) {
   return draft;
 }
 
-function mergeUsbTransferStates(baselineState, localState, usbState) {
+function mergeUsbTransferStates(baselineState, localState, usbState, options = {}) {
   const base = baselineState ? normalizeState(baselineState) : null;
   const local = localState ? normalizeState(localState) : null;
   const usb = usbState ? normalizeState(usbState) : null;
@@ -4771,7 +4847,7 @@ function mergeUsbTransferStates(baselineState, localState, usbState) {
     local?.initialNotes,
     usb?.initialNotes,
     PROJECT_NOTES_TITLE,
-    { fixedId: "initial-notes" }
+    { ...options, fixedId: "initial-notes" }
   );
   if (projectNotes?.source === "usb") summary.projectNotesCurrent = "usb";
   if (projectNotes?.source === "local") summary.projectNotesCurrent = "local";
@@ -4788,7 +4864,8 @@ function mergeUsbTransferStates(baselineState, localState, usbState) {
       local?.drafts?.[index] || null,
       usb?.drafts?.[index] || null,
       index,
-      summary
+      summary,
+      options
     );
     if (draft) drafts.push(draft);
   }
@@ -4808,10 +4885,9 @@ function mergeUsbTransferStates(baselineState, localState, usbState) {
 }
 
 function mergeUsbTransferPackage(review) {
-  const baselineState = baselineStateFromManifest(review.manifest);
-  const localState = localTransferState(review, baselineState);
-  const usbState = transferPackageState(review, baselineState);
-  return mergeUsbTransferStates(baselineState, localState, usbState);
+  const localState = localTransferState(review, null);
+  const usbState = transferPackageState(review, null);
+  return mergeUsbTransferStates(null, localState, usbState);
 }
 
 function pageReviewSignature(page, fallbackTitle) {
@@ -4835,32 +4911,68 @@ function pageReviewWordCount(page) {
   return wordCountForText(pagePlainText(page));
 }
 
-function createMergeReviewEntry(type, number, basePage, localPage, usbPage, fallbackTitle) {
-  const localChanged = pageChangedFromBaseForReview(basePage, localPage, fallbackTitle);
-  const usbChanged = pageChangedFromBaseForReview(basePage, usbPage, fallbackTitle);
-  if (!localChanged && !usbChanged) return null;
+function pageSavedVersionsBySignature(page, fallbackTitle) {
+  const versions = new Map();
+  historyWithCurrentPage(page, fallbackTitle).forEach(version => {
+    const signature = normalizedHistoryTextValue(textForHistoryVersion(version));
+    if (!signature) return;
+    if (!versions.has(signature)) versions.set(signature, version);
+  });
+  return versions;
+}
 
-  const localCurrentSignature = pageCurrentSignature(localPage, fallbackTitle);
-  const usbCurrentSignature = pageCurrentSignature(usbPage, fallbackTitle);
-  const currentSource = chooseMergedPageSource(basePage, localPage, usbPage, fallbackTitle);
-  const bothChanged = localChanged && usbChanged;
-  const baseCurrentAt = pageCurrentIso(basePage, fallbackTitle);
+function uniqueSavedVersionDetails(versions, otherVersions) {
+  return [...versions.entries()]
+    .filter(([signature]) => !otherVersions.has(signature))
+    .map(([, version]) => ({
+      savedAt: asText(version?.createdAt),
+      wordCount: wordCountForText(textForHistoryVersion(version))
+    }))
+    .sort((left, right) => String(left.savedAt).localeCompare(String(right.savedAt)));
+}
+
+function pageLatestSavedAt(page, fallbackTitle) {
+  const times = historyWithCurrentPage(page, fallbackTitle)
+    .map(version => versionHistoryTime(version))
+    .filter(time => time !== null);
+  return times.length ? new Date(Math.max(...times)).toISOString() : "";
+}
+
+function createDirectMergeReviewEntry(type, number, localPage, usbPage, fallbackTitle) {
+  const localVersions = pageSavedVersionsBySignature(localPage, fallbackTitle);
+  const usbVersions = pageSavedVersionsBySignature(usbPage, fallbackTitle);
+  const localUniqueVersionDetails = uniqueSavedVersionDetails(localVersions, usbVersions);
+  const usbUniqueVersionDetails = uniqueSavedVersionDetails(usbVersions, localVersions);
+  const localOnlyVersions = localUniqueVersionDetails.length;
+  const usbOnlyVersions = usbUniqueVersionDetails.length;
+  if (!localOnlyVersions && !usbOnlyVersions) return null;
+
   const localCurrentAt = pageCurrentIso(localPage, fallbackTitle);
   const usbCurrentAt = pageCurrentIso(usbPage, fallbackTitle);
+  const localLatestAt = pageLatestSavedAt(localPage, fallbackTitle);
+  const usbLatestAt = pageLatestSavedAt(usbPage, fallbackTitle);
+  const currentSource = chooseNewerPageSource(localPage, usbPage, fallbackTitle);
 
   return {
     type,
     number,
     title: fallbackTitle,
-    localChanged,
-    usbChanged,
-    bothChanged,
-    conflict: bothChanged && Boolean(localCurrentSignature && usbCurrentSignature && localCurrentSignature !== usbCurrentSignature),
+    localChanged: localOnlyVersions > 0,
+    usbChanged: usbOnlyVersions > 0,
+    bothChanged: localOnlyVersions > 0 && usbOnlyVersions > 0,
+    conflict: localOnlyVersions > 0 && usbOnlyVersions > 0,
     currentSource,
-    baseCurrentAt,
     localCurrentAt,
     usbCurrentAt,
-    baseWordCount: pageReviewWordCount(basePage),
+    localLatestAt,
+    usbLatestAt,
+    localUniqueVersions: localOnlyVersions,
+    usbUniqueVersions: usbOnlyVersions,
+    localUniqueVersionDetails,
+    usbUniqueVersionDetails,
+    localVersionCount: localVersions.size,
+    usbVersionCount: usbVersions.size,
+    currentTextMatches: Boolean(localPage && usbPage && pagePlainText(localPage) === pagePlainText(usbPage)),
     localWordCount: pageReviewWordCount(localPage),
     usbWordCount: pageReviewWordCount(usbPage)
   };
@@ -4880,56 +4992,42 @@ function createUsbTransferMergeReview(review) {
     localOnly: [],
     bothChanged: []
   };
-  const baselineState = baselineStateFromManifest(review.manifest);
-  if (!baselineState) {
-    return {
-      ...empty,
-      reason: "This transfer package was created before story-level merge review was available."
-    };
-  }
-
   try {
-    const base = normalizeState(baselineState);
     const storyItem = transferStoryItem(review);
     const localStoryPath = storyItem ? localSourcePathForTransferItem(storyItem, review.manifest) : "";
     const localStoryMissing = Boolean(localStoryPath && !fileSnapshot(localStoryPath).exists);
-    const local = localTransferState(review, base);
-    const usb = transferPackageState(review, base);
+    const local = localTransferState(review, null);
+    const usb = transferPackageState(review, null);
     const entries = [];
-    const projectNotesEntry = createMergeReviewEntry(
+    const projectNotesEntry = createDirectMergeReviewEntry(
       "projectNotes",
       null,
-      base.initialNotes,
-      local.initialNotes,
+      local?.initialNotes,
       usb.initialNotes,
       PROJECT_NOTES_TITLE
     );
     if (projectNotesEntry) entries.push(projectNotesEntry);
 
     const maxDrafts = Math.max(
-      base.drafts?.length || 0,
-      local.drafts?.length || 0,
+      local?.drafts?.length || 0,
       usb.drafts?.length || 0
     );
     for (let index = 0; index < maxDrafts; index += 1) {
-      const baseDraft = base.drafts?.[index] || null;
-      const localDraft = local.drafts?.[index] || null;
+      const localDraft = local?.drafts?.[index] || null;
       const usbDraft = usb.drafts?.[index] || null;
-      const title = localDraft?.title || usbDraft?.title || baseDraft?.title || `Draft ${index + 1}`;
-      const draftEntry = createMergeReviewEntry(
+      const title = localDraft?.title || usbDraft?.title || `Draft ${index + 1}`;
+      const draftEntry = createDirectMergeReviewEntry(
         "draft",
         index + 1,
-        baseDraft,
         localDraft,
         usbDraft,
         title
       );
       if (draftEntry) entries.push(draftEntry);
 
-      const notesEntry = createMergeReviewEntry(
+      const notesEntry = createDirectMergeReviewEntry(
         "draftNotes",
         index + 1,
-        baseDraft?.notes,
         localDraft?.notes,
         usbDraft?.notes,
         `${title} Notes`
@@ -5053,7 +5151,8 @@ function applyUsbTransferFolder(folderPath) {
     filePath: storyPath,
     fileName,
     allowLinkedTextFileFailure: true,
-    allowCreateLinkedTextFile: true
+    allowCreateLinkedTextFile: true,
+    preserveExternalFileIdentity: true
   });
   return {
     ok: true,

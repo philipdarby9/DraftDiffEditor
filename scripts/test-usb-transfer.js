@@ -404,4 +404,128 @@ try {
   fs.chmodSync(blockedRoot, 0o700);
 }
 
+const roundTripLocalSourceDir = path.join(dataDir, "round-trip-local-source");
+const roundTripRemoteSourceDir = path.join(dataDir, "round-trip-remote-source");
+const roundTripUsbRoot = path.join(dataDir, "round-trip-usb");
+const roundTripLocalStoryPath = path.join(roundTripLocalSourceDir, "round-trip.txt");
+const roundTripLocalBackupFolder = path.join(roundTripLocalSourceDir, "DraftDiff backup");
+const roundTripRemoteStoryPath = path.join(roundTripRemoteSourceDir, "round-trip.txt");
+const roundTripRemoteBackupFolder = path.join(roundTripRemoteSourceDir, "DraftDiff backup");
+fs.mkdirSync(roundTripLocalSourceDir, { recursive: true });
+fs.mkdirSync(roundTripRemoteSourceDir, { recursive: true });
+fs.mkdirSync(roundTripUsbRoot, { recursive: true });
+__test.writeTextFileLink(roundTripLocalStoryPath);
+__test.writeVersionHistoryFolderPath(roundTripLocalBackupFolder);
+
+const roundTripBaseState = stateWithDrafts([
+  {
+    title: "Draft 1",
+    content: "Shared first draft",
+    notes: "",
+    updatedAt: "2026-07-17T10:00:00.000Z",
+    versionHistory: [version("round-trip-draft-1", "Shared first draft", "2026-07-17T10:00:00.000Z")]
+  }
+], "Round trip notes", [
+  version("round-trip-notes", "Round trip notes", "2026-07-17T10:00:00.000Z", "Project notes")
+]);
+__test.writeAll(roundTripBaseState, {
+  filePath: roundTripLocalStoryPath,
+  fileName: "round-trip.txt",
+  allowCreateLinkedTextFile: true
+});
+const outboundRoundTrip = __test.createUsbTransferPackage({
+  state: roundTripBaseState,
+  filePath: roundTripLocalStoryPath,
+  fileName: "round-trip.txt"
+}, roundTripUsbRoot);
+
+const returnedRoundTripState = stateWithDrafts([
+  {
+    title: "Draft 1",
+    content: "Shared first draft",
+    notes: "",
+    updatedAt: "2026-07-17T10:00:00.000Z",
+    versionHistory: [version("round-trip-draft-1", "Shared first draft", "2026-07-17T10:00:00.000Z")]
+  },
+  {
+    title: "Draft 2",
+    content: "Draft made today on the other computer",
+    notes: "",
+    updatedAt: "2026-07-18T12:00:00.000Z",
+    versionHistory: [version("round-trip-draft-2", "Draft made today on the other computer", "2026-07-18T12:00:00.000Z", "Draft 2")]
+  }
+], "Round trip notes", [
+  version("round-trip-notes", "Round trip notes", "2026-07-17T10:00:00.000Z", "Project notes")
+]);
+returnedRoundTripState.drafts[0].versionHistory[0].format = { fontFamily: "Arial" };
+returnedRoundTripState.drafts[0].versionHistory.push(
+  version("round-trip-draft-1-duplicate", "Shared first draft", "2026-07-18T09:00:00.000Z", "Draft 1")
+);
+__test.writeTextFileLink(roundTripRemoteStoryPath);
+__test.writeVersionHistoryFolderPath(roundTripRemoteBackupFolder);
+__test.writeAll(returnedRoundTripState, {
+  filePath: roundTripRemoteStoryPath,
+  fileName: "round-trip.txt",
+  allowCreateLinkedTextFile: true
+});
+const returnedRoundTrip = __test.createUsbTransferPackage({
+  state: returnedRoundTripState,
+  filePath: roundTripRemoteStoryPath,
+  fileName: "round-trip.txt"
+}, roundTripUsbRoot);
+assert.equal(
+  returnedRoundTrip.manifest.baselineState.drafts.length,
+  1,
+  "return exports should preserve the last shared story as their merge baseline"
+);
+
+const legacyReturnedRoundTrip = __test.createUsbTransferPackage({
+  state: returnedRoundTripState,
+  filePath: roundTripRemoteStoryPath,
+  fileName: "round-trip.txt"
+}, roundTripUsbRoot, {
+  packageFolderPath: outboundRoundTrip.packageFolderPath,
+  resetBaseline: true
+});
+const legacyManifest = legacyReturnedRoundTrip.manifest;
+legacyManifest.computerName = "other-computer";
+legacyManifest.items = legacyManifest.items.map(item => ({
+  ...item,
+  sourcePath: item.kind === "directory"
+    ? path.join(dataDir, "other-computer", "DraftDiff backup")
+    : path.join(dataDir, "other-computer", "round-trip.txt")
+}));
+fs.writeFileSync(legacyReturnedRoundTrip.manifestPath, `${JSON.stringify(legacyManifest, null, 2)}\n`, "utf8");
+
+__test.writeTextFileLink(roundTripLocalStoryPath);
+__test.writeVersionHistoryFolderPath(roundTripLocalBackupFolder);
+fs.writeFileSync(__test.STATE_FILE, `${JSON.stringify(StateCore.normalizeState(roundTripBaseState), null, 2)}\n`, "utf8");
+const legacyRoundTripReview = __test.reviewUsbTransferFolder(legacyReturnedRoundTrip.packageFolderPath);
+assert.equal(legacyRoundTripReview.merge.status, "usb-only");
+assert.equal(
+  [...legacyRoundTripReview.merge.usbOnly, ...legacyRoundTripReview.merge.localOnly, ...legacyRoundTripReview.merge.bothChanged]
+    .some(entry => entry.type === "draft" && entry.number === 1),
+  false,
+  "same-text versions should match even when timestamps or formatting metadata differ"
+);
+assert.equal(
+  legacyRoundTripReview.merge.usbOnly.some(entry => entry.type === "draft" && entry.number === 2),
+  true,
+  "a newer draft in a legacy return package should be identified as a USB-only change"
+);
+assert.equal(
+  legacyRoundTripReview.merge.usbOnly.find(entry => entry.type === "draft" && entry.number === 2).currentSource,
+  "usb"
+);
+
+const roundTripInodeBeforeImport = fs.statSync(roundTripLocalStoryPath).ino;
+const legacyRoundTripImport = __test.applyUsbTransferFolder(legacyReturnedRoundTrip.packageFolderPath);
+assert.equal(
+  fs.statSync(roundTripLocalStoryPath).ino,
+  roundTripInodeBeforeImport,
+  "USB import should update the linked story in place instead of replacing the file"
+);
+assert.equal(fs.readFileSync(roundTripLocalStoryPath, "utf8").includes("Draft made today on the other computer"), true);
+assert.equal(__test.reviewUsbTransferFolder(legacyReturnedRoundTrip.packageFolderPath).merge.status, "no-changes");
+
 console.log("USB transfer review test passed");
