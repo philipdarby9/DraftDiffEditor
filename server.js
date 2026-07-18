@@ -5005,7 +5005,7 @@ function createDirectMergeReviewEntry(type, number, localPage, usbPage, fallback
     && usbPage
     && normalizedHistoryTextValue(pagePlainText(localPage)) === normalizedHistoryTextValue(pagePlainText(usbPage))
   );
-  if (!usbOnlyVersions || currentTextMatches) return null;
+  if (!localOnlyVersions && !usbOnlyVersions) return null;
 
   const localCurrentAt = pageCurrentIso(localPage, fallbackTitle);
   const usbCurrentAt = pageCurrentIso(usbPage, fallbackTitle);

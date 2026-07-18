@@ -239,12 +239,13 @@ __test.writeAll(localState, {
 fs.writeFileSync(unrelatedHistoryPath, "local unrelated history should survive import", "utf8");
 
 const localOnlyReview = __test.reviewUsbTransferFolder(exported.packageFolderPath);
-assert.equal(localOnlyReview.merge.status, "no-changes");
-assert.equal(localOnlyReview.merge.localOnly.length, 0);
+assert.equal(localOnlyReview.merge.status, "local-only");
+assert.equal(localOnlyReview.merge.localOnly.some(entry => entry.type === "draft" && entry.number === 1), true);
+assert.equal(localOnlyReview.merge.localOnly.some(entry => entry.type === "draft" && entry.number === 4), true);
 
 const currentLinkedReview = __test.reviewUsbTransferFolder(newComputerPackagePath);
 assert.equal(currentLinkedReview.merge.localStoryMissing, false);
-assert.equal(currentLinkedReview.merge.status, "no-changes");
+assert.equal(currentLinkedReview.merge.status, "local-only");
 
 const usbState = stateWithDrafts([
   {
@@ -317,7 +318,7 @@ const review = __test.reviewUsbTransferFolder(exported.packageFolderPath);
 assert.equal(review.ok, true);
 assert.equal(review.merge.status, "both-changed");
 assert.equal(review.merge.usbOnly.some(entry => entry.type === "projectNotes"), true);
-assert.equal(review.merge.localOnly.length, 0);
+assert.equal(review.merge.localOnly.some(entry => entry.type === "draft" && entry.number === 1), true);
 const projectNotesReview = review.merge.usbOnly.find(entry => entry.type === "projectNotes");
 assert.equal(projectNotesReview.localCurrentAt, "2026-01-01T00:00:00.000Z");
 assert.equal(projectNotesReview.usbCurrentAt, "2026-01-04T00:00:00.000Z");
@@ -458,13 +459,13 @@ fs.writeFileSync(outboundRoundTrip.manifestPath, `${JSON.stringify(outboundManif
 const remoteExistingState = stateWithDrafts([
   {
     title: "Draft 1",
-    content: "Old copy on computer B",
+    content: "Shared first draft",
     notes: "",
-    updatedAt: "2026-07-15T10:00:00.000Z",
-    versionHistory: [version("round-trip-remote-old", "Old copy on computer B", "2026-07-15T10:00:00.000Z")]
+    updatedAt: "2026-07-17T10:00:00.000Z",
+    versionHistory: [version("round-trip-remote-current", "Shared first draft", "2026-07-17T10:00:00.000Z")]
   }
-], "Old notes on computer B", [
-  version("round-trip-remote-notes", "Old notes on computer B", "2026-07-15T10:00:00.000Z", "Project notes")
+], "Round trip notes", [
+  version("round-trip-remote-notes", "Round trip notes", "2026-07-17T10:00:00.000Z", "Project notes")
 ]);
 __test.writeTextFileLink(roundTripRemoteStoryPath);
 __test.writeVersionHistoryFolderPath(roundTripRemoteBackupFolder);
@@ -480,13 +481,13 @@ assert.equal(remoteImport.importDestination.backupFolderPath, roundTripRemoteBac
 const importedRemoteState = __test.readState();
 assert.deepEqual(
   [...new Set(importedRemoteState.drafts[0].versionHistory.map(entry => entry.content))],
-  ["Old copy on computer B", "Earlier first draft", "Shared first draft"],
-  "computer B should retain its older local version and import every version from computer A"
+  ["Earlier first draft", "Shared first draft"],
+  "computer B should import every version from computer A without adding unrelated text"
 );
 assert.deepEqual(
   [...new Set(importedRemoteState.initialNotes.versionHistory.map(entry => entry.content))],
-  ["Old notes on computer B", "Earlier round trip notes", "Round trip notes"],
-  "computer B should retain older project notes and import project-note history from computer A"
+  ["Earlier round trip notes", "Round trip notes"],
+  "computer B should import project-note history from computer A without adding unrelated text"
 );
 
 const returnedRoundTripState = StateCore.normalizeState(importedRemoteState);
@@ -536,7 +537,7 @@ assert.equal(returnedRoundTripReview.merge.status, "usb-only");
 assert.deepEqual(
   returnedRoundTripReview.merge.usbOnly.map(entry => `${entry.type}:${entry.number || 0}`),
   ["draft:2"],
-  "pre-transfer unmatched histories should be preserved silently while only the newly added draft is reported"
+  "a clean two-computer round trip should report only the newly added draft"
 );
 assert.equal(returnedRoundTripReview.merge.localOnly.length, 0);
 assert.equal(returnedRoundTripReview.merge.bothChanged.length, 0);
