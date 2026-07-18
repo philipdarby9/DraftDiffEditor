@@ -542,12 +542,13 @@ assert.deepEqual(
 assert.equal(returnedRoundTripReview.merge.localOnly.length, 0);
 assert.equal(returnedRoundTripReview.merge.bothChanged.length, 0);
 
+const legacyRoundTripUsbRoot = path.join(dataDir, "legacy-round-trip-usb");
+fs.mkdirSync(legacyRoundTripUsbRoot, { recursive: true });
 const legacyReturnedRoundTrip = __test.createUsbTransferPackage({
   state: returnedRoundTripState,
   filePath: roundTripRemoteStoryPath,
   fileName: "round-trip.txt"
-}, roundTripUsbRoot, {
-  packageFolderPath: outboundRoundTrip.packageFolderPath,
+}, legacyRoundTripUsbRoot, {
   resetBaseline: true
 });
 const legacyManifest = legacyReturnedRoundTrip.manifest;

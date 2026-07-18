@@ -4418,7 +4418,7 @@ function findUsbTransferManifestPath(folderPath) {
   return latestUsbTransferManifest(folderPath)?.manifestPath || null;
 }
 
-function latestUsbTransferManifest(folderPath, sourceFileName = "") {
+function usbTransferManifestCandidates(folderPath, sourceFileName = "") {
   const root = path.resolve(folderPath);
   const manifestPaths = [path.join(root, USB_TRANSFER_MANIFEST_FILE)];
 
@@ -4427,7 +4427,7 @@ function latestUsbTransferManifest(folderPath, sourceFileName = "") {
       if (entry.isDirectory()) manifestPaths.push(path.join(root, entry.name, USB_TRANSFER_MANIFEST_FILE));
     });
   } catch {
-    return null;
+    return [];
   }
 
   const expectedFileName = asText(sourceFileName);
@@ -4450,7 +4450,11 @@ function latestUsbTransferManifest(folderPath, sourceFileName = "") {
   });
 
   candidates.sort((left, right) => right.time - left.time || right.manifestPath.localeCompare(left.manifestPath));
-  return candidates[0] || null;
+  return candidates;
+}
+
+function latestUsbTransferManifest(folderPath, sourceFileName = "") {
+  return usbTransferManifestCandidates(folderPath, sourceFileName)[0] || null;
 }
 
 function readUsbTransferManifest(folderPath) {
@@ -4634,6 +4638,39 @@ function baselineStateFromManifest(manifest) {
   } catch {
     return null;
   }
+}
+
+function previousUsbTransferManifest(review) {
+  const currentManifestPath = path.resolve(review.manifestPath);
+  const currentCreatedTime = Date.parse(review.manifest?.createdAt || "");
+  const sourceFileName = review.manifest?.source?.fileName || "";
+  const parentFolderPath = path.dirname(review.packageFolderPath);
+  return usbTransferManifestCandidates(parentFolderPath, sourceFileName).find(candidate => {
+    if (path.resolve(candidate.manifestPath) === currentManifestPath) return false;
+    return Number.isNaN(currentCreatedTime) || candidate.time < currentCreatedTime;
+  }) || null;
+}
+
+function transferBaselineForReview(review) {
+  const previous = previousUsbTransferManifest(review);
+  if (previous) {
+    try {
+      const previousReview = {
+        manifestPath: previous.manifestPath,
+        packageFolderPath: path.dirname(previous.manifestPath),
+        manifest: previous.manifest
+      };
+      return {
+        state: transferPackageState(previousReview, null),
+        createdAt: asText(previous.manifest?.baselineCreatedAt || previous.manifest?.createdAt)
+      };
+    } catch {}
+  }
+
+  return {
+    state: baselineStateFromManifest(review.manifest),
+    createdAt: asText(review.manifest?.baselineCreatedAt)
+  };
 }
 
 function stateWithVersionHistoryPayload(state, fileName, backupFolderPath) {
@@ -5075,19 +5112,18 @@ function createUsbTransferMergeReview(review) {
     const storyItem = transferStoryItem(review);
     const localStoryPath = storyItem ? localSourcePathForTransferItem(storyItem, review.manifest) : "";
     const localStoryMissing = Boolean(localStoryPath && !fileSnapshot(localStoryPath).exists);
-    const baseline = baselineStateFromManifest(review.manifest);
-    const baselineCreatedAt = asText(review.manifest?.baselineCreatedAt);
+    const baseline = transferBaselineForReview(review);
     const local = localTransferState(review, null);
     const usb = transferPackageState(review, null);
     const entries = [];
     const projectNotesEntry = createDirectMergeReviewEntry(
       "projectNotes",
       null,
-      baseline?.initialNotes,
+      baseline.state?.initialNotes,
       local?.initialNotes,
       usb.initialNotes,
       PROJECT_NOTES_TITLE,
-      baselineCreatedAt
+      baseline.createdAt
     );
     if (projectNotesEntry) entries.push(projectNotesEntry);
 
@@ -5102,22 +5138,22 @@ function createUsbTransferMergeReview(review) {
       const draftEntry = createDirectMergeReviewEntry(
         "draft",
         index + 1,
-        baseline?.drafts?.[index] || null,
+        baseline.state?.drafts?.[index] || null,
         localDraft,
         usbDraft,
         title,
-        baselineCreatedAt
+        baseline.createdAt
       );
       if (draftEntry) entries.push(draftEntry);
 
       const notesEntry = createDirectMergeReviewEntry(
         "draftNotes",
         index + 1,
-        baseline?.drafts?.[index]?.notes || null,
+        baseline.state?.drafts?.[index]?.notes || null,
         localDraft?.notes,
         usbDraft?.notes,
         `${title} Notes`,
-        baselineCreatedAt
+        baseline.createdAt
       );
       if (notesEntry) entries.push(notesEntry);
     }
