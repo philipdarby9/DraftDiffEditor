@@ -1,6 +1,6 @@
 {
   "name": "draft-diff-editor",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": true,
   "description": "A local writing editor for managing drafts, notes, comparisons, and a companion text export.",
   "author": "Philip Darby",

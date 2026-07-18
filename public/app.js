@@ -6,6 +6,7 @@ const ToolbarCore = window.DraftDiffToolbarCore;
 if (!ToolbarCore) throw new Error("DraftDiffToolbarCore failed to load.");
 const RichTextCore = window.DraftDiffRichTextCore;
 if (!RichTextCore) throw new Error("DraftDiffRichTextCore failed to load.");
+const USB_REVIEW_BUILD = "0.1.1 baseline review";
 
 const els = {
   saveStatus: document.querySelector("#save-status"),
@@ -8366,7 +8367,7 @@ async function reviewUsbTransfer() {
     }
 
     renderTransferReview(payload);
-    setStatus("USB import review ready");
+    setStatus(`USB import review ready · ${USB_REVIEW_BUILD}`);
   } catch (error) {
     console.error(error);
     setStatus(`USB review failed: ${error?.message || "Unknown error"}`);
