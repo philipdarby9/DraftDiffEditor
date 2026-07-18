@@ -80,6 +80,31 @@ function writeVersionHistorySidecar(folderPath, fileName, state) {
   }, null, 2)}\n`, "utf8");
 }
 
+function padDatePart(value, length = 2) {
+  return String(value).padStart(length, "0");
+}
+
+function expectedLocalUsbTimestamp(date) {
+  const offsetMinutes = -date.getTimezoneOffset();
+  const offsetSign = offsetMinutes >= 0 ? "+" : "-";
+  const absoluteOffsetMinutes = Math.abs(offsetMinutes);
+  return [
+    `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`,
+    "T",
+    `${padDatePart(date.getHours())}-${padDatePart(date.getMinutes())}-${padDatePart(date.getSeconds())}`,
+    `-${padDatePart(date.getMilliseconds(), 3)}`,
+    `${offsetSign}${padDatePart(Math.floor(absoluteOffsetMinutes / 60))}-${padDatePart(absoluteOffsetMinutes % 60)}`
+  ].join("");
+}
+
+const localTimestampDate = new Date(2026, 6, 18, 17, 49, 52, 556);
+assert.equal(
+  __test.usbTransferTimestamp(localTimestampDate),
+  expectedLocalUsbTimestamp(localTimestampDate),
+  "USB transfer folders should use local time rather than UTC ISO time"
+);
+assert.doesNotMatch(__test.usbTransferTimestamp(localTimestampDate), /Z$/);
+
 const sourceDir = path.join(dataDir, "source");
 const usbRoot = path.join(dataDir, "usb");
 const storyPath = path.join(sourceDir, "story.txt");

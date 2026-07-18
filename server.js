@@ -3969,8 +3969,25 @@ function writeAll(state, options = {}) {
   return normalized;
 }
 
+function padDatePart(value, length = 2) {
+  return String(value).padStart(length, "0");
+}
+
+function localTimezoneOffset(date) {
+  const offsetMinutes = -date.getTimezoneOffset();
+  const sign = offsetMinutes >= 0 ? "+" : "-";
+  const absoluteMinutes = Math.abs(offsetMinutes);
+  return `${sign}${padDatePart(Math.floor(absoluteMinutes / 60))}-${padDatePart(absoluteMinutes % 60)}`;
+}
+
 function usbTransferTimestamp(date = new Date()) {
-  return date.toISOString().replace(/[:.]/g, "-");
+  return [
+    `${date.getFullYear()}-${padDatePart(date.getMonth() + 1)}-${padDatePart(date.getDate())}`,
+    "T",
+    `${padDatePart(date.getHours())}-${padDatePart(date.getMinutes())}-${padDatePart(date.getSeconds())}`,
+    `-${padDatePart(date.getMilliseconds(), 3)}`,
+    localTimezoneOffset(date)
+  ].join("");
 }
 
 function usbTransferPackageFolderName(sourceName) {
@@ -6627,6 +6644,7 @@ module.exports = {
     macOpenFileDialogScript,
     macSaveFileDialogScript,
     macFolderDialogScript,
+    usbTransferTimestamp,
     createUsbTransferPackage,
     reviewUsbTransferFolder,
     applyUsbTransferFolder,
