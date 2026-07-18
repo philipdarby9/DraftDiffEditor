@@ -239,13 +239,12 @@ __test.writeAll(localState, {
 fs.writeFileSync(unrelatedHistoryPath, "local unrelated history should survive import", "utf8");
 
 const localOnlyReview = __test.reviewUsbTransferFolder(exported.packageFolderPath);
-assert.equal(localOnlyReview.merge.status, "local-only");
-assert.equal(localOnlyReview.merge.localOnly.some(entry => entry.type === "draft" && entry.number === 1), true);
-assert.equal(localOnlyReview.merge.localOnly.some(entry => entry.type === "draft" && entry.number === 4), true);
+assert.equal(localOnlyReview.merge.status, "no-changes");
+assert.equal(localOnlyReview.merge.localOnly.length, 0);
 
 const currentLinkedReview = __test.reviewUsbTransferFolder(newComputerPackagePath);
 assert.equal(currentLinkedReview.merge.localStoryMissing, false);
-assert.equal(currentLinkedReview.merge.status, "local-only");
+assert.equal(currentLinkedReview.merge.status, "no-changes");
 
 const usbState = stateWithDrafts([
   {
@@ -318,7 +317,7 @@ const review = __test.reviewUsbTransferFolder(exported.packageFolderPath);
 assert.equal(review.ok, true);
 assert.equal(review.merge.status, "both-changed");
 assert.equal(review.merge.usbOnly.some(entry => entry.type === "projectNotes"), true);
-assert.equal(review.merge.localOnly.some(entry => entry.type === "draft" && entry.number === 1), true);
+assert.equal(review.merge.localOnly.length, 0);
 const projectNotesReview = review.merge.usbOnly.find(entry => entry.type === "projectNotes");
 assert.equal(projectNotesReview.localCurrentAt, "2026-01-01T00:00:00.000Z");
 assert.equal(projectNotesReview.usbCurrentAt, "2026-01-04T00:00:00.000Z");
