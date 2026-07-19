@@ -541,6 +541,12 @@ assert.deepEqual(
 );
 assert.equal(returnedRoundTripReview.merge.localOnly.length, 0);
 assert.equal(returnedRoundTripReview.merge.bothChanged.length, 0);
+const returnedDraftTimeline = returnedRoundTripReview.merge.usbOnly.find(entry => entry.type === "draft" && entry.number === 2).timeline;
+assert.deepEqual(
+  returnedDraftTimeline.map(entry => ({ version: entry.version, source: entry.source, content: entry.content })),
+  [{ version: 1, source: "usb", content: "Draft made today on the other computer" }],
+  "review entries should expose saved text as a chronological visual timeline"
+);
 
 const legacyRoundTripUsbRoot = path.join(dataDir, "legacy-round-trip-usb");
 fs.mkdirSync(legacyRoundTripUsbRoot, { recursive: true });

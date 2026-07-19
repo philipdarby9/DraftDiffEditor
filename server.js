@@ -4986,6 +4986,38 @@ function uniqueSavedVersionDetails(versions, otherVersions) {
     .sort((left, right) => String(left.savedAt).localeCompare(String(right.savedAt)));
 }
 
+function pageReviewTimeline(localVersions, usbVersions) {
+  const versions = new Map();
+  const addVersions = (sourceVersions, source) => {
+    sourceVersions.forEach((version, signature) => {
+      const existing = versions.get(signature);
+      const savedAt = asText(version?.createdAt);
+      if (!existing) {
+        versions.set(signature, {
+          content: textForHistoryVersion(version),
+          savedAt,
+          sources: new Set([source])
+        });
+        return;
+      }
+      existing.sources.add(source);
+      if (savedAt && (!existing.savedAt || savedAt > existing.savedAt)) existing.savedAt = savedAt;
+    });
+  };
+
+  addVersions(localVersions, "local");
+  addVersions(usbVersions, "usb");
+
+  return [...versions.values()]
+    .sort((left, right) => String(left.savedAt).localeCompare(String(right.savedAt)))
+    .map((version, index) => ({
+      version: index + 1,
+      content: version.content,
+      savedAt: version.savedAt,
+      source: version.sources.size > 1 ? "both" : [...version.sources][0]
+    }));
+}
+
 function pageLatestSavedAt(page, fallbackTitle) {
   const times = historyWithCurrentPage(page, fallbackTitle)
     .map(version => versionHistoryTime(version))
@@ -5032,6 +5064,7 @@ function createDirectMergeReviewEntry(type, number, localPage, usbPage, fallback
     usbUniqueVersionDetails,
     localVersionCount: localVersions.size,
     usbVersionCount: usbVersions.size,
+    timeline: pageReviewTimeline(localVersions, usbVersions),
     currentTextMatches,
     localWordCount: pageReviewWordCount(localPage),
     usbWordCount: pageReviewWordCount(usbPage)

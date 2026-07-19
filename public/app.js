@@ -8137,6 +8137,85 @@ function renderTransferMergeList(title, entries = [], mode, options = {}) {
   `;
 }
 
+function transferTimelineSourceLabel(source) {
+  if (source === "usb") return "USB";
+  if (source === "local") return "Local";
+  return "Local + USB";
+}
+
+function transferTimelineDiffParts(beforeText, afterText) {
+  if (!beforeText) {
+    return DiffCore.tokenizeText(afterText || "").map(token => ({ ...token, type: "same" }));
+  }
+  return DiffCore.restoreIdenticalChangedTokens(DiffCore.diffSequence(
+    DiffCore.tokenizeText(beforeText),
+    DiffCore.tokenizeText(afterText || "")
+  ));
+}
+
+function renderTransferTimelineText(version, previousVersion) {
+  const parts = transferTimelineDiffParts(previousVersion?.content || "", version?.content || "");
+  if (!parts.length) return '<span class="transfer-timeline-empty">No text</span>';
+  return parts.map(part => {
+    const className = part.type === "added"
+      ? "transfer-timeline-added"
+      : part.type === "removed"
+        ? "transfer-timeline-removed"
+        : "";
+    return `<span${className ? ` class="${className}"` : ""}>${escapeHtml(part.text || "")}</span>`;
+  }).join("");
+}
+
+function renderTransferTimelineEntry(entry = {}) {
+  const timeline = Array.isArray(entry.timeline) ? entry.timeline : [];
+  if (!timeline.length) return "";
+  const latestIndex = timeline.length - 1;
+
+  return `
+    <article class="transfer-timeline-group">
+      <header class="transfer-timeline-group-header">
+        <h4>${escapeHtml(transferMergeEntryLabel(entry))}</h4>
+        <span>${countLabel(timeline.length, "unique saved version")}</span>
+      </header>
+      <div class="transfer-timeline" aria-label="Chronological saved-version comparison">
+        ${timeline.map((version, index) => `
+          ${index ? '<div class="transfer-timeline-arrow" aria-hidden="true"><span></span></div>' : ""}
+          <div class="transfer-timeline-step">
+            <div class="transfer-timeline-meta">
+              <strong>Version ${Number(version.version || index + 1)}</strong>
+              <span class="transfer-timeline-source is-${escapeHtml(version.source || "both")}">${escapeHtml(transferTimelineSourceLabel(version.source))}</span>
+              <time>${escapeHtml(transferMergeTimeText(version.savedAt) || "Unknown save date")}</time>
+            </div>
+            <div class="transfer-timeline-page${index === latestIndex ? " is-latest" : ""}">
+              ${index === latestIndex ? '<span class="transfer-timeline-latest">Latest · remains current</span>' : ""}
+              <div class="transfer-timeline-paper">${renderTransferTimelineText(version, timeline[index - 1])}</div>
+            </div>
+          </div>
+        `).join("")}
+      </div>
+    </article>
+  `;
+}
+
+function renderTransferMergeVisuals(merge = {}) {
+  const entries = [
+    ...(merge.usbOnly || []),
+    ...(merge.localOnly || []),
+    ...(merge.bothChanged || [])
+  ];
+  if (!entries.length) return "";
+  return `
+    <div class="transfer-timeline-legend" aria-label="Version comparison legend">
+      <span><i class="is-added"></i>Added in this version</span>
+      <span><i class="is-removed"></i>Removed in this version</span>
+      <strong>Every displayed version will be retained</strong>
+    </div>
+    <div class="transfer-timeline-groups">
+      ${entries.map(renderTransferTimelineEntry).join("")}
+    </div>
+  `;
+}
+
 function renderTransferMergeReview(merge = {}) {
   if (merge.status === "unknown") {
     return `<p class="transfer-review-empty">${escapeHtml(merge.reason || "Story-level merge review is unavailable for this package.")}</p>`;
@@ -8146,9 +8225,13 @@ function renderTransferMergeReview(merge = {}) {
   }
 
   return `
+    ${renderTransferMergeVisuals(merge)}
+    <div class="transfer-review-explanations">
+      <h3>Detailed explanation</h3>
     ${renderTransferMergeList(merge.localStoryMissing ? "Will be imported from USB" : "USB versions missing from this computer", merge.usbOnly || [], "usb", { localStoryMissing: merge.localStoryMissing })}
     ${renderTransferMergeList("This computer already contains all USB versions", merge.localOnly || [], "local")}
     ${renderTransferMergeList("Versions exist on both sides and must be merged", merge.bothChanged || [], "both")}
+    </div>
   `;
 }
 
