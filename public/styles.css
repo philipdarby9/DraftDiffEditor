@@ -947,6 +947,78 @@ textarea,
   gap: 14px;
 }
 
+.transfer-review-categories {
+  display: grid;
+  gap: 18px;
+}
+
+.transfer-review-category {
+  min-width: 0;
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 2px solid var(--border);
+  border-radius: var(--r);
+  background: var(--surface-alt);
+}
+
+.transfer-review-category.is-usb {
+  border-color: #9bbddd;
+  background: #f3f8fd;
+}
+
+.transfer-review-category.is-local {
+  border-color: #cdbb9f;
+  background: #faf7f1;
+}
+
+.transfer-review-category.is-merge {
+  border-color: #d8ad6e;
+  background: #fff8eb;
+}
+
+.transfer-review-category-header {
+  display: grid;
+  grid-template-columns: minmax(240px, 0.65fr) minmax(280px, 1fr);
+  align-items: center;
+  gap: 12px 22px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid color-mix(in srgb, currentColor 18%, transparent);
+}
+
+.transfer-review-category-header > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.transfer-review-category-header h3,
+.transfer-review-category-header p {
+  margin: 0;
+}
+
+.transfer-review-category-header h3 {
+  font-size: 17px;
+}
+
+.transfer-review-category-header p {
+  color: var(--fg-muted);
+  line-height: 1.4;
+}
+
+.transfer-review-category-count {
+  display: grid;
+  place-items: center;
+  flex: 0 0 34px;
+  height: 34px;
+  border-radius: 50%;
+  background: var(--surface);
+  color: var(--accent-deep);
+  font-size: 18px;
+  font-weight: 700;
+  box-shadow: inset 0 0 0 1px var(--border);
+}
+
 .transfer-timeline-group {
   min-width: 0;
   display: grid;
@@ -955,6 +1027,53 @@ textarea,
   border: 1px solid var(--border);
   border-radius: var(--r-sm);
   background: var(--surface);
+}
+
+.transfer-timeline-detail {
+  margin: 0;
+  padding: 10px 12px;
+  border-top: 1px solid var(--border);
+  color: var(--fg-muted);
+  line-height: 1.45;
+}
+
+.transfer-timeline-gap {
+  flex: 0 0 170px;
+  min-height: 112px;
+  display: grid;
+  place-content: center;
+  gap: 5px;
+  padding: 14px;
+  border: 1px dashed var(--accent);
+  border-radius: var(--r-sm);
+  background: var(--surface-alt);
+  text-align: center;
+}
+
+.transfer-timeline-gap strong {
+  color: var(--accent-deep);
+  font-size: 14px;
+}
+
+.transfer-timeline-gap span {
+  color: var(--fg-muted);
+  font-size: 11px;
+  line-height: 1.35;
+}
+
+.transfer-timeline-expand {
+  justify-self: start;
+  min-width: 150px;
+  height: 30px;
+  padding: 0 12px;
+  border-color: var(--accent);
+  background: var(--surface);
+  color: var(--accent-deep);
+  font-weight: 700;
+}
+
+.transfer-timeline-expand:hover {
+  background: var(--accent-soft);
 }
 
 .transfer-timeline-group-header {
@@ -1140,17 +1259,6 @@ textarea,
   border-top: 2px solid var(--accent);
   border-right: 2px solid var(--accent);
   transform: rotate(45deg);
-}
-
-.transfer-review-explanations {
-  display: grid;
-  gap: 8px;
-  padding-top: 4px;
-}
-
-.transfer-review-explanations > h3 {
-  padding-top: 8px;
-  border-top: 1px solid var(--border);
 }
 
 .transfer-page-zoom {
@@ -3938,5 +4046,9 @@ textarea {
   .transfer-timeline-legend strong {
     width: 100%;
     margin-left: 0;
+  }
+
+  .transfer-review-category-header {
+    grid-template-columns: 1fr;
   }
 }

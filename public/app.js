@@ -141,6 +141,7 @@ let summaryProgressTimer = null;
 let latestSummaryReportPath = "";
 let latestTransferReview = null;
 let transferTimelineZoomPages = [];
+let transferExpandedTimelines = new Set();
 let suppressLinkedTextBlockedStatusUntil = 0;
 let viewStateSaveTimer = null;
 let isSavingViewState = false;
@@ -8124,25 +8125,6 @@ function transferMergeListDetail(entry = {}, mode, options = {}) {
   return `This computer already contains every USB version and has ${countLabel(localMissing, "additional local version")}. ${localLatest}; ${usbLatest}. ${wordCounts} No versions need to be imported from USB. The additional local ${localMissing === 1 ? "version will be" : "versions will be"} preserved.`;
 }
 
-function renderTransferMergeList(title, entries = [], mode, options = {}) {
-  if (!entries.length) return "";
-
-  return `
-    <h4>${escapeHtml(title)}</h4>
-    <ul class="transfer-review-plain-list">
-      ${entries.map(entry => {
-        const detail = transferMergeListDetail(entry, mode, options);
-        return `
-          <li>
-            <strong>${escapeHtml(transferMergeEntryLabel(entry))}</strong>
-            <span>${escapeHtml(detail)}</span>
-          </li>
-        `;
-      }).join("")}
-    </ul>
-  `;
-}
-
 function transferTimelineSourceLabel(source) {
   if (source === "usb") return "USB";
   if (source === "local") return "Local";
@@ -8172,9 +8154,31 @@ function renderTransferTimelineText(version, previousVersion) {
   }).join("");
 }
 
-function renderTransferTimelineEntry(entry = {}) {
+function transferTimelineEntryKey(entry = {}) {
+  return `${entry.type || "item"}:${Number(entry.number || 0)}:${entry.title || ""}`;
+}
+
+function transferTimelineGapText(entry, mode) {
+  const usbVersions = Number(entry.usbUniqueVersions || 0);
+  const localVersions = Number(entry.localUniqueVersions || 0);
+  if (mode === "usb") return `${countLabel(usbVersions, "USB version")} to import`;
+  if (mode === "local") return `${countLabel(localVersions, "additional local version")}`;
+  return `${countLabel(usbVersions + localVersions, "mixed version")} to merge`;
+}
+
+function renderTransferTimelineEntry(entry = {}, mode, options = {}) {
   const timeline = Array.isArray(entry.timeline) ? entry.timeline : [];
   if (!timeline.length) return "";
+  const entryKey = transferTimelineEntryKey(entry);
+  const expanded = transferExpandedTimelines.has(entryKey);
+  const collapsible = timeline.length > 10;
+  const visibleVersions = collapsible && !expanded
+    ? [
+        { version: timeline[0], originalIndex: 0 },
+        { gap: true },
+        { version: timeline[timeline.length - 1], originalIndex: timeline.length - 1 }
+      ]
+    : timeline.map((version, originalIndex) => ({ version, originalIndex }));
   const latestIndex = timeline.length - 1;
 
   return `
@@ -8184,14 +8188,31 @@ function renderTransferTimelineEntry(entry = {}) {
         <span>${countLabel(timeline.length, "unique saved version")}</span>
       </header>
       <div class="transfer-timeline" aria-label="Chronological saved-version comparison">
-        ${timeline.map((version, index) => {
+        ${visibleVersions.map((item, visibleIndex) => {
+          if (item.gap) {
+            return `
+              <div class="transfer-timeline-arrow" aria-hidden="true"><span></span></div>
+              <div class="transfer-timeline-gap">
+                <strong>${escapeHtml(transferTimelineGapText(entry, mode))}</strong>
+                <span>${timeline.length.toLocaleString("en-GB")} unique saved versions in the complete history</span>
+              </div>
+              <div class="transfer-timeline-arrow" aria-hidden="true"><span></span></div>
+            `;
+          }
+          const version = item.version;
+          const index = item.originalIndex;
+          const previousVersion = expanded || !collapsible
+            ? timeline[index - 1]
+            : index === latestIndex
+              ? timeline[0]
+              : null;
           const zoomIndex = transferTimelineZoomPages.push({
             title: `${transferMergeEntryLabel(entry)} · Version ${Number(version.version || index + 1)}`,
             meta: `${transferTimelineSourceLabel(version.source)} · ${transferMergeTimeText(version.savedAt) || "Unknown save date"}${index === latestIndex ? " · Latest, remains current" : ""}`,
-            html: renderTransferTimelineText(version, timeline[index - 1])
+            html: renderTransferTimelineText(version, previousVersion)
           }) - 1;
           return `
-          ${index ? '<div class="transfer-timeline-arrow" aria-hidden="true"><span></span></div>' : ""}
+          ${visibleIndex && !(collapsible && !expanded && visibleIndex === 2) ? '<div class="transfer-timeline-arrow" aria-hidden="true"><span></span></div>' : ""}
           <div class="transfer-timeline-step">
             <div class="transfer-timeline-meta">
               <strong>Version ${Number(version.version || index + 1)}</strong>
@@ -8201,30 +8222,69 @@ function renderTransferTimelineEntry(entry = {}) {
             <div class="transfer-timeline-page${index === latestIndex ? " is-latest" : ""}">
               <button class="transfer-timeline-zoom" type="button" data-transfer-timeline-zoom="${zoomIndex}" aria-label="Enlarge ${escapeHtml(transferMergeEntryLabel(entry))} version ${Number(version.version || index + 1)}">Zoom</button>
               ${index === latestIndex ? '<span class="transfer-timeline-latest">Latest · remains current</span>' : ""}
-              <div class="transfer-timeline-paper">${renderTransferTimelineText(version, timeline[index - 1])}</div>
+              <div class="transfer-timeline-paper">${renderTransferTimelineText(version, previousVersion)}</div>
             </div>
           </div>
         `}).join("")}
       </div>
+      ${collapsible ? `
+        <button class="transfer-timeline-expand" type="button" data-transfer-timeline-expand="${escapeHtml(entryKey)}" aria-expanded="${expanded}">
+          ${expanded ? "Collapse history" : `Show all ${timeline.length.toLocaleString("en-GB")} versions`}
+        </button>
+      ` : ""}
+      <p class="transfer-timeline-detail">${escapeHtml(transferMergeListDetail(entry, mode, options))}</p>
     </article>
   `;
 }
 
-function renderTransferMergeVisuals(merge = {}) {
-  const entries = [
-    ...(merge.usbOnly || []),
-    ...(merge.localOnly || []),
-    ...(merge.bothChanged || [])
-  ];
+function renderTransferReviewCategory({ title, description, entries = [], mode, className, options = {} }) {
   if (!entries.length) return "";
+  return `
+    <section class="transfer-review-category ${escapeHtml(className)}">
+      <header class="transfer-review-category-header">
+        <div>
+          <span class="transfer-review-category-count">${entries.length.toLocaleString("en-GB")}</span>
+          <h3>${escapeHtml(title)}</h3>
+        </div>
+        <p>${escapeHtml(description)}</p>
+      </header>
+      <div class="transfer-timeline-groups">
+        ${entries.map(entry => renderTransferTimelineEntry(entry, mode, options)).join("")}
+      </div>
+    </section>
+  `;
+}
+
+function renderTransferMergeVisuals(merge = {}) {
   return `
     <div class="transfer-timeline-legend" aria-label="Version comparison legend">
       <span><i class="is-added"></i>Added in this version</span>
       <span><i class="is-removed"></i>Removed in this version</span>
       <strong>Every displayed version will be retained</strong>
     </div>
-    <div class="transfer-timeline-groups">
-      ${entries.map(renderTransferTimelineEntry).join("")}
+    <div class="transfer-review-categories">
+      ${renderTransferReviewCategory({
+        title: merge.localStoryMissing ? "Will be imported from USB" : "USB versions to import",
+        description: "The USB contains saved versions that this computer does not contain.",
+        entries: merge.usbOnly || [],
+        mode: "usb",
+        className: "is-usb",
+        options: { localStoryMissing: merge.localStoryMissing }
+      })}
+      ${renderTransferReviewCategory({
+        title: "Local history already ahead",
+        description: "This computer contains every USB version plus additional local versions.",
+        entries: merge.localOnly || [],
+        mode: "local",
+        className: "is-local"
+      })}
+      ${renderTransferReviewCategory({
+        title: "Histories requiring a merge",
+        description: "Each file contains saved versions missing from the other.",
+        entries: merge.bothChanged || [],
+        mode: "both",
+        className: "is-merge"
+      })}
     </div>
   `;
 }
@@ -8239,18 +8299,13 @@ function renderTransferMergeReview(merge = {}) {
 
   return `
     ${renderTransferMergeVisuals(merge)}
-    <div class="transfer-review-explanations">
-      <h3>Detailed explanation</h3>
-    ${renderTransferMergeList(merge.localStoryMissing ? "Will be imported from USB" : "USB versions missing from this computer", merge.usbOnly || [], "usb", { localStoryMissing: merge.localStoryMissing })}
-    ${renderTransferMergeList("This computer already contains all USB versions", merge.localOnly || [], "local")}
-    ${renderTransferMergeList("Versions exist on both sides and must be merged", merge.bothChanged || [], "both")}
-    </div>
   `;
 }
 
 function renderTransferReview(payload) {
   if (!els.transferReviewOverlay || !els.transferReviewContent) return;
 
+  if (latestTransferReview !== payload) transferExpandedTimelines = new Set();
   latestTransferReview = payload;
   transferTimelineZoomPages = [];
   const files = payload.files || {};
@@ -8348,6 +8403,7 @@ function renderTransferReview(payload) {
 function hideTransferReview() {
   hideTransferPageZoom();
   latestTransferReview = null;
+  transferExpandedTimelines = new Set();
   if (els.transferReviewOverlay) els.transferReviewOverlay.hidden = true;
   if (els.transferImportProceed) els.transferImportProceed.disabled = false;
 }
@@ -8365,6 +8421,15 @@ function showTransferPageZoom(index) {
 function hideTransferPageZoom() {
   if (els.transferPageZoom) els.transferPageZoom.hidden = true;
   if (els.transferPageZoomPaper) els.transferPageZoomPaper.innerHTML = "";
+}
+
+function toggleTransferTimeline(entryKey) {
+  if (!entryKey || !latestTransferReview) return;
+  const scrollTop = els.transferReviewContent?.scrollTop || 0;
+  if (transferExpandedTimelines.has(entryKey)) transferExpandedTimelines.delete(entryKey);
+  else transferExpandedTimelines.add(entryKey);
+  renderTransferReview(latestTransferReview);
+  if (els.transferReviewContent) els.transferReviewContent.scrollTop = scrollTop;
 }
 
 function cancelTransferImport() {
@@ -9233,6 +9298,11 @@ els.transferReviewClose?.addEventListener("click", hideTransferReview);
 els.transferImportCancel?.addEventListener("click", cancelTransferImport);
 els.transferImportProceed?.addEventListener("click", proceedTransferImport);
 els.transferReviewContent?.addEventListener("click", event => {
+  const expandButton = event.target.closest("[data-transfer-timeline-expand]");
+  if (expandButton) {
+    toggleTransferTimeline(expandButton.dataset.transferTimelineExpand);
+    return;
+  }
   const button = event.target.closest("[data-transfer-timeline-zoom]");
   if (button) showTransferPageZoom(button.dataset.transferTimelineZoom);
 });
