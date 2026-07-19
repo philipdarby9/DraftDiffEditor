@@ -1054,6 +1054,27 @@ textarea,
   padding: 12px 10px;
 }
 
+.transfer-timeline-zoom {
+  position: absolute;
+  z-index: 3;
+  top: 6px;
+  right: 6px;
+  min-width: 0;
+  height: 24px;
+  padding: 0 8px;
+  border: 1px solid #b8b0a5;
+  border-radius: 3px;
+  background: rgba(255, 254, 250, 0.94);
+  color: #4b443c;
+  font: 700 10px/1 system-ui, sans-serif;
+  box-shadow: 0 1px 4px rgba(43, 37, 30, 0.12);
+}
+
+.transfer-timeline-zoom:hover {
+  border-color: var(--accent);
+  color: var(--accent-deep);
+}
+
 .transfer-timeline-latest {
   position: absolute;
   z-index: 2;
@@ -1130,6 +1151,78 @@ textarea,
 .transfer-review-explanations > h3 {
   padding-top: 8px;
   border-top: 1px solid var(--border);
+}
+
+.transfer-page-zoom {
+  position: fixed;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  padding: 28px;
+  background: rgba(32, 29, 25, 0.58);
+}
+
+.transfer-page-zoom[hidden] {
+  display: none;
+}
+
+.transfer-page-zoom-panel {
+  width: min(760px, 100%);
+  max-height: min(880px, calc(100vh - 56px));
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--r);
+  background: var(--surface-alt);
+  box-shadow: var(--shadow-menu);
+}
+
+.transfer-page-zoom-panel > header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 12px 14px;
+  border-bottom: 1px solid var(--border);
+}
+
+.transfer-page-zoom-panel h2,
+.transfer-page-zoom-panel p {
+  margin: 0;
+}
+
+.transfer-page-zoom-panel h2 {
+  font-size: 17px;
+}
+
+.transfer-page-zoom-panel p {
+  margin-top: 3px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.transfer-page-zoom-paper {
+  min-height: 0;
+  overflow-y: auto;
+  margin: 18px auto;
+  width: min(620px, calc(100% - 36px));
+  padding: 48px 54px;
+  border: 1px solid #cbc4b9;
+  background: #fffefa;
+  color: #3b3732;
+  box-shadow: 0 5px 18px rgba(43, 37, 30, 0.14);
+  font-family: Georgia, serif;
+  font-size: 16px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.transfer-page-zoom-paper .transfer-timeline-added,
+.transfer-page-zoom-paper .transfer-timeline-removed {
+  padding: 0 1px;
 }
 
 .transfer-review-project {

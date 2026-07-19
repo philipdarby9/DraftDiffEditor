@@ -78,7 +78,12 @@ const els = {
   transferReviewContent: document.querySelector("#transfer-review-content"),
   transferReviewClose: document.querySelector("#transfer-review-close"),
   transferImportCancel: document.querySelector("#transfer-import-cancel"),
-  transferImportProceed: document.querySelector("#transfer-import-proceed")
+  transferImportProceed: document.querySelector("#transfer-import-proceed"),
+  transferPageZoom: document.querySelector("#transfer-page-zoom"),
+  transferPageZoomTitle: document.querySelector("#transfer-page-zoom-title"),
+  transferPageZoomMeta: document.querySelector("#transfer-page-zoom-meta"),
+  transferPageZoomPaper: document.querySelector("#transfer-page-zoom-paper"),
+  transferPageZoomClose: document.querySelector("#transfer-page-zoom-close")
 };
 
 const STORY_KEY = StateCore.STORY_KEY;
@@ -135,6 +140,7 @@ let isClosingApp = false;
 let summaryProgressTimer = null;
 let latestSummaryReportPath = "";
 let latestTransferReview = null;
+let transferTimelineZoomPages = [];
 let suppressLinkedTextBlockedStatusUntil = 0;
 let viewStateSaveTimer = null;
 let isSavingViewState = false;
@@ -8115,7 +8121,7 @@ function transferMergeListDetail(entry = {}, mode, options = {}) {
     return `USB has ${countLabel(usbMissing, "saved version")} not on this computer. ${usbLatest}; ${localLatest}. ${wordCounts} The missing versions will be added and the latest save will stay current.`;
   }
 
-  return `This computer already contains every USB version and has ${countLabel(localMissing, "additional local version")}. ${localLatest}; ${usbLatest}. ${wordCounts} Nothing is missing from the USB import.`;
+  return `This computer already contains every USB version and has ${countLabel(localMissing, "additional local version")}. ${localLatest}; ${usbLatest}. ${wordCounts} No versions need to be imported from USB. The additional local ${localMissing === 1 ? "version will be" : "versions will be"} preserved.`;
 }
 
 function renderTransferMergeList(title, entries = [], mode, options = {}) {
@@ -8178,7 +8184,13 @@ function renderTransferTimelineEntry(entry = {}) {
         <span>${countLabel(timeline.length, "unique saved version")}</span>
       </header>
       <div class="transfer-timeline" aria-label="Chronological saved-version comparison">
-        ${timeline.map((version, index) => `
+        ${timeline.map((version, index) => {
+          const zoomIndex = transferTimelineZoomPages.push({
+            title: `${transferMergeEntryLabel(entry)} · Version ${Number(version.version || index + 1)}`,
+            meta: `${transferTimelineSourceLabel(version.source)} · ${transferMergeTimeText(version.savedAt) || "Unknown save date"}${index === latestIndex ? " · Latest, remains current" : ""}`,
+            html: renderTransferTimelineText(version, timeline[index - 1])
+          }) - 1;
+          return `
           ${index ? '<div class="transfer-timeline-arrow" aria-hidden="true"><span></span></div>' : ""}
           <div class="transfer-timeline-step">
             <div class="transfer-timeline-meta">
@@ -8187,11 +8199,12 @@ function renderTransferTimelineEntry(entry = {}) {
               <time>${escapeHtml(transferMergeTimeText(version.savedAt) || "Unknown save date")}</time>
             </div>
             <div class="transfer-timeline-page${index === latestIndex ? " is-latest" : ""}">
+              <button class="transfer-timeline-zoom" type="button" data-transfer-timeline-zoom="${zoomIndex}" aria-label="Enlarge ${escapeHtml(transferMergeEntryLabel(entry))} version ${Number(version.version || index + 1)}">Zoom</button>
               ${index === latestIndex ? '<span class="transfer-timeline-latest">Latest · remains current</span>' : ""}
               <div class="transfer-timeline-paper">${renderTransferTimelineText(version, timeline[index - 1])}</div>
             </div>
           </div>
-        `).join("")}
+        `}).join("")}
       </div>
     </article>
   `;
@@ -8239,6 +8252,7 @@ function renderTransferReview(payload) {
   if (!els.transferReviewOverlay || !els.transferReviewContent) return;
 
   latestTransferReview = payload;
+  transferTimelineZoomPages = [];
   const files = payload.files || {};
   const merge = payload.merge || {};
   const mergeVerdict = transferMergeVerdict(merge);
@@ -8332,9 +8346,25 @@ function renderTransferReview(payload) {
 }
 
 function hideTransferReview() {
+  hideTransferPageZoom();
   latestTransferReview = null;
   if (els.transferReviewOverlay) els.transferReviewOverlay.hidden = true;
   if (els.transferImportProceed) els.transferImportProceed.disabled = false;
+}
+
+function showTransferPageZoom(index) {
+  const page = transferTimelineZoomPages[Number(index)];
+  if (!page || !els.transferPageZoom) return;
+  if (els.transferPageZoomTitle) els.transferPageZoomTitle.textContent = page.title;
+  if (els.transferPageZoomMeta) els.transferPageZoomMeta.textContent = page.meta;
+  if (els.transferPageZoomPaper) els.transferPageZoomPaper.innerHTML = page.html;
+  els.transferPageZoom.hidden = false;
+  els.transferPageZoomClose?.focus();
+}
+
+function hideTransferPageZoom() {
+  if (els.transferPageZoom) els.transferPageZoom.hidden = true;
+  if (els.transferPageZoomPaper) els.transferPageZoomPaper.innerHTML = "";
 }
 
 function cancelTransferImport() {
@@ -9202,6 +9232,14 @@ els.summaryProgressClose?.addEventListener("click", hideSummaryProgressOverlay);
 els.transferReviewClose?.addEventListener("click", hideTransferReview);
 els.transferImportCancel?.addEventListener("click", cancelTransferImport);
 els.transferImportProceed?.addEventListener("click", proceedTransferImport);
+els.transferReviewContent?.addEventListener("click", event => {
+  const button = event.target.closest("[data-transfer-timeline-zoom]");
+  if (button) showTransferPageZoom(button.dataset.transferTimelineZoom);
+});
+els.transferPageZoomClose?.addEventListener("click", hideTransferPageZoom);
+els.transferPageZoom?.addEventListener("click", event => {
+  if (event.target === els.transferPageZoom) hideTransferPageZoom();
+});
 els.editUndo.addEventListener("click", () => {
   undoProjectChange();
   closeTopMenus();
@@ -9843,6 +9881,10 @@ document.addEventListener("keydown", event => {
   if (handleGlobalShortcut(event)) return;
 
   if (event.key === "Escape") {
+    if (els.transferPageZoom && !els.transferPageZoom.hidden) {
+      hideTransferPageZoom();
+      return;
+    }
     closeSpellcheckMenu();
     toggleSearchScopeMenu(false);
     if (searchState.open) closeSearch();
