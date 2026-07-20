@@ -6324,19 +6324,46 @@ async function chooseBackupFolder() {
   return chooseFolderWithNativeDialog(initialDirectory, "Select the backup and version history folder");
 }
 
-function openFileLocation(filePath) {
-  const targetPath = path.resolve(filePath);
-  const targetExists = fs.existsSync(targetPath);
-  const isFile = targetExists && fs.statSync(targetPath).isFile();
-  const directoryPath = isFile ? path.dirname(targetPath) : targetPath;
+function nearestExistingDirectory(directoryPath, fallbackPath = DATA_DIR) {
+  let currentPath = path.resolve(directoryPath || fallbackPath);
+
+  while (currentPath) {
+    if (directoryExists(currentPath)) return currentPath;
+
+    const parentPath = path.dirname(currentPath);
+    if (parentPath === currentPath) break;
+    currentPath = parentPath;
+  }
+
+  return path.resolve(fallbackPath);
+}
+
+function openFileLocationCommand(filePath, platform = process.platform) {
+  const targetPath = path.resolve(asText(filePath) || DATA_DIR);
+  let isFile = false;
+  let isDirectory = false;
+
+  try {
+    if (fs.existsSync(targetPath)) {
+      const stats = fs.statSync(targetPath);
+      isFile = stats.isFile();
+      isDirectory = stats.isDirectory();
+    }
+  } catch {}
+
+  const directoryPath = isFile
+    ? path.dirname(targetPath)
+    : isDirectory
+      ? targetPath
+      : nearestExistingDirectory(path.dirname(targetPath));
 
   let command = "";
   let args = [];
 
-  if (process.platform === "win32") {
+  if (platform === "win32") {
     command = "explorer.exe";
-    args = isFile ? [`/select,${targetPath}`] : [directoryPath];
-  } else if (process.platform === "darwin") {
+    args = isFile ? ["/select,", targetPath] : [directoryPath];
+  } else if (platform === "darwin") {
     command = "open";
     args = isFile ? ["-R", targetPath] : [directoryPath];
   } else {
@@ -6344,8 +6371,15 @@ function openFileLocation(filePath) {
     args = [directoryPath];
   }
 
+  return { filePath: targetPath, directoryPath, command, args };
+}
+
+function openFileLocation(filePath) {
+  ensureDataDir();
+  const location = openFileLocationCommand(filePath);
+
   return new Promise((resolve, reject) => {
-    const child = spawn(command, args, {
+    const child = spawn(location.command, location.args, {
       detached: true,
       stdio: "ignore"
     });
@@ -6353,7 +6387,7 @@ function openFileLocation(filePath) {
     child.once("error", reject);
     child.once("spawn", () => {
       child.unref();
-      resolve({ filePath: targetPath, directoryPath, command, args });
+      resolve(location);
     });
   });
 }
@@ -6842,6 +6876,8 @@ module.exports = {
     writeVersionHistoryFolderPath,
     versionHistoryFolderCheck,
     existingFolderForDialog,
+    nearestExistingDirectory,
+    openFileLocationCommand,
     carryVersionHistoryJsonFiles,
     assertCarriedVersionHistoryFilesSafe,
     migrateEmbeddedVersionHistoriesToFolder,

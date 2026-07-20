@@ -47,6 +47,25 @@ assert.deepEqual(__test.macFolderDialogScript(), [
   "end run"
 ]);
 
+const spacedFolderPath = path.join(dataDir, "folder with spaces");
+const spacedFilePath = path.join(spacedFolderPath, "draft file.txt");
+fs.mkdirSync(spacedFolderPath, { recursive: true });
+fs.writeFileSync(spacedFilePath, "Draft text", "utf8");
+
+assert.deepEqual(__test.openFileLocationCommand(spacedFilePath, "win32"), {
+  filePath: spacedFilePath,
+  directoryPath: spacedFolderPath,
+  command: "explorer.exe",
+  args: ["/select,", spacedFilePath]
+});
+
+assert.deepEqual(__test.openFileLocationCommand(path.join(spacedFolderPath, "missing.txt"), "win32"), {
+  filePath: path.join(spacedFolderPath, "missing.txt"),
+  directoryPath: spacedFolderPath,
+  command: "explorer.exe",
+  args: [spacedFolderPath]
+});
+
 async function readJson(response) {
   const text = await response.text();
   return text ? JSON.parse(text) : null;
