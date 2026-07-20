@@ -73,6 +73,13 @@ const els = {
   summaryProgressOpen: document.querySelector("#summary-progress-open"),
   summaryProgressReveal: document.querySelector("#summary-progress-reveal"),
   summaryProgressClose: document.querySelector("#summary-progress-close"),
+  appProgressOverlay: document.querySelector("#app-progress-overlay"),
+  appProgressTitle: document.querySelector("#app-progress-title"),
+  appProgressStep: document.querySelector("#app-progress-step"),
+  appProgressTrack: document.querySelector("#app-progress-track"),
+  appProgressBar: document.querySelector("#app-progress-bar"),
+  appProgressMeta: document.querySelector("#app-progress-meta"),
+  appProgressDetail: document.querySelector("#app-progress-detail"),
   transferReviewOverlay: document.querySelector("#transfer-review-overlay"),
   transferReviewTitle: document.querySelector("#transfer-review-title"),
   transferReviewContent: document.querySelector("#transfer-review-content"),
@@ -919,6 +926,62 @@ function setStatus(text) {
   }
   els.saveStatus.title = statusText;
   els.saveStatus.classList.toggle("is-saving", /saving|unsaved/i.test(text));
+}
+
+function nextUiFrame(delayMs = 0) {
+  return new Promise(resolve => {
+    window.requestAnimationFrame(() => {
+      window.setTimeout(resolve, delayMs);
+    });
+  });
+}
+
+function appProgressIsVisible() {
+  return Boolean(els.appProgressOverlay && !els.appProgressOverlay.hidden);
+}
+
+function updateAppProgress(progress = {}) {
+  if (!els.appProgressOverlay) return;
+
+  const title = progress.title || "Opening file";
+  const step = progress.step || "Preparing...";
+  const total = Number(progress.total || 0);
+  const completed = Math.min(total, Math.max(0, Number(progress.completed || 0)));
+  const hasKnownTotal = Number.isFinite(total) && total > 0 && !progress.indeterminate;
+  const percent = hasKnownTotal ? Math.round((completed / total) * 100) : 0;
+  const detail = String(progress.detail || "");
+
+  els.appProgressOverlay.hidden = false;
+  document.body.setAttribute("aria-busy", "true");
+  if (els.appProgressTitle) els.appProgressTitle.textContent = title;
+  if (els.appProgressStep) els.appProgressStep.textContent = step;
+  if (els.appProgressTrack) els.appProgressTrack.classList.toggle("is-indeterminate", !hasKnownTotal);
+  if (els.appProgressBar) els.appProgressBar.style.width = hasKnownTotal ? `${percent}%` : "";
+  if (els.appProgressMeta) {
+    els.appProgressMeta.textContent = progress.meta || (hasKnownTotal
+      ? `${Math.round(completed).toLocaleString("en-GB")} of ${Math.round(total).toLocaleString("en-GB")} steps`
+      : "Working...");
+  }
+  if (els.appProgressDetail) {
+    els.appProgressDetail.textContent = detail;
+    els.appProgressDetail.hidden = !detail;
+  }
+}
+
+async function showAppProgress(progress = {}) {
+  updateAppProgress(progress);
+  await nextUiFrame();
+}
+
+async function updateAppProgressFrame(progress = {}) {
+  if (!appProgressIsVisible()) return;
+  updateAppProgress(progress);
+  await nextUiFrame();
+}
+
+function hideAppProgress() {
+  if (els.appProgressOverlay) els.appProgressOverlay.hidden = true;
+  document.body.removeAttribute("aria-busy");
 }
 
 function escapeHtml(value) {
@@ -6421,11 +6484,7 @@ function renderDiff() {
 }
 
 function nextDiffProgressFrame() {
-  return new Promise(resolve => {
-    window.requestAnimationFrame(() => {
-      window.setTimeout(resolve, DIFF_PROGRESS_FRAME_DELAY_MS);
-    });
-  });
+  return nextUiFrame(DIFF_PROGRESS_FRAME_DELAY_MS);
 }
 
 function diffRenderIsCurrent(token) {
@@ -7135,32 +7194,64 @@ async function promptForMissingLinkedTextFile(options = {}) {
     const previousLinkedTextPath = linkedTextPath;
     const preserveState = options.preserveFormatsFrom
       || projectStateFromSnapshot(serializeProjectState());
-    const payload = await requestOpenTextFilePayload();
-    if (!payload || payload.cancelled) {
-      setStatus("Story file still missing");
-      return false;
-    }
-    if (payload.ok === false) throw new Error(payload.error || "Open failed");
+    try {
+      await showAppProgress({
+        title: "Opening moved file",
+        step: "Choose the moved story file...",
+        completed: 0,
+        total: 5
+      });
+      const payload = await requestOpenTextFilePayload();
+      if (!payload || payload.cancelled) {
+        setStatus("Story file still missing");
+        return false;
+      }
+      if (payload.ok === false) throw new Error(payload.error || "Open failed");
 
-    await applyOpenedTextFilePayload(payload, previousLinkedTextPath, preserveState, {
-      preserveFormatsFrom: preserveState
-    });
-    return true;
+      await applyOpenedTextFilePayload(payload, previousLinkedTextPath, preserveState, {
+        preserveFormatsFrom: preserveState,
+        showProgress: true,
+        progressTitle: "Opening moved file",
+        progressOffset: 1,
+        progressTotal: 5
+      });
+      return true;
+    } finally {
+      hideAppProgress();
+    }
   } finally {
     isPromptingForLinkedTextFile = false;
   }
 }
 
 async function applyTextProject(text, fileName, options = {}) {
+  const progressTitle = options.progressTitle || "Opening file";
+  const progressTotal = Number(options.progressTotal || 0);
+  const progressOffset = Number(options.progressOffset || 0);
+  const progressEnabled = Boolean(options.showProgress || appProgressIsVisible());
+  const reportProgress = async (stepIndex, step, detail = "") => {
+    if (!progressEnabled) return;
+    await updateAppProgressFrame({
+      title: progressTitle,
+      step,
+      detail,
+      completed: progressOffset + stepIndex,
+      total: progressTotal || progressOffset + 4
+    });
+  };
+
+  await reportProgress(0, "Parsing text file...", fileName || "");
   state = stateFromExportText(text, options.preserveFormatsFrom || null, {
     preserveIdentity: Boolean(options.preserveIdentity),
     preserveHistory: Boolean(options.preserveHistory)
   });
+  await reportProgress(1, "Loading saved versions...", fileName || "");
   const historyResult = await applyExternalVersionHistory(state, {
     filePath: options.filePath || "",
     fileName
   });
   state = historyResult.state;
+  await reportProgress(2, "Rendering drafts...", `${state.drafts.length.toLocaleString("en-GB")} draft${state.drafts.length === 1 ? "" : "s"}`);
   markStateChanged();
   saveQueued = false;
   editorSelections = {};
@@ -7168,10 +7259,12 @@ async function applyTextProject(text, fileName, options = {}) {
   updateProjectTitle();
   restoreViewStateForProject();
   render();
-  const savedToLinkedFile = await saveNow();
+  await reportProgress(3, "Saving imported project...", projectFileName);
+  const savedToLinkedFile = await saveNow({ skipInputSync: true });
   resetHistory();
   const historyText = historyResult.loaded ? "; version history loaded" : "";
   setStatus(savedToLinkedFile ? `Opened ${projectFileName}${historyText}; autosave linked` : `Opened${historyText}; saved companion`);
+  await reportProgress(4, "Open complete", projectFileName);
   focusPageEditor(activeEditorKey);
 }
 
@@ -7359,7 +7452,11 @@ async function applyOpenedTextFilePayload(payload, previousLinkedTextPath = "", 
   await applyTextProject(payload.text || "", payload.fileName || "draft-history.txt", {
     preserveFormatsFrom: identityState,
     preserveIdentity: Boolean(identityState),
-    filePath: linkedTextPath
+    filePath: linkedTextPath,
+    showProgress: Boolean(options.showProgress),
+    progressTitle: options.progressTitle,
+    progressTotal: options.progressTotal,
+    progressOffset: options.progressOffset
   });
 }
 
@@ -7396,20 +7493,46 @@ async function openTextProject() {
 
   try {
     const previousLinkedTextPath = linkedTextPath;
+    await showAppProgress({
+      title: "Opening file",
+      step: "Saving current project...",
+      completed: 0,
+      total: 6
+    });
     const previousState = await prepareCurrentProjectForOpen();
+    await showAppProgress({
+      title: "Opening file",
+      step: "Choose a text file...",
+      completed: 1,
+      total: 6
+    });
     const payload = await requestOpenTextFilePayload();
 
     if (payload) {
       if (payload.cancelled) return;
       if (payload.ok === false) throw new Error(payload.error || "Open failed");
 
-      await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState);
+      await showAppProgress({
+        title: "Opening file",
+        step: "Reading text file...",
+        detail: payload.fileName || "",
+        completed: 2,
+        total: 6
+      });
+      await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState, {
+        showProgress: true,
+        progressTitle: "Opening file",
+        progressOffset: 2,
+        progressTotal: 6
+      });
       return;
     }
   } catch (error) {
     if (isAbortError(error)) return;
     console.error(error);
     setStatus(`Open failed: ${error?.message || "Unknown error"}`);
+  } finally {
+    hideAppProgress();
   }
 }
 
@@ -7439,18 +7562,32 @@ async function promptForMovedRecentTextFile(missingPath, previousLinkedTextPath,
     return false;
   }
 
-  const payload = await requestOpenTextFilePayload();
-  if (!payload || payload.cancelled) {
-    setStatus("Open recent cancelled");
-    return false;
-  }
-  if (payload.ok === false) throw new Error(payload.error || "Open failed");
+  try {
+    await showAppProgress({
+      title: "Opening moved file",
+      step: "Choose the moved text file...",
+      completed: 0,
+      total: 5
+    });
+    const payload = await requestOpenTextFilePayload();
+    if (!payload || payload.cancelled) {
+      setStatus("Open recent cancelled");
+      return false;
+    }
+    if (payload.ok === false) throw new Error(payload.error || "Open failed");
 
-  const cachedState = cachedProjectStateForPath(missingPath);
-  await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState, {
-    preserveFormatsFrom: cachedState || previousState
-  });
-  return true;
+    const cachedState = cachedProjectStateForPath(missingPath);
+    await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState, {
+      preserveFormatsFrom: cachedState || previousState,
+      showProgress: true,
+      progressTitle: "Opening moved file",
+      progressOffset: 1,
+      progressTotal: 5
+    });
+    return true;
+  } finally {
+    hideAppProgress();
+  }
 }
 
 async function openRecentTextProject(filePath) {
@@ -7460,7 +7597,20 @@ async function openRecentTextProject(filePath) {
   let previousState = null;
   try {
     previousLinkedTextPath = linkedTextPath;
+    await showAppProgress({
+      title: "Opening recent file",
+      step: "Saving current project...",
+      completed: 0,
+      total: 6
+    });
     previousState = await prepareCurrentProjectForOpen();
+    await showAppProgress({
+      title: "Opening recent file",
+      step: "Reading recent file...",
+      detail: recentFileLabel(filePath),
+      completed: 1,
+      total: 6
+    });
     const body = JSON.stringify({ filePath });
     let payload;
     try {
@@ -7482,10 +7632,23 @@ async function openRecentTextProject(filePath) {
       }
     }
 
-    await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState);
+    await showAppProgress({
+      title: "Opening recent file",
+      step: "Recent file loaded...",
+      detail: payload.fileName || recentFileLabel(filePath),
+      completed: 2,
+      total: 6
+    });
+    await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState, {
+      showProgress: true,
+      progressTitle: "Opening recent file",
+      progressOffset: 2,
+      progressTotal: 6
+    });
   } catch (error) {
     if (isAbortError(error)) return;
     if (isMissingRecentFileError(error)) {
+      hideAppProgress();
       try {
         await promptForMovedRecentTextFile(error.filePath || filePath, previousLinkedTextPath, previousState);
       } catch (promptError) {
@@ -7497,6 +7660,8 @@ async function openRecentTextProject(filePath) {
     }
     console.error(error);
     setStatus("Open recent failed");
+  } finally {
+    hideAppProgress();
   }
 }
 
@@ -8464,6 +8629,12 @@ async function proceedTransferImport() {
   setStatus("Importing USB transfer...");
 
   try {
+    await showAppProgress({
+      title: "Importing USB transfer",
+      step: "Merging transfer files...",
+      completed: 0,
+      total: 6
+    });
     const response = await fetch("/api/usb-transfer/import", {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -8477,9 +8648,20 @@ async function proceedTransferImport() {
     hideTransferReview();
     updateStoragePathsFromPayload(payload);
     linkedTextPath = payload.filePath || linkedTextPath || "";
+    await showAppProgress({
+      title: "Importing USB transfer",
+      step: "Applying imported story...",
+      detail: payload.fileName || "",
+      completed: 2,
+      total: 6
+    });
     await applyTextProject(payload.text || "", payload.fileName || projectFileName || "draft-history.txt", {
       preserveFormatsFrom: null,
-      filePath: linkedTextPath
+      filePath: linkedTextPath,
+      showProgress: true,
+      progressTitle: "Importing USB transfer",
+      progressOffset: 2,
+      progressTotal: 6
     });
     setStatus(payload.importDestination?.usedFallback
       ? `USB import complete; imported to ${payload.filePath || "app data folder"}`
@@ -8489,6 +8671,7 @@ async function proceedTransferImport() {
     setStatus(`USB import failed: ${error?.message || "Unknown error"}`);
     if (els.transferImportProceed) els.transferImportProceed.disabled = false;
   } finally {
+    hideAppProgress();
     if (els.transferImportCancel) els.transferImportCancel.disabled = false;
   }
 }
@@ -8679,9 +8862,14 @@ async function saveNow(options = {}) {
     return false;
   }
 
-  syncFromInputs();
-  saveCurrentViewState();
-  const capturedVersionPageKeys = flushDraftVersionCaptures();
+  const skipInputSync = Boolean(options.skipInputSync);
+  if (skipInputSync) {
+    saveCurrentViewState({ syncDom: false });
+  } else {
+    syncFromInputs();
+    saveCurrentViewState();
+  }
+  const capturedVersionPageKeys = skipInputSync ? [] : flushDraftVersionCaptures();
   if (capturedVersionPageKeys.includes(activeVersionHistoryPageKey())) renderDiffSoon("Loading version history");
   rememberLinkedProjectState();
   const requestRevision = stateRevision;
@@ -9335,11 +9523,33 @@ els.fileOpenInput.addEventListener("change", async event => {
   if (!file) return;
 
   try {
+    await showAppProgress({
+      title: "Opening file",
+      step: "Reading selected file...",
+      detail: file.name,
+      completed: 0,
+      total: 6
+    });
+    const text = await file.text();
+    await showAppProgress({
+      title: "Opening file",
+      step: "Selected file loaded...",
+      detail: file.name,
+      completed: 2,
+      total: 6
+    });
     await clearLinkedTextFile();
-    await applyTextProject(await file.text(), file.name);
+    await applyTextProject(text, file.name, {
+      showProgress: true,
+      progressTitle: "Opening file",
+      progressOffset: 2,
+      progressTotal: 6
+    });
   } catch (error) {
     console.error(error);
     setStatus(`Open failed: ${error?.message || "Unknown error"}`);
+  } finally {
+    hideAppProgress();
   }
 });
 

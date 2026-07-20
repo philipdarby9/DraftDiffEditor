@@ -612,7 +612,8 @@ textarea,
   font-size: 11px;
 }
 
-.summary-progress-overlay {
+.summary-progress-overlay,
+.app-progress-overlay {
   position: fixed;
   inset: 0;
   z-index: 600;
@@ -623,11 +624,17 @@ textarea,
   backdrop-filter: blur(2px);
 }
 
-.summary-progress-overlay[hidden] {
+.app-progress-overlay {
+  z-index: 640;
+}
+
+.summary-progress-overlay[hidden],
+.app-progress-overlay[hidden] {
   display: none;
 }
 
-.summary-progress-panel {
+.summary-progress-panel,
+.app-progress-panel {
   width: min(560px, 100%);
   display: grid;
   gap: 12px;
@@ -638,7 +645,8 @@ textarea,
   box-shadow: var(--shadow-menu);
 }
 
-.summary-progress-panel h2 {
+.summary-progress-panel h2,
+.app-progress-panel h2 {
   margin: 0;
   font-size: 18px;
   line-height: 1.25;
@@ -646,18 +654,23 @@ textarea,
 
 .summary-progress-step,
 .summary-progress-meta,
-.summary-progress-path {
+.summary-progress-path,
+.app-progress-step,
+.app-progress-meta,
+.app-progress-detail {
   margin: 0;
   color: var(--fg-muted);
   font-size: 13px;
 }
 
-.summary-progress-path {
+.summary-progress-path,
+.app-progress-detail {
   overflow-wrap: anywhere;
   color: var(--fg);
 }
 
-.summary-progress-track {
+.summary-progress-track,
+.app-progress-track {
   height: 10px;
   overflow: hidden;
   background: var(--surface-alt);
@@ -665,11 +678,26 @@ textarea,
   border-radius: 999px;
 }
 
-.summary-progress-bar {
+.summary-progress-bar,
+.app-progress-bar {
   width: 0%;
   height: 100%;
   background: var(--accent);
   transition: width 160ms ease;
+}
+
+.app-progress-track.is-indeterminate .app-progress-bar {
+  width: 42%;
+  animation: app-progress-slide 900ms ease-in-out infinite;
+}
+
+@keyframes app-progress-slide {
+  0% {
+    transform: translateX(-120%);
+  }
+  100% {
+    transform: translateX(260%);
+  }
 }
 
 .summary-progress-actions {

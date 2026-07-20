@@ -26,6 +26,10 @@ assert.doesNotMatch(appSource, /alignDiffLimitReason|diffRangeLimitReason|compar
 assert.match(appSource, /class="version-coalesced"/, "coalesced version metadata should have a stable grid class");
 assert.match(stylesSource, /"restore coalesced"/, "version history headers should reserve a grid slot for coalesced metadata");
 assert.match(stylesSource, /\.version-history-strip \.version-coalesced\s*\{[\s\S]*?grid-area: coalesced;/, "coalesced metadata should use its reserved grid area");
+assert.match(appSource, /function updateAppProgress\(progress = \{\}\)/, "file imports should have app-level progress reporting");
+assert.match(appSource, /document\.body\.setAttribute\("aria-busy", "true"\)/, "file import progress should mark the app busy for assistive tech");
+assert.match(stylesSource, /\.app-progress-overlay/, "file import progress should have a visible overlay");
+assert.match(stylesSource, /\.app-progress-track\.is-indeterminate/, "file import progress should support indeterminate phases");
 
 const viewSync = sourceBetween("function syncViewStateFromDom", "function scheduleSearchRefresh");
 assert.match(viewSync, /saveCurrentEditorViewState\(\)/, "view-only sync should preserve current editor selection");
@@ -160,6 +164,29 @@ assert.match(
 const openedTextPayloadSource = sourceBetween("async function applyOpenedTextFilePayload", "async function requestOpenTextFilePayload");
 assert.match(openedTextPayloadSource, /const identityState = storedState \|\| sameFilePreviousState \|\| options\.preserveFormatsFrom \|\| null;/, "reopened or moved text files should keep the cached project identity");
 assert.match(openedTextPayloadSource, /preserveIdentity: Boolean\(identityState\)/, "reopened text files should preserve draft IDs and view state");
+assert.match(openedTextPayloadSource, /showProgress: Boolean\(options\.showProgress\)/, "opened text payloads should pass progress through to project import");
+
+const importProgressSource = sourceBetween("async function applyTextProject", "async function clearLinkedTextFile");
+assert.match(importProgressSource, /reportProgress\(0, "Parsing text file\.\.\."/u, "text import should report parsing progress");
+assert.match(importProgressSource, /reportProgress\(1, "Loading saved versions\.\.\."/u, "text import should report version-history progress");
+assert.match(importProgressSource, /reportProgress\(2, "Rendering drafts\.\.\."/u, "text import should report render progress");
+assert.match(importProgressSource, /reportProgress\(3, "Saving imported project\.\.\."/u, "text import should report save progress");
+assert.match(importProgressSource, /saveNow\(\{ skipInputSync: true \}\)/u, "text import should not rescan every rendered editor before saving");
+
+const saveNowSource = sourceBetween("async function saveNow", "async function loadState");
+assert.match(saveNowSource, /const skipInputSync = Boolean\(options\.skipInputSync\);/u, "saveNow should support an explicit import fast path");
+assert.match(saveNowSource, /saveCurrentViewState\(\{ syncDom: false \}\)/u, "import fast-path saves should keep view state without a full DOM sync");
+
+[
+  ["open file", "async function openTextProject()", "async function recentOpenErrorFromResponse"],
+  ["open recent", "async function openRecentTextProject(filePath)", "async function openFileLocation"],
+  ["USB import", "async function proceedTransferImport()", "async function exportUsbTransfer"],
+  ["browser file picker", "els.fileOpenInput.addEventListener(\"change\"", "els.storyTab.addEventListener"]
+].forEach(([label, start, end]) => {
+  const snippet = sourceBetween(start, end);
+  assert.match(snippet, /showAppProgress\(/, `${label} should show import progress while loading`);
+  assert.match(snippet, /hideAppProgress\(\)/, `${label} should hide import progress after loading`);
+});
 
 const allowedSyncFromInputsRanges = [
   ["syncFromInputs definition", "function syncFromInputs()", "function syncPageFromDom"],

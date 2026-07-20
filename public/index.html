@@ -213,6 +213,18 @@
       </div>
     </section>
 
+    <section id="app-progress-overlay" class="app-progress-overlay" aria-label="File import progress" hidden>
+      <div class="app-progress-panel" role="status" aria-live="polite" aria-atomic="true">
+        <h2 id="app-progress-title">Opening file</h2>
+        <p id="app-progress-step" class="app-progress-step">Preparing...</p>
+        <div id="app-progress-track" class="app-progress-track" aria-hidden="true">
+          <div id="app-progress-bar" class="app-progress-bar"></div>
+        </div>
+        <p id="app-progress-meta" class="app-progress-meta">0 of 0</p>
+        <p id="app-progress-detail" class="app-progress-detail"></p>
+      </div>
+    </section>
+
     <section id="transfer-review-overlay" class="transfer-review-overlay" aria-label="USB import review" hidden>
       <div class="transfer-review-panel">
         <header class="transfer-review-header">
