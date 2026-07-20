@@ -4165,6 +4165,14 @@ function normalizedTransferFileName(value) {
   return asText(value).trim().toLowerCase();
 }
 
+function transferSourcePathIsNative(value) {
+  const sourcePath = asText(value).trim();
+  if (!sourcePath) return false;
+  const windowsAbsolute = /^[a-z]:[\\/]/iu.test(sourcePath) || /^\\\\/u.test(sourcePath);
+  if (process.platform === "win32") return windowsAbsolute;
+  return !windowsAbsolute && path.posix.isAbsolute(sourcePath);
+}
+
 function transferStoryFileNames(item, manifest) {
   return new Set([
     manifest?.source?.fileName,
@@ -5199,14 +5207,19 @@ function usbImportFallbackRoot(fileName) {
 function usbImportDestinationPaths(review) {
   const storyItem = transferStoryItem(review);
   const backupItem = transferBackupItem(review);
-  const fileName = storyItem?.sourcePath
-    ? path.basename(storyItem.sourcePath)
-    : review.manifest?.source?.fileName || "draft-history.txt";
+  const fileName = asText(review.manifest?.source?.fileName).trim()
+    || asText(storyItem?.label).trim()
+    || (transferSourcePathIsNative(storyItem?.sourcePath) ? path.basename(storyItem.sourcePath) : "")
+    || "draft-history.txt";
   const fallbackRoot = usbImportFallbackRoot(fileName);
   const fallbackStoryPath = path.join(fallbackRoot, fileName);
   const fallbackBackupPath = path.join(fallbackRoot, "DraftDiff backup");
-  const preferredStoryPath = storyItem ? localSourcePathForTransferItem(storyItem, review.manifest) : "";
-  const preferredBackupPath = backupItem ? localSourcePathForTransferItem(backupItem, review.manifest) : "";
+  const preferredStoryPath = storyItem && transferSourcePathIsNative(storyItem.sourcePath)
+    ? localSourcePathForTransferItem(storyItem, review.manifest)
+    : currentLinkedStoryPathForTransfer(storyItem, review.manifest);
+  const preferredBackupPath = backupItem && transferSourcePathIsNative(backupItem.sourcePath)
+    ? localSourcePathForTransferItem(backupItem, review.manifest)
+    : existingVersionHistoryFolderPath() || "";
   const storyPath = canPrepareWritableFile(preferredStoryPath)
     ? preferredStoryPath
     : fallbackStoryPath;

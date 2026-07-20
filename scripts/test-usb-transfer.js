@@ -189,6 +189,33 @@ assert.equal(
   newComputerReview.files.localMissing.every(entry => entry.statusLabel === "Not yet on this computer"),
   true
 );
+const foreignStoryPath = process.platform === "win32"
+  ? "/Users/writer/Desktop/story.txt"
+  : "C:\\Users\\writer\\Desktop\\story.txt";
+const foreignBackupPath = process.platform === "win32"
+  ? "/Users/writer/Documents/DraftDiff backup"
+  : "C:\\Users\\writer\\Documents\\DraftDiff backup";
+newComputerManifest.source.filePath = foreignStoryPath;
+newComputerManifest.source.backupFolderPath = foreignBackupPath;
+newComputerManifest.items = newComputerManifest.items.map(item => ({
+  ...item,
+  sourcePath: item.kind === "directory" ? foreignBackupPath : foreignStoryPath
+}));
+fs.writeFileSync(newComputerManifestPath, `${JSON.stringify(newComputerManifest, null, 2)}\n`, "utf8");
+const foreignPathImport = __test.applyUsbTransferFolder(newComputerPackagePath);
+assert.equal(foreignPathImport.importDestination.usedFallback, true);
+assert.equal(path.basename(foreignPathImport.filePath), "story.txt");
+assert.equal(foreignPathImport.fileName, "story.txt");
+assert.equal(
+  fs.existsSync(path.join(foreignPathImport.importDestination.backupFolderPath, "json", "story.version-history.json")),
+  true,
+  "a foreign source path should use only the manifest story filename for the imported sidecar"
+);
+assert.equal(
+  foreignPathImport.filePath.includes("Users_writer_Desktop"),
+  false,
+  "a foreign source path should never be sanitized into the imported story filename"
+);
 __test.writeTextFileLink(storyPath);
 __test.writeVersionHistoryFolderPath(backupFolder);
 
