@@ -564,6 +564,7 @@
     const createdAt = nowIso();
     return {
       version: 1,
+      storyId: id("story"),
       formatDefaultVersion: FORMAT_DEFAULT_VERSION,
       defaultFormat: { ...DEFAULT_FORMAT },
       createdAt,
@@ -628,6 +629,7 @@
 
     const normalized = {
       version: 1,
+      storyId: asText(raw.storyId) || fallback.storyId,
       formatDefaultVersion: FORMAT_DEFAULT_VERSION,
       defaultFormat,
       createdAt,

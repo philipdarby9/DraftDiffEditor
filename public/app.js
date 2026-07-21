@@ -675,6 +675,7 @@ function createDefaultState() {
   const defaultFormat = { ...DEFAULT_FORMAT };
   return {
     version: 1,
+    storyId: makeId("story"),
     formatDefaultVersion: FORMAT_DEFAULT_VERSION,
     defaultFormat,
     createdAt,
@@ -4434,6 +4435,7 @@ function stateFromExportText(text, previousState = null, options = {}) {
 
   return {
     version: 1,
+    storyId: previousState?.storyId,
     formatDefaultVersion: FORMAT_DEFAULT_VERSION,
     defaultFormat: currentDefaultFormat(previousState),
     createdAt: preserveIdentity ? createdAt : storyBlock.createdAt || nowIso(),
@@ -7187,7 +7189,26 @@ async function promptForMissingLinkedTextFile(options = {}) {
       `Story file not found:\n\n${missingPath}\n\nChoose the moved story file now?`
     );
     if (!chooseNow) {
-      setStatus("Story file missing; choose the moved file before linked saves resume");
+      const markDeleted = window.confirm(
+        `Was this local story file deliberately deleted?\n\n${missingPath}\n\nChoose OK to record that this computer no longer has the story file. Choose Cancel to leave it marked as temporarily missing.`
+      );
+      await fetch("/api/story-registry/status", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          storyId: state?.storyId || "",
+          filePath: missingPath,
+          status: markDeleted ? "retired" : "missing"
+        })
+      });
+      if (markDeleted) {
+        await clearLinkedTextFile();
+        linkedTextFileMissing = false;
+        linkedTextMissingPath = "";
+        setStatus("Local story file recorded as deleted; its identity and saved history were retained");
+      } else {
+        setStatus("Story file left marked as temporarily missing");
+      }
       return false;
     }
 
@@ -7558,7 +7579,19 @@ async function promptForMovedRecentTextFile(missingPath, previousLinkedTextPath,
     `Recent file not found:\n\n${missingPath}\n\nChoose the moved story file now?`
   );
   if (!chooseNow) {
-    setStatus("Open recent cancelled");
+    const markDeleted = window.confirm(
+      `Was this local story file deliberately deleted?\n\n${missingPath}\n\nChoose OK to retain its identity as a deleted story. Choose Cancel to leave it marked as temporarily missing.`
+    );
+    await fetch("/api/story-registry/status", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        storyId: cachedProjectStateForPath(missingPath)?.storyId || "",
+        filePath: missingPath,
+        status: markDeleted ? "retired" : "missing"
+      })
+    });
+    setStatus(markDeleted ? "Story recorded as deleted" : "Story left marked as temporarily missing");
     return false;
   }
 
@@ -8200,7 +8233,7 @@ function transferMergeVerdict(merge = {}) {
     return {
       title: merge.localStoryMissing ? "Ready to import USB story" : "The files contain the same saved versions",
       body: merge.localStoryMissing
-        ? "No local story file exists yet. Proceed will import the USB story and saved versions."
+        ? "No local copy of this story is registered on this computer. Proceed will import the USB story and saved versions."
         : "This computer already contains every saved version found on the USB, and the USB contains every version found here.",
       ready: true
     };
@@ -8209,7 +8242,7 @@ function transferMergeVerdict(merge = {}) {
     return {
       title: merge.localStoryMissing ? "Ready to import USB story" : "The USB contains saved versions missing from this computer",
       body: merge.localStoryMissing
-        ? "No local story file exists yet. Proceed will import the USB story and saved versions."
+        ? "No local copy of this story is registered on this computer. Proceed will import the USB story and saved versions."
         : "Proceed will back up this computer, add the missing USB versions, and keep the version with the latest save time current.",
       ready: true
     };
@@ -8613,14 +8646,31 @@ function importConfirmationText(review) {
     ? `\n\n${needsReviewCount.toLocaleString("en-GB")} item${needsReviewCount === 1 ? "" : "s"} need review.`
     : "";
   if (review?.merge?.localStoryMissing) {
-    return `Proceed with this USB import?\n\nNo local story file exists yet. DraftDiff will import the USB story and saved versions.${conflictText}`;
+    return `Proceed with this USB import?\n\nNo local copy of this story is registered on this computer. DraftDiff will import the USB story and saved versions.${conflictText}`;
   }
   return `Proceed with this USB import?\n\nDraftDiff will back up this computer, preserve the local story file, add versions missing from the USB, and combine each version history in timestamp order. The latest saved version stays current.${conflictText}`;
+}
+
+function usbImportIdentityResolution(review) {
+  const decision = review?.targetStory?.identityDecision;
+  if (!decision?.required) return "";
+  const previousLocation = decision.previousFilePath || decision.fileName || "the previous local file";
+  const sameRecordedIdentity = decision.type === "restore-retired-id";
+  const restore = window.confirm(sameRecordedIdentity
+    ? `This USB transfer has the identity of a story whose local copy was recorded as deleted:\n\n${previousLocation}\n\nRestore it as the same story?`
+    : `A deleted story with the same filename is recorded on this computer:\n\n${previousLocation}\n\nMerge this import with that previous story and reuse its identity?`);
+  if (restore) return "restore";
+  const createNew = window.confirm(
+    `Import this as a new, unrelated story with a new identity instead?\n\nChoose Cancel to stop the import without changing anything.`
+  );
+  return createNew ? "new" : null;
 }
 
 async function proceedTransferImport() {
   if (!latestTransferReview?.packageFolderPath) return;
   const review = latestTransferReview;
+  const identityResolution = usbImportIdentityResolution(review);
+  if (identityResolution === null) return;
   if (!window.confirm(importConfirmationText(review))) return;
 
   closeFileMenu();
@@ -8638,7 +8688,10 @@ async function proceedTransferImport() {
     const response = await fetch("/api/usb-transfer/import", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ packageFolderPath: review.packageFolderPath })
+      body: JSON.stringify({
+        packageFolderPath: review.packageFolderPath,
+        identityResolution
+      })
     });
     if (!response.ok) throw new Error(await response.text());
 
@@ -8646,6 +8699,10 @@ async function proceedTransferImport() {
     if (!payload.ok) throw new Error(payload.error || "USB import failed");
 
     hideTransferReview();
+    if (payload.backgroundImport) {
+      setStatus(`USB import complete for ${payload.fileName || "registered story"}; the open story was left unchanged`);
+      return;
+    }
     updateStoragePathsFromPayload(payload);
     linkedTextPath = payload.filePath || linkedTextPath || "";
     await showAppProgress({

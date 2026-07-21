@@ -22,6 +22,7 @@ function run() {
 
   {
     const normalized = StateCore.normalizeState({
+      storyId: "story-stable-test-id",
       formatDefaultVersion: 1,
       defaultFormat: { fontFamily: "Segoe UI", fontSize: "16", lineHeight: "1.62" },
       createdAt: "2026-01-01T00:00:00.000Z",
@@ -68,6 +69,7 @@ function run() {
     });
 
     assert.equal(normalized.formatDefaultVersion, StateCore.FORMAT_DEFAULT_VERSION);
+    assert.equal(normalized.storyId, "story-stable-test-id");
     assert.equal(normalized.defaultFormat.fontFamily, StateCore.DEFAULT_FORMAT.fontFamily);
     assert.equal(normalized.drafts[0].format.fontFamily, StateCore.DEFAULT_FORMAT.fontFamily);
     assert.equal(normalized.drafts[0].content, "Alpha\nBeta");

@@ -180,6 +180,7 @@ newComputerManifest.items = newComputerManifest.items.map(item => ({
     : path.join(dataDir, "new-computer", "story.txt")
 }));
 fs.writeFileSync(newComputerManifestPath, `${JSON.stringify(newComputerManifest, null, 2)}\n`, "utf8");
+fs.rmSync(path.join(dataDir, "story-registry.json"), { force: true });
 __test.writeTextFileLink(null);
 __test.writeVersionHistoryFolderPath(null);
 const newComputerReview = __test.reviewUsbTransferFolder(newComputerPackagePath);
@@ -216,6 +217,7 @@ assert.equal(
   false,
   "a foreign source path should never be sanitized into the imported story filename"
 );
+fs.rmSync(path.join(dataDir, "story-registry.json"), { force: true });
 __test.writeTextFileLink(storyPath);
 __test.writeVersionHistoryFolderPath(backupFolder);
 
@@ -325,6 +327,7 @@ newComputerChangedManifest.items = newComputerChangedManifest.items.map(item => 
     : path.join(dataDir, "new-computer-changed", "story.txt")
 }));
 fs.writeFileSync(newComputerChangedManifestPath, `${JSON.stringify(newComputerChangedManifest, null, 2)}\n`, "utf8");
+fs.rmSync(path.join(dataDir, "story-registry.json"), { force: true });
 __test.writeTextFileLink(null);
 __test.writeVersionHistoryFolderPath(null);
 const newComputerChangedReview = __test.reviewUsbTransferFolder(newComputerChangedPackagePath);
@@ -339,6 +342,7 @@ assert.equal(newComputerChangedReview.files.counts.localMissing > 0, true);
 assert.equal(newComputerChangedReview.files.counts.localDeleted, 0);
 __test.writeTextFileLink(storyPath);
 __test.writeVersionHistoryFolderPath(backupFolder);
+__test.writeAll(localState, { filePath: storyPath, fileName: "story.txt" });
 
 const review = __test.reviewUsbTransferFolder(exported.packageFolderPath);
 
@@ -494,6 +498,7 @@ const remoteExistingState = stateWithDrafts([
 ], "Round trip notes", [
   version("round-trip-remote-notes", "Round trip notes", "2026-07-17T10:00:00.000Z", "Project notes")
 ]);
+fs.rmSync(path.join(dataDir, "story-registry.json"), { force: true });
 __test.writeTextFileLink(roundTripRemoteStoryPath);
 __test.writeVersionHistoryFolderPath(roundTripRemoteBackupFolder);
 __test.writeAll(remoteExistingState, {
@@ -506,6 +511,7 @@ const remoteImport = __test.applyUsbTransferFolder(outboundRoundTrip.packageFold
 assert.equal(remoteImport.importDestination.storyPath, roundTripRemoteStoryPath);
 assert.equal(remoteImport.importDestination.backupFolderPath, roundTripRemoteBackupFolder);
 const importedRemoteState = __test.readState();
+assert.equal(importedRemoteState.storyId, outboundRoundTrip.manifest.storyId, "computer B should adopt the transferred story identity");
 assert.deepEqual(
   [...new Set(importedRemoteState.drafts[0].versionHistory.map(entry => entry.content))],
   ["Earlier first draft", "Shared first draft"],
@@ -556,9 +562,14 @@ returnedManifest.items = returnedManifest.items.map(item => ({
 }));
 fs.writeFileSync(returnedRoundTrip.manifestPath, `${JSON.stringify(returnedManifest, null, 2)}\n`, "utf8");
 
+fs.rmSync(path.join(dataDir, "story-registry.json"), { force: true });
 __test.writeTextFileLink(roundTripLocalStoryPath);
 __test.writeVersionHistoryFolderPath(roundTripLocalBackupFolder);
-fs.writeFileSync(__test.STATE_FILE, `${JSON.stringify(StateCore.normalizeState(roundTripBaseState), null, 2)}\n`, "utf8");
+__test.writeAll(roundTripBaseState, {
+  filePath: roundTripLocalStoryPath,
+  fileName: "round-trip.txt",
+  allowCreateLinkedTextFile: true
+});
 const returnedRoundTripReview = __test.reviewUsbTransferFolder(returnedRoundTrip.packageFolderPath);
 assert.equal(returnedRoundTripReview.merge.status, "usb-only");
 assert.deepEqual(
@@ -577,6 +588,8 @@ assert.deepEqual(
 
 const legacyRoundTripUsbRoot = path.join(dataDir, "legacy-round-trip-usb");
 fs.mkdirSync(legacyRoundTripUsbRoot, { recursive: true });
+__test.writeTextFileLink(roundTripRemoteStoryPath);
+__test.writeVersionHistoryFolderPath(roundTripRemoteBackupFolder);
 const legacyReturnedRoundTrip = __test.createUsbTransferPackage({
   state: returnedRoundTripState,
   filePath: roundTripRemoteStoryPath,
@@ -596,9 +609,14 @@ legacyManifest.items = legacyManifest.items.map(item => ({
 }));
 fs.writeFileSync(legacyReturnedRoundTrip.manifestPath, `${JSON.stringify(legacyManifest, null, 2)}\n`, "utf8");
 
+fs.rmSync(path.join(dataDir, "story-registry.json"), { force: true });
 __test.writeTextFileLink(roundTripLocalStoryPath);
 __test.writeVersionHistoryFolderPath(roundTripLocalBackupFolder);
-fs.writeFileSync(__test.STATE_FILE, `${JSON.stringify(StateCore.normalizeState(roundTripBaseState), null, 2)}\n`, "utf8");
+__test.writeAll(roundTripBaseState, {
+  filePath: roundTripLocalStoryPath,
+  fileName: "round-trip.txt",
+  allowCreateLinkedTextFile: true
+});
 const legacyRoundTripReview = __test.reviewUsbTransferFolder(legacyReturnedRoundTrip.packageFolderPath);
 assert.equal(legacyRoundTripReview.merge.status, "usb-only");
 assert.equal(
@@ -626,5 +644,110 @@ assert.equal(
 );
 assert.equal(fs.readFileSync(roundTripLocalStoryPath, "utf8").includes("Draft made today on the other computer"), true);
 assert.equal(__test.reviewUsbTransferFolder(legacyReturnedRoundTrip.packageFolderPath).merge.status, "no-changes");
+
+const backgroundRoot = path.join(dataDir, "background-targeting");
+const targetLocalPath = path.join(backgroundRoot, "local", "same-name.txt");
+const targetLocalBackup = path.join(backgroundRoot, "local-backup");
+const targetRemotePath = path.join(backgroundRoot, "remote", "same-name.txt");
+const targetRemoteBackup = path.join(backgroundRoot, "remote-backup");
+const unrelatedPath = path.join(backgroundRoot, "open", "unrelated.txt");
+const unrelatedBackup = path.join(backgroundRoot, "open-backup");
+const backgroundUsbRoot = path.join(backgroundRoot, "usb");
+fs.mkdirSync(backgroundUsbRoot, { recursive: true });
+
+const targetBaseState = stateWithDrafts([{
+  title: "Draft 1",
+  content: "Registered target base",
+  versionHistory: [version("target-base", "Registered target base", "2026-07-19T10:00:00.000Z")]
+}], "Target notes", [version("target-notes", "Target notes", "2026-07-19T10:00:00.000Z", "Project notes")]);
+targetBaseState.storyId = "story-background-target";
+__test.writeTextFileLink(targetLocalPath);
+__test.writeVersionHistoryFolderPath(targetLocalBackup);
+__test.writeAll(targetBaseState, { filePath: targetLocalPath, fileName: "same-name.txt", allowCreateLinkedTextFile: true });
+
+const targetRemoteState = StateCore.normalizeState(targetBaseState);
+targetRemoteState.drafts[0].content = "Registered target changed on USB";
+targetRemoteState.drafts[0].contentHtml = StateCore.textToHtml(targetRemoteState.drafts[0].content);
+targetRemoteState.drafts[0].updatedAt = "2026-07-20T10:00:00.000Z";
+targetRemoteState.drafts[0].versionHistory.push(version("target-usb", targetRemoteState.drafts[0].content, "2026-07-20T10:00:00.000Z"));
+__test.writeTextFileLink(targetRemotePath);
+__test.writeVersionHistoryFolderPath(targetRemoteBackup);
+__test.writeAll(targetRemoteState, { filePath: targetRemotePath, fileName: "same-name.txt", allowCreateLinkedTextFile: true });
+const backgroundPackage = __test.createUsbTransferPackage({
+  state: targetRemoteState,
+  filePath: targetRemotePath,
+  fileName: "same-name.txt"
+}, backgroundUsbRoot, { resetBaseline: true });
+
+__test.writeTextFileLink(targetLocalPath);
+__test.writeVersionHistoryFolderPath(targetLocalBackup);
+__test.writeAll(targetBaseState, { filePath: targetLocalPath, fileName: "same-name.txt", allowCreateLinkedTextFile: true });
+const unrelatedState = stateWithDrafts([{
+  title: "Draft 1",
+  content: "Unrelated open story",
+  versionHistory: [version("unrelated", "Unrelated open story", "2026-07-20T11:00:00.000Z")]
+}], "Unrelated notes", [version("unrelated-notes", "Unrelated notes", "2026-07-20T11:00:00.000Z", "Project notes")]);
+unrelatedState.storyId = "story-unrelated-open";
+__test.writeTextFileLink(unrelatedPath);
+__test.writeVersionHistoryFolderPath(unrelatedBackup);
+__test.writeAll(unrelatedState, { filePath: unrelatedPath, fileName: "unrelated.txt", allowCreateLinkedTextFile: true });
+const unrelatedTextBeforeImport = fs.readFileSync(unrelatedPath, "utf8");
+
+const backgroundReview = __test.reviewUsbTransferFolder(backgroundPackage.packageFolderPath);
+assert.equal(backgroundReview.targetStory.storyId, targetBaseState.storyId);
+assert.equal(backgroundReview.targetStory.filePath, targetLocalPath);
+assert.equal(backgroundReview.merge.localStoryMissing, false);
+assert.equal(backgroundReview.merge.status, "usb-only");
+const backgroundImport = __test.applyUsbTransferFolder(backgroundPackage.packageFolderPath);
+assert.equal(backgroundImport.backgroundImport, true, "an import for another registered story should run in the background");
+assert.equal(
+  JSON.parse(fs.readFileSync(path.join(dataDir, "text-file-link.json"), "utf8")).filePath,
+  unrelatedPath,
+  "background import should not replace the open story link"
+);
+assert.equal(fs.readFileSync(unrelatedPath, "utf8"), unrelatedTextBeforeImport, "background import should leave the open story untouched");
+assert.equal(fs.readFileSync(targetLocalPath, "utf8").includes("Registered target changed on USB"), true);
+assert.equal(__test.reviewUsbTransferFolder(backgroundPackage.packageFolderPath).merge.status, "no-changes");
+
+__test.updateRegisteredStoryStatus({ storyId: targetBaseState.storyId, status: "retired" });
+fs.rmSync(targetLocalPath, { force: true });
+const backgroundManifestPath = backgroundPackage.manifestPath;
+const originalBackgroundManifest = JSON.parse(fs.readFileSync(backgroundManifestPath, "utf8"));
+const differentIdentityManifest = { ...originalBackgroundManifest, storyId: "story-different-same-name" };
+fs.writeFileSync(backgroundManifestPath, `${JSON.stringify(differentIdentityManifest, null, 2)}\n`, "utf8");
+const retiredNameReview = __test.reviewUsbTransferFolder(backgroundPackage.packageFolderPath);
+assert.equal(retiredNameReview.targetStory.identityDecision.type, "retired-name-match");
+assert.equal(
+  retiredNameReview.targetStory.identityDecision.registeredStoryId,
+  targetBaseState.storyId,
+  "a differently identified import with a retired filename match should require an explicit identity decision"
+);
+fs.writeFileSync(backgroundManifestPath, `${JSON.stringify(originalBackgroundManifest, null, 2)}\n`, "utf8");
+const retiredReview = __test.reviewUsbTransferFolder(backgroundPackage.packageFolderPath);
+assert.equal(retiredReview.targetStory.status, "retired");
+assert.equal(retiredReview.targetStory.identityDecision.type, "restore-retired-id");
+assert.throws(
+  () => __test.applyUsbTransferFolder(backgroundPackage.packageFolderPath),
+  /restore-or-new-story decision/u,
+  "a retired story must not be silently recreated"
+);
+const restoredImport = __test.applyUsbTransferFolder(backgroundPackage.packageFolderPath, {
+  identityResolution: "restore"
+});
+assert.equal(restoredImport.importDestination.storyId, targetBaseState.storyId);
+assert.equal(fs.existsSync(targetLocalPath), true, "an explicitly restored story should be recreated at its registered path");
+
+const movedTargetPath = path.join(backgroundRoot, "moved", "same-name.txt");
+__test.writeTextFileLink(movedTargetPath);
+__test.writeVersionHistoryFolderPath(targetLocalBackup);
+__test.writeAll(targetRemoteState, {
+  filePath: movedTargetPath,
+  fileName: "same-name.txt",
+  allowCreateLinkedTextFile: true
+});
+const cachedTargetLocations = Object.values(JSON.parse(fs.readFileSync(__test.TEXT_FILE_STATES_FILE, "utf8")))
+  .filter(entry => entry?.state?.storyId === targetBaseState.storyId)
+  .map(entry => entry.filePath);
+assert.deepEqual(cachedTargetLocations, [movedTargetPath], "relocating a story should remove its stale cached path");
 
 console.log("USB transfer review test passed");

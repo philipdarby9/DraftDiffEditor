@@ -515,6 +515,8 @@ async function run() {
     assert.match(summaryHtml, /data-summary-action="expand"/u);
     assert.match(summaryHtml, /data-summary-action="collapse"/u);
     assert.match(summaryHtml, /href="#draft-change-1-2"[^>]*>Draft 1 to Draft 2/u);
+    assert.match(summaryHtml, /href="#draft-change-1-baseline"[^>]*>[^<]+ baseline/u);
+    assert.match(summaryHtml, /First draft baseline; no earlier draft to compare\./u);
     assert.match(summaryHtml, /<details id="draft-changes" class="report-section" data-collapsible>/u);
     assert.match(summaryHtml, /<details id="draft-1-draft-a-title-only" class="history-page-section" data-collapsible>/u);
 

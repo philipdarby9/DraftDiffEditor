@@ -16,6 +16,7 @@ const STATE_FILE = path.join(DATA_DIR, "project.json");
 const EXPORT_FILE = path.join(DATA_DIR, "draft-history.txt");
 const TEXT_FILE_LINK_FILE = path.join(DATA_DIR, "text-file-link.json");
 const TEXT_FILE_STATES_FILE = path.join(DATA_DIR, "text-file-states.json");
+const STORY_REGISTRY_FILE = path.join(DATA_DIR, "story-registry.json");
 const PROJECT_RECOVERY_FILE = path.join(DATA_DIR, "project-recovery.json");
 const PERSISTENCE_TRANSACTION_DIR = path.join(DATA_DIR, ".save-transaction");
 const PERSISTENCE_TRANSACTION_MANIFEST = path.join(PERSISTENCE_TRANSACTION_DIR, "manifest.json");
@@ -538,14 +539,15 @@ function transferStatusLabel(status) {
 }
 
 function versionHistoryJsonFolderPath(options = {}) {
-  const folderPath = options.requireExistingRoot
+  const explicitRoot = normalizedRegistryPath(options.rootFolderPath);
+  const folderPath = explicitRoot || (options.requireExistingRoot
     ? requireVersionHistoryFolderPath()
-    : existingVersionHistoryFolderPath();
+    : existingVersionHistoryFolderPath());
   return folderPath ? path.join(folderPath, "json") : null;
 }
 
-function legacyVersionHistoryJsonFolderPath() {
-  const folderPath = existingVersionHistoryFolderPath();
+function legacyVersionHistoryJsonFolderPath(options = {}) {
+  const folderPath = normalizedRegistryPath(options.rootFolderPath) || existingVersionHistoryFolderPath();
   return folderPath ? path.join(folderPath, "jsons") : null;
 }
 
@@ -599,7 +601,8 @@ function resolveGeneratedReportPath(value) {
 
 function expectedVersionHistoryFilePath(options = {}) {
   const folderPath = versionHistoryJsonFolderPath({
-    requireExistingRoot: Boolean(options.requireExistingRoot)
+    requireExistingRoot: Boolean(options.requireExistingRoot),
+    rootFolderPath: options.rootFolderPath
   });
   if (!folderPath) return null;
   const source = historySourceInfo(options);
@@ -641,12 +644,12 @@ function cachedVersionHistoryFilePath(rootFolderPath, source) {
 }
 
 function findVersionHistoryFilePath(options = {}) {
-  const rootFolderPath = existingVersionHistoryFolderPath();
-  const jsonFolderPath = versionHistoryJsonFolderPath();
+  const rootFolderPath = normalizedRegistryPath(options.rootFolderPath) || existingVersionHistoryFolderPath();
+  const jsonFolderPath = versionHistoryJsonFolderPath({ rootFolderPath });
   if (!rootFolderPath || !jsonFolderPath) return null;
 
   const source = historySourceInfo(options);
-  const expectedPath = expectedVersionHistoryFilePath(source);
+  const expectedPath = expectedVersionHistoryFilePath({ ...source, rootFolderPath });
   if (expectedPath && fs.existsSync(expectedPath)) {
     rememberVersionHistoryFilePath(rootFolderPath, source, expectedPath);
     return expectedPath;
@@ -657,7 +660,7 @@ function findVersionHistoryFilePath(options = {}) {
 
   const searchFolders = [...new Set([
     jsonFolderPath,
-    legacyVersionHistoryJsonFolderPath(),
+    legacyVersionHistoryJsonFolderPath({ rootFolderPath }),
     rootFolderPath
   ].filter(Boolean))];
   for (const folderPath of searchFolders) {
@@ -760,8 +763,9 @@ function versionHistoryDraftPageKey(draft, index) {
   return idValue ? `draft-id:${idValue}` : `draft-index:${index}`;
 }
 
-function applyVersionHistoryPayloadToState(state, payload) {
+function applyVersionHistoryPayloadToState(state, payload, options = {}) {
   if (!state || !payload || typeof payload !== "object") return false;
+  if (options.adoptStoryId !== false && asText(payload.storyId)) state.storyId = asText(payload.storyId);
 
   const storyHistory = Array.isArray(payload.story?.history)
     ? payload.story.history
@@ -1158,6 +1162,7 @@ function versionHistoryPayloadFromState(state, options = {}) {
   const source = historySourceInfo(options);
   return {
     version: 1,
+    storyId: state.storyId,
     sourceFileName: source.fileName,
     sourceFilePath: source.filePath,
     updatedAt: nowIso(),
@@ -1398,6 +1403,7 @@ function stateFromExportText(text, previousState = null, options = {}) {
 
   return normalizeState({
     version: 1,
+    storyId: previous?.storyId,
     formatDefaultVersion: FORMAT_DEFAULT_VERSION,
     defaultFormat: currentDefaultFormat(previous),
     createdAt: previous?.createdAt || storyBlock.createdAt || nowIso(),
@@ -1626,12 +1632,12 @@ function backupExistingVersionHistoryJson(rootFolderPath, source, filePath) {
 }
 
 function versionHistoryTransactionWrite(state, options = {}) {
-  const rootFolderPath = requireVersionHistoryFolderPath();
+  const rootFolderPath = normalizedRegistryPath(options.rootFolderPath) || requireVersionHistoryFolderPath();
   const folderPath = rootFolderPath ? path.join(rootFolderPath, "json") : null;
   if (!folderPath) return null;
 
   fs.mkdirSync(folderPath, { recursive: true });
-  const filePath = expectedVersionHistoryFilePath({ ...options, requireExistingRoot: true });
+  const filePath = expectedVersionHistoryFilePath({ ...options, requireExistingRoot: true, rootFolderPath });
   const source = historySourceInfo(options);
   const existingHistoryPath = findVersionHistoryFilePath(options);
   const existingPayload = existingHistoryPath && fileExists(existingHistoryPath)
@@ -1641,7 +1647,7 @@ function versionHistoryTransactionWrite(state, options = {}) {
     ? stateWithVersionHistoriesCompatibleWithPayload(state, existingPayload)
     : normalizeState(state);
   if (existingPayload && options.mergeExisting !== false) {
-    applyVersionHistoryPayloadToState(sourceState, existingPayload);
+    applyVersionHistoryPayloadToState(sourceState, existingPayload, { adoptStoryId: false });
   }
   const stateToWrite = normalizeState(sourceState);
   const nextPayload = versionHistoryPayloadFromState(stateToWrite, options);
@@ -2531,6 +2537,20 @@ function fullSummaryDraftChangeHtml(left, right, index) {
   };
 }
 
+function fullSummaryDraftBaselineHtml(draft) {
+  const anchor = "draft-change-1-baseline";
+  const title = `${draft.title} baseline`;
+  const text = escapeHtml(draft.currentText || "");
+  const body = text
+    ? `<div class="final-draft-diff-text">${text}</div>`
+    : "<p>No text in the first draft.</p>";
+  return {
+    anchor,
+    title,
+    html: `<article id="${anchor}" class="draft-change"><h3>${escapeHtml(title)}</h3><p class="meta">First draft baseline; no earlier draft to compare.</p>${body}</article>`
+  };
+}
+
 function contentsCountText(count, singular, plural = `${singular}s`) {
   return `${count.toLocaleString("en-GB")} ${count === 1 ? singular : plural}`;
 }
@@ -2567,7 +2587,7 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
   const totalReportVersions = pages.reduce((sum, page) => sum + page.reportVersions.length, 0);
   const totalSkippedVersions = totalVersions - totalReportVersions;
   const totalVersionChangeDiffs = pages.reduce((sum, page) => sum + Math.max(page.reportVersions.length - 1, 0), 0);
-  const totalChanges = Math.max(draftAnalyses.length - 1, 0);
+  const totalChanges = draftAnalyses.length;
   const totalSteps = Math.max(totalReportVersions + totalVersionChangeDiffs + totalChanges + 2, 1);
   let completed = 0;
 
@@ -2583,6 +2603,11 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
   await tick("Preparing contents");
 
   const draftChanges = [];
+  if (draftAnalyses.length) {
+    await tick(`Rendering ${draftAnalyses[0].title} baseline`);
+    draftChanges.push(fullSummaryDraftBaselineHtml(draftAnalyses[0]));
+    completed += 1;
+  }
   for (let index = 0; index < draftAnalyses.length - 1; index += 1) {
     await tick(`Comparing ${draftAnalyses[index].title} to ${draftAnalyses[index + 1].title}`);
     draftChanges.push(fullSummaryDraftChangeHtml(draftAnalyses[index], draftAnalyses[index + 1], index));
@@ -3872,13 +3897,133 @@ function writeTextFileStates(states) {
   writeAtomicText(TEXT_FILE_STATES_FILE, `${JSON.stringify(states, null, 2)}\n`);
 }
 
+function readStoryRegistry() {
+  ensureDataDir();
+  try {
+    const parsed = parseJsonFile(STORY_REGISTRY_FILE);
+    if (parsed?.version === 1 && parsed.stories && typeof parsed.stories === "object") return parsed;
+  } catch {}
+  return { version: 1, stories: {} };
+}
+
+function normalizedRegistryPath(value) {
+  const filePath = asText(value).trim();
+  return filePath ? path.resolve(filePath) : "";
+}
+
+function storyRegistryEntry(state, options = {}) {
+  const normalized = normalizeState(state);
+  const storyId = asText(normalized.storyId);
+  if (!storyId) return null;
+  const filePath = normalizedRegistryPath(options.filePath);
+  const fileName = asText(options.fileName).trim() || (filePath ? path.basename(filePath) : "draft-history.txt");
+  const backupFolderPath = normalizedRegistryPath(options.backupFolderPath);
+  return {
+    storyId,
+    filePath,
+    fileName,
+    backupFolderPath,
+    versionHistoryPath: backupFolderPath
+      ? path.join(backupFolderPath, "json", `${safeHistoryBaseName(fileName)}${VERSION_HISTORY_FILE_SUFFIX}`)
+      : "",
+    title: fileName.replace(/\.txt$/iu, ""),
+    status: "active",
+    missingSince: null,
+    retiredAt: null,
+    updatedAt: nowIso()
+  };
+}
+
+function storyRegistryTransactionWrite(state, options = {}) {
+  const entry = storyRegistryEntry(state, options);
+  if (!entry || !entry.filePath) return null;
+  const registry = readStoryRegistry();
+  Object.entries(registry.stories).forEach(([registeredId, registered]) => {
+    if (
+      registeredId !== entry.storyId
+      && registered?.filePath
+      && textFileStateKey(registered.filePath) === textFileStateKey(entry.filePath)
+    ) delete registry.stories[registeredId];
+  });
+  const previous = registry.stories[entry.storyId] || {};
+  registry.stories[entry.storyId] = {
+    ...previous,
+    ...entry,
+    firstRegisteredAt: previous.firstRegisteredAt || entry.updatedAt,
+    lastOpenedAt: options.opened ? entry.updatedAt : previous.lastOpenedAt || entry.updatedAt
+  };
+  return {
+    filePath: STORY_REGISTRY_FILE,
+    content: `${JSON.stringify(registry, null, 2)}\n`
+  };
+}
+
+function registeredStoryById(storyId) {
+  const idValue = asText(storyId);
+  return idValue ? readStoryRegistry().stories[idValue] || null : null;
+}
+
+function registeredStoriesByFileName(fileName) {
+  const normalizedName = normalizedTransferFileName(fileName);
+  if (!normalizedName) return [];
+  return Object.values(readStoryRegistry().stories)
+    .filter(entry => normalizedTransferFileName(entry?.fileName) === normalizedName);
+}
+
+function registeredStoryForManifest(manifest) {
+  if (manifest?._skipRegistryMatch) return null;
+  const storyId = asText(manifest?.storyId);
+  if (storyId) {
+    const exact = registeredStoryById(storyId);
+    if (exact) return exact;
+  }
+  if (storyId) {
+    const nameMatches = registeredStoriesByFileName(manifest?.source?.fileName);
+    return nameMatches.length === 1 ? {
+      ...nameMatches[0],
+      retiredNameMatch: nameMatches[0]?.status === "retired",
+      legacyIdentityMatch: true
+    } : null;
+  }
+  const matches = registeredStoriesByFileName(manifest?.source?.fileName)
+    .filter(entry => entry?.status !== "retired");
+  return matches.length === 1 ? { ...matches[0], legacyIdentityMatch: Boolean(storyId) } : null;
+}
+
+function updateRegisteredStoryStatus({ storyId = "", filePath = "", status }) {
+  if (!["missing", "retired"].includes(status)) throw new Error("Invalid story registry status.");
+  const registry = readStoryRegistry();
+  const targetKey = filePath ? textFileStateKey(filePath) : "";
+  const match = Object.entries(registry.stories).find(([id, entry]) => (
+    (storyId && id === storyId)
+    || (targetKey && entry?.filePath && textFileStateKey(entry.filePath) === targetKey)
+  ));
+  if (!match) return null;
+  const [id, entry] = match;
+  const changedAt = nowIso();
+  registry.stories[id] = {
+    ...entry,
+    status,
+    updatedAt: changedAt,
+    missingSince: entry.missingSince || changedAt,
+    retiredAt: status === "retired" ? changedAt : null
+  };
+  writeAtomicText(STORY_REGISTRY_FILE, `${JSON.stringify(registry, null, 2)}\n`);
+  return registry.stories[id];
+}
+
 function readTextFileState(filePath) {
   if (!filePath) return null;
-
   const entry = readTextFileStates()[textFileStateKey(filePath)];
   if (!entry?.state) return null;
 
   return applyExternalVersionHistory(entry.state, { filePath }).state;
+}
+
+function readStoredTextFileState(filePath) {
+  if (!filePath) return null;
+  const entry = readTextFileStates()[textFileStateKey(filePath)];
+  return entry?.state ? normalizeState(entry.state) : null;
 }
 
 function recentTextFiles(limit = 12) {
@@ -3916,7 +4061,15 @@ function isRecentTextFile(filePath) {
 function writeTextFileState(filePath, state, options = {}) {
   const write = textFileStateTransactionWrite(filePath, state);
   if (!write) return;
-  writeTransactionalTextFiles([write], options);
+  const writes = [write];
+  const registryWrite = storyRegistryTransactionWrite(state, {
+    filePath,
+    fileName: path.basename(filePath),
+    backupFolderPath: existingVersionHistoryFolderPath(),
+    opened: true
+  });
+  if (registryWrite) writes.push(registryWrite);
+  writeTransactionalTextFiles(writes, options);
 }
 
 function textFileStateTransactionWrite(filePath, state) {
@@ -3925,6 +4078,13 @@ function textFileStateTransactionWrite(filePath, state) {
   const resolvedPath = path.resolve(filePath);
   const normalized = normalizeState(state);
   const states = readTextFileStates();
+  Object.entries(states).forEach(([key, entry]) => {
+    if (
+      key !== textFileStateKey(resolvedPath)
+      && asText(entry?.state?.storyId)
+      && asText(entry.state.storyId) === asText(normalized.storyId)
+    ) delete states[key];
+  });
   states[textFileStateKey(resolvedPath)] = {
     filePath: resolvedPath,
     updatedAt: nowIso(),
@@ -3953,6 +4113,12 @@ function writeProjectStateOnly(state, options = {}) {
   if (linkedTextPath) {
     const cacheWrite = textFileStateTransactionWrite(linkedTextPath, normalized);
     if (cacheWrite) writes.push(cacheWrite);
+    const registryWrite = storyRegistryTransactionWrite(normalized, {
+      filePath: linkedTextPath,
+      fileName: path.basename(linkedTextPath),
+      backupFolderPath: existingVersionHistoryFolderPath()
+    });
+    if (registryWrite) writes.push(registryWrite);
   }
 
   writeTransactionalTextFiles(writes, options);
@@ -4011,6 +4177,12 @@ function writeAll(state, options = {}) {
   }
 
   const allWrites = [...coreWrites, ...linkedWrites, ...versionHistoryWrites];
+  const registryWrite = storyRegistryTransactionWrite(normalized, {
+    filePath: options.filePath || linkedTextPath || "",
+    fileName: options.fileName,
+    backupFolderPath: existingVersionHistoryFolderPath()
+  });
+  if (registryWrite) allWrites.push(registryWrite);
   try {
     writeTransactionalTextFiles(allWrites, options);
   } catch (error) {
@@ -4185,6 +4357,14 @@ function currentLinkedStoryPathForTransfer(item, manifest) {
   const linkedTextPath = readTextFileLink();
   if (!linkedTextPath || !fileSnapshot(linkedTextPath).exists) return "";
 
+  const manifestStoryId = asText(manifest?.storyId);
+  if (manifestStoryId) {
+    const linkedState = readStoredTextFileState(linkedTextPath);
+    if (asText(linkedState?.storyId) !== manifestStoryId) return "";
+  } else if (registeredStoriesByFileName(manifest?.source?.fileName).length > 1) {
+    return "";
+  }
+
   const expectedNames = transferStoryFileNames(item, manifest);
   const linkedName = normalizedTransferFileName(path.basename(linkedTextPath));
   if (expectedNames.size && !expectedNames.has(linkedName)) return "";
@@ -4194,13 +4374,16 @@ function currentLinkedStoryPathForTransfer(item, manifest) {
 
 function localSourcePathForTransferItem(item, manifest) {
   const sourcePath = item?.sourcePath ? path.resolve(item.sourcePath) : "";
+  const registeredStory = registeredStoryForManifest(manifest);
 
   if (item?.role === "storyText") {
+    if (registeredStory?.filePath) return path.resolve(registeredStory.filePath);
     if (sourcePath && fileSnapshot(sourcePath).exists) return sourcePath;
     return currentLinkedStoryPathForTransfer(item, manifest) || sourcePath;
   }
 
   if (item?.role === "backupFolder") {
+    if (registeredStory?.backupFolderPath) return path.resolve(registeredStory.backupFolderPath);
     if (sourcePath && directoryExists(sourcePath)) return sourcePath;
     return existingVersionHistoryFolderPath() || sourcePath;
   }
@@ -4340,7 +4523,10 @@ function createUsbTransferPackage(payload, destinationRootPath, options = {}) {
     : existingUsbTransferManifest(packageFolderPath)
       || latestUsbTransferManifest(destinationRoot, sourceInfo.fileName)?.manifest
       || null;
-  const previousManifest = existingManifest?.source?.fileName === sourceInfo.fileName ? existingManifest : null;
+  const previousManifest = existingManifest && (
+    (existingManifest.storyId && existingManifest.storyId === normalized.storyId)
+    || (!existingManifest.storyId && existingManifest?.source?.fileName === sourceInfo.fileName)
+  ) ? existingManifest : null;
 
   assertTransferDestinationSafe(packageFolderPath, [backupFolderPath]);
   fs.mkdirSync(packageFolderPath, { recursive: true });
@@ -4392,6 +4578,7 @@ function createUsbTransferPackage(payload, destinationRootPath, options = {}) {
   const createdAt = nowIso();
   const manifest = {
     version: 1,
+    storyId: normalized.storyId,
     createdAt,
     baselineCreatedAt: previousManifest?.baselineCreatedAt || previousManifest?.createdAt || createdAt,
     appBuild: SERVER_BUILD,
@@ -4502,7 +4689,31 @@ function reviewUsbTransferFolder(folderPath) {
     packageFolderPath,
     manifest,
     files: summarizeTransferFileEntries(entries),
-    story: compareStorySummaries(manifest.storySummary, usbStorySummary)
+    story: compareStorySummaries(manifest.storySummary, usbStorySummary),
+    targetStory: (() => {
+      const registered = registeredStoryForManifest(manifest);
+      return registered ? {
+        registered: true,
+        storyId: registered.storyId,
+        filePath: registered.filePath,
+        fileName: registered.fileName,
+        exists: fileExists(registered.filePath),
+        status: registered.status || (fileExists(registered.filePath) ? "active" : "missing"),
+        identityDecision: registered.status === "retired" ? {
+          required: true,
+          type: registered.retiredNameMatch ? "retired-name-match" : "restore-retired-id",
+          incomingStoryId: asText(manifest.storyId),
+          registeredStoryId: registered.storyId,
+          previousFilePath: registered.filePath,
+          fileName: registered.fileName
+        } : null
+      } : {
+        registered: false,
+        storyId: asText(manifest.storyId),
+        fileName: asText(manifest?.source?.fileName),
+        exists: false
+      };
+    })()
   };
   review.merge = createUsbTransferMergeReview(review);
   return review;
@@ -4651,7 +4862,9 @@ function transferPackageState(review, baselineState = null) {
 
   const fileName = review.manifest?.source?.fileName || path.basename(storyPath);
   const parsed = stateFromExportText(fs.readFileSync(storyPath, "utf8"), baselineState);
-  return stateWithVersionHistoryPayload(parsed, fileName, transferBackupPackagePath(review));
+  const withHistory = stateWithVersionHistoryPayload(parsed, fileName, transferBackupPackagePath(review));
+  if (asText(review.manifest?.storyId)) withHistory.storyId = asText(review.manifest.storyId);
+  return normalizeState(withHistory);
 }
 
 function localTransferState(review, baselineState = null) {
@@ -4659,21 +4872,24 @@ function localTransferState(review, baselineState = null) {
   const backupItem = transferBackupItem(review);
   const storyPath = storyItem ? localSourcePathForTransferItem(storyItem, review.manifest) : "";
   const fileName = storyPath ? path.basename(storyPath) : review.manifest?.source?.fileName || "draft-history.txt";
-  const currentState = readState();
   const currentSnapshot = storyPath ? fileSnapshot(storyPath) : { exists: false };
-  const storyFileChanged = storyPath && currentSnapshot.exists && fileSnapshotChanged(storyItem?.baseline, currentSnapshot);
-
   if (storyPath && !currentSnapshot.exists) return baselineState ? normalizeState(baselineState) : null;
-  if (!storyFileChanged) return currentState;
+  if (!storyPath) return null;
 
   try {
-    const parsed = stateFromExportText(fs.readFileSync(storyPath, "utf8"), currentState, {
+    const registeredStory = registeredStoryForManifest(review.manifest);
+    const storedState = readStoredTextFileState(storyPath) || baselineState;
+    const parsed = stateFromExportText(fs.readFileSync(storyPath, "utf8"), storedState, {
       changedAt: fileMtimeIso(storyPath)
     });
-    const backupPath = backupItem ? localSourcePathForTransferItem(backupItem, review.manifest) : existingVersionHistoryFolderPath();
-    return stateWithVersionHistoryPayload(parsed, fileName, backupPath || existingVersionHistoryFolderPath());
+    const backupPath = registeredStory?.backupFolderPath
+      || (backupItem ? localSourcePathForTransferItem(backupItem, review.manifest) : "")
+      || existingVersionHistoryFolderPath();
+    const withHistory = stateWithVersionHistoryPayload(parsed, fileName, backupPath);
+    if (asText(review.manifest?.storyId)) withHistory.storyId = asText(review.manifest.storyId);
+    return normalizeState(withHistory);
   } catch {
-    return currentState;
+    return readStoredTextFileState(storyPath) || baselineState || null;
   }
 }
 
@@ -4926,6 +5142,7 @@ function mergeUsbTransferStates(baselineState, localState, usbState, options = {
 
   const merged = normalizeState({
     version: 1,
+    storyId: usb?.storyId || local?.storyId || base?.storyId || source.storyId,
     formatDefaultVersion: FORMAT_DEFAULT_VERSION,
     defaultFormat: currentDefaultFormat(source),
     createdAt: source.createdAt || nowIso(),
@@ -5096,7 +5313,9 @@ function createUsbTransferMergeReview(review) {
   try {
     const storyItem = transferStoryItem(review);
     const localStoryPath = storyItem ? localSourcePathForTransferItem(storyItem, review.manifest) : "";
-    const localStoryMissing = Boolean(localStoryPath && !fileSnapshot(localStoryPath).exists);
+    const localStoryMissing = review.targetStory
+      ? !review.targetStory.exists
+      : Boolean(localStoryPath && !fileSnapshot(localStoryPath).exists);
     const local = localTransferState(review, null);
     const usb = transferPackageState(review, null);
     const entries = [];
@@ -5207,6 +5426,7 @@ function usbImportFallbackRoot(fileName) {
 function usbImportDestinationPaths(review) {
   const storyItem = transferStoryItem(review);
   const backupItem = transferBackupItem(review);
+  const registeredStory = registeredStoryForManifest(review.manifest);
   const fileName = asText(review.manifest?.source?.fileName).trim()
     || asText(storyItem?.label).trim()
     || (transferSourcePathIsNative(storyItem?.sourcePath) ? path.basename(storyItem.sourcePath) : "")
@@ -5214,12 +5434,14 @@ function usbImportDestinationPaths(review) {
   const fallbackRoot = usbImportFallbackRoot(fileName);
   const fallbackStoryPath = path.join(fallbackRoot, fileName);
   const fallbackBackupPath = path.join(fallbackRoot, "DraftDiff backup");
-  const preferredStoryPath = storyItem && transferSourcePathIsNative(storyItem.sourcePath)
-    ? localSourcePathForTransferItem(storyItem, review.manifest)
-    : currentLinkedStoryPathForTransfer(storyItem, review.manifest);
-  const preferredBackupPath = backupItem && transferSourcePathIsNative(backupItem.sourcePath)
-    ? localSourcePathForTransferItem(backupItem, review.manifest)
-    : existingVersionHistoryFolderPath() || "";
+  const preferredStoryPath = registeredStory?.filePath
+    || (storyItem && transferSourcePathIsNative(storyItem.sourcePath)
+      ? localSourcePathForTransferItem(storyItem, review.manifest)
+      : currentLinkedStoryPathForTransfer(storyItem, review.manifest));
+  const preferredBackupPath = registeredStory?.backupFolderPath
+    || (backupItem && transferSourcePathIsNative(backupItem.sourcePath)
+      ? localSourcePathForTransferItem(backupItem, review.manifest)
+      : existingVersionHistoryFolderPath() || "");
   const storyPath = canPrepareWritableFile(preferredStoryPath)
     ? preferredStoryPath
     : fallbackStoryPath;
@@ -5236,30 +5458,94 @@ function usbImportDestinationPaths(review) {
     backupFolderPath,
     usedFallback: storyPath !== preferredStoryPath || backupFolderPath !== preferredBackupPath,
     preferredStoryPath,
-    preferredBackupPath
+    preferredBackupPath,
+    storyId: asText(review.manifest?.storyId),
+    registered: Boolean(registeredStory)
   };
 }
 
-function applyUsbTransferFolder(folderPath) {
+function writeRegisteredStoryTarget(state, destination) {
+  const normalized = normalizeState(state, { touch: true });
+  const writes = [{
+    filePath: destination.storyPath,
+    content: formatExport(normalized),
+    preserveFileIdentity: true
+  }];
+  const cacheWrite = textFileStateTransactionWrite(destination.storyPath, normalized);
+  if (cacheWrite) writes.push(cacheWrite);
+
+  const historyWrite = versionHistoryTransactionWrite(normalized, {
+    filePath: destination.storyPath,
+    fileName: destination.fileName,
+    rootFolderPath: destination.backupFolderPath,
+    mergeExisting: true
+  });
+  if (historyWrite) {
+    historyWrite.preserveFileIdentity = true;
+    writes.push(historyWrite);
+  }
+
+  const registryWrite = storyRegistryTransactionWrite(normalized, {
+    filePath: destination.storyPath,
+    fileName: destination.fileName,
+    backupFolderPath: destination.backupFolderPath
+  });
+  if (registryWrite) writes.push(registryWrite);
+  writeTransactionalTextFiles(writes);
+  return normalized;
+}
+
+function applyUsbTransferFolder(folderPath, options = {}) {
   const review = reviewUsbTransferFolder(folderPath);
+  const identityDecision = review.targetStory?.identityDecision;
+  if (identityDecision?.required && !["restore", "new"].includes(options.identityResolution)) {
+    throw new Error("This import requires a restore-or-new-story decision.");
+  }
+  if (identityDecision && options.identityResolution === "new") {
+    review.manifest = {
+      ...review.manifest,
+      storyId: StateCore.defaultState().storyId,
+      _skipRegistryMatch: true
+    };
+    review.targetStory = {
+      registered: false,
+      storyId: review.manifest.storyId,
+      fileName: asText(review.manifest?.source?.fileName),
+      exists: false
+    };
+    review.merge = createUsbTransferMergeReview(review);
+  }
   validateTransferPackageItems(review.manifest, review.packageFolderPath);
   const backup = createUsbTransferImportBackup(review);
 
   const { state: mergedState, summary: mergeSummary } = mergeUsbTransferPackage(review);
+  if (identityDecision && options.identityResolution === "restore") {
+    mergedState.storyId = identityDecision.registeredStoryId;
+  }
   const destination = usbImportDestinationPaths(review);
   const storyPath = destination.storyPath;
   const importedBackupFolderPath = destination.backupFolderPath;
-  if (storyPath) writeTextFileLink(storyPath);
-  if (importedBackupFolderPath) writeVersionHistoryFolderPath(importedBackupFolderPath);
-
   const fileName = destination.fileName;
-  const savedState = writeAll(mergedState, {
-    filePath: storyPath,
-    fileName,
-    allowLinkedTextFileFailure: true,
-    allowCreateLinkedTextFile: true,
-    preserveExternalFileIdentity: true
-  });
+  const currentLinkedPath = readTextFileLink();
+  const backgroundImport = Boolean(
+    destination.registered
+    && currentLinkedPath
+    && textFileStateKey(currentLinkedPath) !== textFileStateKey(storyPath)
+  );
+  let savedState;
+  if (backgroundImport) {
+    savedState = writeRegisteredStoryTarget(mergedState, destination);
+  } else {
+    if (storyPath) writeTextFileLink(storyPath);
+    if (importedBackupFolderPath) writeVersionHistoryFolderPath(importedBackupFolderPath);
+    savedState = writeAll(mergedState, {
+      filePath: storyPath,
+      fileName,
+      allowLinkedTextFileFailure: true,
+      allowCreateLinkedTextFile: true,
+      preserveExternalFileIdentity: true
+    });
+  }
   return {
     ok: true,
     imported: true,
@@ -5269,6 +5555,7 @@ function applyUsbTransferFolder(folderPath) {
     filePath: storyPath,
     fileName,
     importDestination: destination,
+    backgroundImport,
     text: formatExport(savedState),
     ...statePathPayload({ filePath: storyPath, fileName })
   };
@@ -5298,7 +5585,9 @@ function importUsbTransferFromRequestBody(body) {
   if (!folderPath) {
     throw new Error("Missing USB transfer package folder.");
   }
-  return applyUsbTransferFolder(folderPath);
+  return applyUsbTransferFolder(folderPath, {
+    identityResolution: asText(payload.identityResolution)
+  });
 }
 
 function projectRecoveryNotice(error, backupPath) {
@@ -6666,6 +6955,19 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/story-registry/status") {
+    markClientActive();
+    const body = await readBody(req);
+    const payload = body ? JSON.parse(body) : {};
+    const story = updateRegisteredStoryStatus({
+      storyId: asText(payload.storyId),
+      filePath: asText(payload.filePath),
+      status: asText(payload.status)
+    });
+    sendJson(res, 200, { ok: true, story });
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/open-file-location") {
     const body = await readBody(req);
     const payload = body ? JSON.parse(body) : {};
@@ -6889,6 +7191,7 @@ module.exports = {
     createUsbTransferPackage,
     reviewUsbTransferFolder,
     applyUsbTransferFolder,
+    updateRegisteredStoryStatus,
     storySummaryFromTransferFiles
   }
 };
