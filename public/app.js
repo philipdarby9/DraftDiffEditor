@@ -52,6 +52,7 @@ const els = {
   compareMode: document.querySelector("#compare-mode"),
   pagesOnScreen: document.querySelector("#pages-on-screen"),
   compareSubtitle: document.querySelector("#compare-subtitle"),
+  historyVersionFilter: document.querySelector("#history-version-filter"),
   diffOutput: document.querySelector("#diff-output"),
   editorSurface: document.querySelector("#editor-surface"),
   changesPanel: document.querySelector("#changes-panel"),
@@ -117,6 +118,9 @@ const DIFF_PROGRESS_FRAME_DELAY_MS = 0;
 const DIFF_BLOCK_CACHE_LIMIT = 160;
 const DIFF_RESULT_CACHE_LIMIT = 80;
 const DIFF_RESULT_MAX_CACHE_PARTS = 20000;
+const HISTORY_VIRTUAL_MIN_PAGES = 12;
+const HISTORY_VIRTUAL_MAX_PAGES = 20;
+const HISTORY_VIRTUAL_CACHE_LIMIT = 32;
 const LINKED_TEXT_BLOCKED_STATUS = "Project saved locally";
 
 let state = null;
@@ -148,6 +152,8 @@ let summaryProgressTimer = null;
 let latestSummaryReportPath = "";
 let latestTransferReview = null;
 let transferTimelineZoomPages = [];
+let selectionMenuZoomPages = new Map();
+let pagePreviewZoomReturnFocus = null;
 let transferExpandedTimelines = new Set();
 let suppressLinkedTextBlockedStatusUntil = 0;
 let viewStateSaveTimer = null;
@@ -186,6 +192,15 @@ const diffBlockCache = new Map();
 const diffResultCache = new Map();
 const diffMeaningfulTermsCache = new WeakMap();
 let versionHistoryDraftId = null;
+let historyVersionFilterOpen = null;
+let historyVersionExclusions = new Map();
+let historyVersionExpandedGroups = new Set();
+let draftTabFilterOpen = null;
+let draftTabExpandedGroups = new Set();
+let historyVirtualState = null;
+let historyVirtualScrollFrame = null;
+let historyVirtualScrollSuppressed = false;
+let historyVirtualRevision = 0;
 let searchRefreshTimer = null;
 let spellcheckMenu = null;
 let spellcheckRange = null;
@@ -1410,6 +1425,627 @@ function normalizedVersionHistoryPageKey(value = versionHistoryDraftId) {
 
 function activeVersionHistoryPageKey() {
   return normalizedVersionHistoryPageKey(versionHistoryDraftId);
+}
+
+function versionHistoryForPageKey(pageKey = activeVersionHistoryPageKey()) {
+  if (!state || !pageKey) return [];
+  if (pageKey === STORY_KEY) return ensureProjectNotesVersionHistory();
+
+  const parsed = parseDraftPageKey(pageKey);
+  const draft = draftById(parsed?.draftId);
+  if (!draft) return [];
+  if (parsed.type === "notes") {
+    const notesTitle = draft.notes?.title || `${draft.title || "Untitled draft"} Notes`;
+    return ensurePageVersionHistory(draft.notes, notesTitle);
+  }
+  return ensureDraftVersionHistory(draft);
+}
+
+function historyVersionId(version, index) {
+  return String(version?.id || `version-${index + 1}`);
+}
+
+function normalizedHistoryVersionExclusions(pageKey, versions = versionHistoryForPageKey(pageKey)) {
+  if (!pageKey) return new Set();
+  const validIds = new Set(versions.map(historyVersionId));
+  const current = historyVersionExclusions.get(pageKey) || new Set();
+  const normalized = new Set([...current].filter(id => validIds.has(id)));
+  historyVersionExclusions.set(pageKey, normalized);
+  return normalized;
+}
+
+function includedHistoryVersionEntries(versions, pageKey = activeVersionHistoryPageKey()) {
+  const exclusions = normalizedHistoryVersionExclusions(pageKey, versions);
+  return versions
+    .map((version, index) => ({ version, index, id: historyVersionId(version, index) }))
+    .filter(entry => !exclusions.has(entry.id));
+}
+
+function historyVersionLabel(pageKey, version, index) {
+  if (pageKey === STORY_KEY) return projectNotesVersionPage(version, index).title;
+  const parsed = parseDraftPageKey(pageKey);
+  const draft = draftById(parsed?.draftId);
+  if (!draft) return `Version ${index + 1}`;
+  return parsed.type === "notes"
+    ? draftNotesVersionPage(draft, version, index).title
+    : draftVersionPage(draft, version, index).title;
+}
+
+function selectionDateRange(firstIso, lastIso) {
+  if (!firstIso && !lastIso) return null;
+  const start = String(firstIso || lastIso || "");
+  const end = String(lastIso || firstIso || "");
+  return {
+    start,
+    end,
+    text: start === end
+      ? formatDate(start)
+      : `${formatDate(start)} – ${formatDate(end)}`
+  };
+}
+
+function selectionDateRangeHtml(range, className) {
+  if (!range?.text) return "";
+  return `
+    <time
+      class="${className}"
+      data-selection-date-start="${escapeHtml(range.start)}"
+      data-selection-date-end="${escapeHtml(range.end)}"
+    >${escapeHtml(range.text)}</time>
+  `;
+}
+
+function historyVersionPage(pageKey, version, index) {
+  if (pageKey === STORY_KEY) return projectNotesVersionPage(version, index);
+  const parsed = parseDraftPageKey(pageKey);
+  const draft = draftById(parsed?.draftId);
+  if (!draft) {
+    return {
+      id: historyVersionId(version, index),
+      title: `Version ${index + 1}`,
+      createdAt: version?.createdAt,
+      content: version?.content || "",
+      contentHtml: version?.contentHtml || textToHtml(version?.content || ""),
+      format: normalizeFormat(version?.format)
+    };
+  }
+  return parsed.type === "notes"
+    ? draftNotesVersionPage(draft, version, index)
+    : draftVersionPage(draft, version, index);
+}
+
+function selectionPageText(page) {
+  return page?.content || plainTextFromHtml(page?.contentHtml || "");
+}
+
+function selectionComparisonTextHtml(beforeText, afterText) {
+  const parts = transferTimelineDiffParts(beforeText, afterText);
+  if (!parts.length) return '<div class="compare-text empty-line">No text yet.</div>';
+  return `<div class="compare-text">${parts.map(part => {
+    const className = part.type === "same" ? "compare-token" : `compare-token ${part.type}`;
+    return `<span class="${className}">${escapeHtml(part.text || "")}</span>`;
+  }).join("")}</div>`;
+}
+
+function selectionComparisonHtml(beforePage, afterPage, maxLength = 900) {
+  if (!afterPage) return '<div class="compare-text empty-line">No text yet.</div>';
+  const afterText = selectionPageText(afterPage);
+  const beforeText = selectionPageText(beforePage);
+  if (!Number.isFinite(maxLength)) {
+    return selectionComparisonTextHtml(beforeText, afterText);
+  }
+  if (!beforePage) {
+    return selectionComparisonTextHtml("", afterText.slice(0, maxLength));
+  }
+
+  let firstDifference = 0;
+  const sharedLength = Math.min(beforeText.length, afterText.length);
+  while (
+    firstDifference < sharedLength &&
+    beforeText[firstDifference] === afterText[firstDifference]
+  ) {
+    firstDifference += 1;
+  }
+  if (firstDifference === beforeText.length && firstDifference === afterText.length) {
+    return selectionComparisonTextHtml(
+      beforeText.slice(0, maxLength),
+      afterText.slice(0, maxLength)
+    );
+  }
+  const start = Math.max(0, firstDifference - Math.round(maxLength * 0.18));
+  return selectionComparisonTextHtml(
+    beforeText.slice(start, start + maxLength),
+    afterText.slice(start, start + maxLength)
+  );
+}
+
+function selectionMenuLeafHtml(options = {}) {
+  const classes = [
+    "selection-menu-leaf",
+    options.checked ? "" : "is-excluded",
+    options.className || ""
+  ].filter(Boolean).join(" ");
+  const checked = options.checked ? " checked" : "";
+  const disabled = options.disabled ? " disabled" : "";
+  const preview = options.preview || options.label || "";
+  const previewHtml = options.previewHtml || escapeHtml(preview);
+  const meta = options.meta || "";
+  const zoomButton = options.zoomKey
+    ? `
+      <button
+        class="selection-menu-zoom"
+        type="button"
+        data-selection-menu-zoom="${escapeHtml(options.zoomKey)}"
+        aria-label="Enlarge ${escapeHtml(options.label || "page preview")}"
+      >Zoom</button>
+    `
+    : "";
+  return `
+    <div class="${classes}" ${options.outerAttributes || ""}>
+      ${zoomButton}
+      <input
+        class="selection-menu-checkbox"
+        type="checkbox"
+        aria-label="${escapeHtml(options.inputAriaLabel || options.label || "")}"
+        ${options.inputAttributes || ""}
+        ${checked}${disabled}
+      >
+      <button
+        class="selection-menu-miniature"
+        type="button"
+        aria-label="${escapeHtml(options.buttonAriaLabel || options.label || "")}"
+        ${options.buttonAttributes || ""}
+      >
+        <div class="selection-menu-preview-content">${previewHtml}</div>
+        <i aria-hidden="true">×</i>
+      </button>
+      <span class="selection-menu-leaf-label">${escapeHtml(options.label || "")}</span>
+      <time>${escapeHtml(meta)}</time>
+      ${options.trailingHtml || ""}
+    </div>
+  `;
+}
+
+function selectionMenuRangeHtml(options = {}) {
+  const classes = [
+    "selection-menu-range",
+    options.className || "",
+    options.partial ? "is-partial" : ""
+  ].filter(Boolean).join(" ");
+  const checked = options.checked ? " checked" : "";
+  const disabled = options.disabled ? " disabled" : "";
+  const dateRange = selectionDateRangeHtml(options.dateRange, "selection-menu-range-dates");
+  return `
+    <details
+      class="${classes}"
+      ${options.keyAttribute || ""}="${escapeHtml(options.key || "")}"
+      ${options.open ? "open" : ""}
+    >
+      <summary class="selection-menu-range-summary">
+        <input
+          class="selection-menu-checkbox"
+          type="checkbox"
+          aria-label="${escapeHtml(options.checkboxAriaLabel || options.label || "")}"
+          ${options.checkboxAttributes || ""}
+          ${checked}${disabled}
+        >
+        <span class="selection-menu-pile" aria-hidden="true"><i></i><i></i><i></i></span>
+        <span class="selection-menu-range-title">
+          <span class="selection-menu-range-label">${escapeHtml(options.label || "")}</span>
+          ${dateRange}
+        </span>
+        <span class="selection-menu-range-count" ${options.countAttributes || ""}>${escapeHtml(options.count || "")}</span>
+        <span class="selection-menu-range-chevron" aria-hidden="true"></span>
+      </summary>
+      <div class="selection-menu-range-contents">
+        ${options.contents || ""}
+      </div>
+    </details>
+  `;
+}
+
+function selectionMenuPopoverHtml(options = {}) {
+  const dateRange = selectionDateRangeHtml(options.dateRange, "selection-menu-header-dates");
+  return `
+    <section
+      class="selection-menu-popover ${options.className || ""}"
+      aria-label="${escapeHtml(options.ariaLabel || "")}"
+      data-selection-menu-key="${escapeHtml(options.menuKey || "")}"
+    >
+      <header class="selection-menu-header">
+        <div>
+          <strong>${escapeHtml(options.title || "")}</strong>
+          <span>${escapeHtml(options.description || "")}</span>
+          ${dateRange}
+        </div>
+        <span>${escapeHtml(options.count || "")}</span>
+      </header>
+      <div class="selection-menu-choices ${options.choicesClass || ""}" tabindex="0" aria-label="${escapeHtml(options.choicesAriaLabel || "")}">
+        ${options.choices || '<p class="selection-menu-empty">No items.</p>'}
+      </div>
+      <footer class="selection-menu-footer">${escapeHtml(options.footer || "")}</footer>
+    </section>
+  `;
+}
+
+function selectionMenuScrollSnapshot(container, menuKey) {
+  if (!container || !menuKey) return null;
+  const menu = container.querySelector(":scope > .selection-menu-popover");
+  const choices = menu?.querySelector(":scope > .selection-menu-choices");
+  if (!choices || menu.dataset.selectionMenuKey !== menuKey) return null;
+  return {
+    menuKey,
+    scrollTop: choices.scrollTop,
+    scrollLeft: choices.scrollLeft
+  };
+}
+
+function restoreSelectionMenuScroll(container, snapshot) {
+  if (!container || !snapshot) return;
+  const menu = container.querySelector(":scope > .selection-menu-popover");
+  const choices = menu?.querySelector(":scope > .selection-menu-choices");
+  if (!choices || menu.dataset.selectionMenuKey !== snapshot.menuKey) return;
+  choices.scrollTop = Math.min(
+    snapshot.scrollTop,
+    Math.max(0, choices.scrollHeight - choices.clientHeight)
+  );
+  choices.scrollLeft = Math.min(
+    snapshot.scrollLeft,
+    Math.max(0, choices.scrollWidth - choices.clientWidth)
+  );
+}
+
+function handleSelectionMenuWheel(container, event) {
+  const choices = container?.querySelector(".selection-menu-choices");
+  if (
+    !choices ||
+    event.ctrlKey ||
+    event.shiftKey ||
+    Math.abs(event.deltaX) > Math.abs(event.deltaY) ||
+    choices.scrollHeight <= choices.clientHeight
+  ) {
+    return;
+  }
+
+  const deltaScale = event.deltaMode === WheelEvent.DOM_DELTA_LINE
+    ? 28
+    : (event.deltaMode === WheelEvent.DOM_DELTA_PAGE ? choices.clientHeight : 1);
+  choices.scrollTop += event.deltaY * deltaScale;
+  event.preventDefault();
+  event.stopPropagation();
+}
+
+function historyVersionLeafHtml(pageKey, entry, availableEntries = null) {
+  const label = historyVersionLabel(pageKey, entry.version, entry.index);
+  const recorded = formatVersionDate(entry.version?.createdAt);
+  const preview = entry.version?.content || plainTextFromHtml(entry.version?.contentHtml || "") || "Blank version";
+  const versions = versionHistoryForPageKey(pageKey);
+  const exclusions = historyVersionExclusions.get(pageKey) || new Set();
+  let previousIndex = entry.index - 1;
+  while (
+    previousIndex >= 0 &&
+    exclusions.has(historyVersionId(
+      versions[previousIndex] || availableEntries?.find(item => item.index === previousIndex)?.version,
+      previousIndex
+    ))
+  ) {
+    previousIndex -= 1;
+  }
+  const page = historyVersionPage(pageKey, entry.version, entry.index);
+  const previousVersion = versions[previousIndex]
+    || availableEntries?.find(item => item.index === previousIndex)?.version;
+  const previousPage = previousIndex >= 0 && previousVersion
+    ? historyVersionPage(pageKey, previousVersion, previousIndex)
+    : null;
+  const previewHtml = selectionComparisonHtml(previousPage, page);
+  const zoomKey = `version:${pageKey}:${entry.id}`;
+  selectionMenuZoomPages.set(zoomKey, {
+    title: label,
+    meta: recorded,
+    beforeText: selectionPageText(previousPage),
+    afterText: selectionPageText(page)
+  });
+  const checked = !exclusions.has(entry.id);
+  return selectionMenuLeafHtml({
+    className: `history-version-menu-item${checked ? "" : " is-excluded"}`,
+    label,
+    shortLabel: String(entry.index + 1),
+    preview,
+    previewHtml,
+    meta: recorded,
+    zoomKey,
+    checked,
+    inputAriaLabel: `Include ${label}`,
+    inputAttributes: `data-history-version-index="${entry.index}"`,
+    buttonAriaLabel: `Go to ${label}`,
+    buttonAttributes: `data-history-version-focus-index="${entry.index}"`,
+    outerAttributes: `title="${escapeHtml(`${label} · ${recorded}`)}"`
+  });
+}
+
+function largestSelectionGroupSize(count) {
+  let size = 10;
+  while (count >= size * 10) size *= 10;
+  return size;
+}
+
+function largestHistoryVersionGroupSize(count) {
+  return largestSelectionGroupSize(count);
+}
+
+function selectionRangeLabel(start, end) {
+  return end === start + 1 ? String(end) : `${start + 1}–${end}`;
+}
+
+function historyVersionGroupHtml(pageKey, entries, groupSize, start = 0, end = entries.length) {
+  const groups = [];
+  const exclusions = historyVersionExclusions.get(pageKey) || new Set();
+  for (let groupStart = start; groupStart < end; groupStart += groupSize) {
+    const groupEnd = Math.min(end, groupStart + groupSize);
+    const groupKey = `${pageKey}:${groupStart}:${groupEnd}`;
+    const isOpen = historyVersionExpandedGroups.has(groupKey);
+    const groupEntries = entries.slice(groupStart, groupEnd);
+    const included = groupEntries.filter(entry => !exclusions.has(entry.id)).length;
+    const inner = isOpen
+      ? (groupSize <= 10
+        ? groupEntries.map(entry => historyVersionLeafHtml(pageKey, entry, entries)).join("")
+        : historyVersionGroupHtml(pageKey, entries, Math.max(10, groupSize / 10), groupStart, groupEnd))
+      : "";
+    groups.push(selectionMenuRangeHtml({
+      className: "history-version-group",
+      keyAttribute: "data-history-version-group-key",
+      key: groupKey,
+      open: isOpen,
+      partial: included > 0 && included < groupEntries.length,
+      checked: Boolean(groupEntries.length) && included === groupEntries.length,
+      checkboxAriaLabel: `Include versions ${groupStart + 1} to ${groupEnd}`,
+      checkboxAttributes: `data-history-version-group-start="${groupStart}" data-history-version-group-end="${groupEnd}"`,
+      label: `Versions ${selectionRangeLabel(groupStart, groupEnd)}`,
+      count: `${included} of ${groupEntries.length}`,
+      countAttributes: "data-history-version-group-count",
+      dateRange: selectionDateRange(
+        groupEntries[0]?.version?.createdAt,
+        groupEntries[groupEntries.length - 1]?.version?.createdAt
+      ),
+      contents: inner
+    }));
+  }
+  return groups.join("");
+}
+
+function historyVersionTopGroups(pageKey, entries) {
+  const groupSize = largestHistoryVersionGroupSize(entries.length);
+  const groups = [];
+  for (let start = 0; start < entries.length; start += groupSize) {
+    const end = Math.min(entries.length, start + groupSize);
+    groups.push({
+      key: `${pageKey}:top:${start}:${end}`,
+      start,
+      end,
+      groupSize
+    });
+  }
+  return groups;
+}
+
+function historyVersionIndividualTabHtml(entry) {
+  return `
+    <div class="page-tab history-version-item-tab">
+      <input
+        type="checkbox"
+        data-history-version-index="${entry.index}"
+        aria-label="Include version ${entry.index + 1}"
+      >
+      <button
+        class="tab-label"
+        type="button"
+        data-history-version-focus-index="${entry.index}"
+        aria-label="Go to version ${entry.index + 1}"
+      >
+        <span>${entry.index + 1}</span>
+      </button>
+    </div>
+  `;
+}
+
+function historyVersionGroupTabHtml(group) {
+  const isOpen = historyVersionFilterOpen === group.key;
+  const label = selectionRangeLabel(group.start, group.end);
+  return `
+    <div class="selection-menu-trigger-shell history-version-group-tab-shell">
+      <div class="page-tab selection-menu-trigger history-version-range-tab${isOpen ? " active" : ""}">
+        <input
+          type="checkbox"
+          data-history-version-group-start="${group.start}"
+          data-history-version-group-end="${group.end}"
+          aria-label="Include versions ${group.start + 1} to ${group.end}"
+        >
+        <button
+          class="tab-label selection-menu-trigger-toggle history-version-range-toggle"
+          type="button"
+          data-history-version-filter-toggle="${escapeHtml(group.key)}"
+          data-history-version-filter-start="${group.start}"
+          data-history-version-filter-end="${group.end}"
+          aria-haspopup="true"
+          aria-expanded="${String(isOpen)}"
+          aria-label="Choose versions ${group.start + 1} to ${group.end}"
+        >
+          <span>${label}</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function historyVersionOpenGroupMenuHtml(pageKey, entries, groups, included, total) {
+  const group = groups.find(item => item.key === historyVersionFilterOpen);
+  if (!group) return "";
+
+  const choices = group.groupSize >= 100
+    ? historyVersionGroupHtml(
+      pageKey,
+      entries,
+      Math.max(10, group.groupSize / 10),
+      group.start,
+      group.end
+    )
+    : entries.slice(group.start, group.end).map(entry => historyVersionLeafHtml(pageKey, entry, entries)).join("");
+  const exclusions = historyVersionExclusions.get(pageKey) || new Set();
+  const groupIncluded = entries
+    .slice(group.start, group.end)
+    .filter(entry => !exclusions.has(entry.id))
+    .length;
+
+  return selectionMenuPopoverHtml({
+    className: "history-version-menu",
+    menuKey: group.key,
+    ariaLabel: `Choose versions ${group.start + 1} to ${group.end}`,
+    title: `Versions ${selectionRangeLabel(group.start, group.end)}`,
+    description: "Choose the versions you want included.",
+    count: `${groupIncluded.toLocaleString("en-GB")} of ${(group.end - group.start).toLocaleString("en-GB")}`,
+    dateRange: selectionDateRange(
+      entries[group.start]?.version?.createdAt,
+      entries[group.end - 1]?.version?.createdAt
+    ),
+    choicesClass: "history-version-choices",
+    choicesAriaLabel: "Version groups",
+    choices,
+    footer: `${included.toLocaleString("en-GB")} of ${total.toLocaleString("en-GB")} versions included`
+  });
+}
+
+function updateAllVersionsLabelDensity() {
+  const panel = els.historyVersionFilter?.querySelector(".history-version-tabs-panel");
+  if (!panel || els.historyVersionFilter.hidden) return;
+
+  panel.classList.remove("compact-all-versions");
+  const allVersions = panel.querySelector(".all-versions-tab");
+  const versionTabs = panel.querySelector(".history-version-tabs");
+  const total = panel.querySelector(".history-version-total");
+  const requiredWidth =
+    (allVersions?.offsetWidth || 0) +
+    (versionTabs?.scrollWidth || 0) +
+    (total?.offsetWidth || 0) +
+    34;
+  panel.classList.toggle("compact-all-versions", requiredWidth > panel.clientWidth);
+}
+
+function syncHistoryVersionGroupControls(pageKey, versions) {
+  if (!els.historyVersionFilter) return;
+  const exclusions = normalizedHistoryVersionExclusions(pageKey, versions);
+  const allControl = els.historyVersionFilter.querySelector("[data-history-version-all]");
+  if (allControl) {
+    const included = versions.length - exclusions.size;
+    allControl.checked = Boolean(versions.length) && included === versions.length;
+    allControl.indeterminate = included > 0 && included < versions.length;
+  }
+  els.historyVersionFilter
+    .querySelectorAll("[data-history-version-index]")
+    .forEach(control => {
+      const index = Number(control.dataset.historyVersionIndex);
+      control.checked = Number.isInteger(index) && !exclusions.has(historyVersionId(versions[index], index));
+    });
+  els.historyVersionFilter
+    .querySelectorAll("[data-history-version-group-start][data-history-version-group-end]")
+    .forEach(control => {
+      const start = Math.max(0, Number(control.dataset.historyVersionGroupStart) || 0);
+      const end = Math.min(versions.length, Number(control.dataset.historyVersionGroupEnd) || 0);
+      const entries = versions.slice(start, end);
+      const included = entries.filter((version, offset) => (
+        !exclusions.has(historyVersionId(version, start + offset))
+      )).length;
+      control.checked = Boolean(entries.length) && included === entries.length;
+      control.indeterminate = included > 0 && included < entries.length;
+      const count = control.closest("summary")?.querySelector("[data-history-version-group-count]");
+      if (count) count.textContent = `${included.toLocaleString("en-GB")} of ${entries.length.toLocaleString("en-GB")}`;
+    });
+}
+
+function renderHistoryVersionFilter() {
+  if (!els.historyVersionFilter) return;
+  const menuScroll = selectionMenuScrollSnapshot(
+    els.historyVersionFilter,
+    historyVersionFilterOpen
+  );
+  const pageKey = activeVersionHistoryPageKey();
+  if (!pageKey) {
+    els.historyVersionFilter.hidden = true;
+    els.historyVersionFilter.innerHTML = "";
+    return;
+  }
+
+  const versions = versionHistoryForPageKey(pageKey);
+  const exclusions = normalizedHistoryVersionExclusions(pageKey, versions);
+  const included = versions.length - exclusions.size;
+  const entries = versions.map((version, index) => ({
+    version,
+    index,
+    id: historyVersionId(version, index)
+  }));
+  const groups = versions.length > 10 ? historyVersionTopGroups(pageKey, entries) : [];
+  if (historyVersionFilterOpen && !groups.some(group => group.key === historyVersionFilterOpen)) {
+    historyVersionFilterOpen = null;
+  }
+  const tabs = groups.length
+    ? groups.map(historyVersionGroupTabHtml).join("")
+    : entries.map(historyVersionIndividualTabHtml).join("");
+
+  els.historyVersionFilter.hidden = false;
+  els.historyVersionFilter.innerHTML = `
+    <div class="history-version-tabs-panel" aria-label="Versions to include">
+      <div class="page-tab all-versions-tab">
+        <input
+          type="checkbox"
+          data-history-version-all
+          aria-label="Include all versions"
+        >
+        <button class="tab-label" type="button" data-history-version-all-label aria-label="All versions">
+          <span class="all-versions-label-full">All versions</span>
+          <span class="all-versions-label-short" aria-hidden="true">AV</span>
+        </button>
+      </div>
+      <div class="history-version-tabs">${tabs}</div>
+      <span class="history-version-total">${included.toLocaleString("en-GB")} of ${versions.length.toLocaleString("en-GB")}</span>
+    </div>
+    ${historyVersionOpenGroupMenuHtml(pageKey, entries, groups, included, versions.length)}
+  `;
+  syncHistoryVersionGroupControls(pageKey, versions);
+  restoreSelectionMenuScroll(els.historyVersionFilter, menuScroll);
+  window.requestAnimationFrame(() => (
+    restoreSelectionMenuScroll(els.historyVersionFilter, menuScroll)
+  ));
+  window.requestAnimationFrame(updateAllVersionsLabelDensity);
+}
+
+function setHistoryVersionRangeIncluded(start, end, included) {
+  const pageKey = activeVersionHistoryPageKey();
+  const versions = versionHistoryForPageKey(pageKey);
+  const exclusions = normalizedHistoryVersionExclusions(pageKey, versions);
+  versions.slice(start, end).forEach((version, offset) => {
+    const id = historyVersionId(version, start + offset);
+    if (included) exclusions.delete(id);
+    else exclusions.add(id);
+  });
+  historyVersionExclusions.set(pageKey, exclusions);
+}
+
+function updateHistoryVersionSelection() {
+  renderHistoryVersionFilter();
+  renderDiffSoon("Updating version history");
+}
+
+function toggleHistoryVersionFilter(groupKey = null, open = null) {
+  if (!activeVersionHistoryPageKey()) return;
+  if (draftTabFilterOpen) {
+    draftTabFilterOpen = null;
+    renderDraftTabs();
+  }
+  if (groupKey === false || open === false) {
+    historyVersionFilterOpen = null;
+  } else if (typeof groupKey === "string" && groupKey) {
+    historyVersionFilterOpen = historyVersionFilterOpen === groupKey ? null : groupKey;
+  }
+  renderHistoryVersionFilter();
 }
 
 function reconcileViewAfterHistoryRestore() {
@@ -2713,6 +3349,16 @@ function displayAllDrafts(shouldDisplay = true) {
   ensureDisplaySelection();
 }
 
+function displayDraftRange(start, end, shouldDisplay = true) {
+  hasStoredDisplaySelection = true;
+  state.drafts.slice(start, end).forEach(draft => {
+    const key = draftContentKey(draft.id);
+    if (shouldDisplay) displayedPageKeys.add(key);
+    else displayedPageKeys.delete(key);
+  });
+  ensureDisplaySelection();
+}
+
 function activeDisplayKey() {
   if (activeArea === "story") return STORY_KEY;
   return selectedDraftId ? draftContentKey(selectedDraftId) : STORY_KEY;
@@ -3173,6 +3819,8 @@ function pageSearchLabel(item) {
 }
 
 function allSearchPageKeys() {
+  const historyKey = activeVersionHistoryPageKey();
+  if (historyKey) return [historyKey];
   return state ? allPageItems().map(item => item.key) : [];
 }
 
@@ -3195,6 +3843,7 @@ function isAllSearchScopeSelected() {
 }
 
 function searchScopeLabelText() {
+  if (activeVersionHistoryPageKey()) return "This history";
   const allKeys = allSearchPageKeys();
   const selectedKeys = [...searchState.selectedKeys];
   if (!selectedKeys.length) return "No pages";
@@ -3206,6 +3855,19 @@ function searchScopeLabelText() {
 function populateSearchScopeOptions() {
   if (!els.searchScopeMenu || !state) return;
   normalizeSearchScopeSelection();
+  const historyKey = activeVersionHistoryPageKey();
+  if (historyKey) {
+    searchState.selectedKeys = new Set([historyKey]);
+    els.searchScopeMenu.hidden = true;
+    els.searchScopeMenu.innerHTML = "";
+    if (els.searchScopeToggle) {
+      els.searchScopeToggle.disabled = true;
+      els.searchScopeToggle.setAttribute("aria-expanded", "false");
+    }
+    if (els.searchScopeLabel) els.searchScopeLabel.textContent = "This history";
+    return;
+  }
+  if (els.searchScopeToggle) els.searchScopeToggle.disabled = false;
 
   const pageOptions = allPageItems().map(item => `
     <label class="search-scope-option">
@@ -3262,6 +3924,7 @@ function makePageVisibleForSearch(pageKey) {
 
 function ensureSearchScopeVisible() {
   if (!state || !searchState.open || !searchState.query) return false;
+  if (activeVersionHistoryPageKey()) return false;
 
   let shouldRender = false;
   if (showChanges) {
@@ -3336,18 +3999,165 @@ function searchMatchesForEditor(editorEl, query) {
 
   while (index >= 0) {
     const range = rangeFromTextSegments(segments, index, index + needle.length);
-    if (range) matches.push({ range });
+    if (range) {
+      const startElement = range.startContainer.nodeType === Node.ELEMENT_NODE
+        ? range.startContainer
+        : range.startContainer.parentElement;
+      matches.push({
+        range,
+        versionPageId: startElement?.closest?.("[data-compare-page-id]")?.dataset.comparePageId || ""
+      });
+    }
     index = normalizedHaystack.indexOf(normalizedNeedle, index + Math.max(1, normalizedNeedle.length));
   }
 
   return matches;
 }
 
+function historySearchText(version) {
+  return String(
+    version?.content ||
+    plainTextFromHtml(version?.contentHtml || "")
+  );
+}
+
+function historySearchMatches(query) {
+  const virtualState = historyVirtualState;
+  const needle = String(query || "");
+  if (!virtualState || !needle) return [];
+
+  const normalizedNeedle = needle.toLocaleLowerCase();
+  const matches = [];
+  virtualState.entries.forEach((entry, historyPosition) => {
+    const haystack = historySearchText(entry.version);
+    const normalizedHaystack = haystack.toLocaleLowerCase();
+    let sourceOffset = normalizedHaystack.indexOf(normalizedNeedle);
+    let occurrence = 0;
+
+    while (sourceOffset >= 0) {
+      matches.push({
+        historyPosition,
+        occurrence,
+        sourceOffset,
+        versionPageId: entry.id,
+        range: null
+      });
+      occurrence += 1;
+      sourceOffset = normalizedHaystack.indexOf(
+        normalizedNeedle,
+        sourceOffset + Math.max(1, normalizedNeedle.length)
+      );
+    }
+  });
+  return matches;
+}
+
+function visibleHistorySearchRanges() {
+  const historyKey = activeVersionHistoryPageKey();
+  const matches = historyKey ? (searchState.results.get(historyKey) || []) : [];
+  const query = searchState.query;
+  const activeIndex = Number(searchState.activeIndexes[historyKey]) || 0;
+  const domMatchesByPosition = new Map();
+  const matchRanges = [];
+  const activeRanges = [];
+
+  matches.forEach((match, index) => {
+    match.range = null;
+    const page = els.diffOutput.querySelector(
+      `[data-history-position="${match.historyPosition}"]`
+    );
+    const body = page?.querySelector(".compare-page-body");
+    if (!body) return;
+
+    if (!domMatchesByPosition.has(match.historyPosition)) {
+      domMatchesByPosition.set(
+        match.historyPosition,
+        searchMatchesForEditor(body, query)
+      );
+    }
+    const domMatches = domMatchesByPosition.get(match.historyPosition);
+    const renderedMatch = domMatches[match.occurrence] || domMatches[0];
+    if (!renderedMatch?.range) return;
+
+    match.range = renderedMatch.range;
+    if (index === activeIndex) activeRanges.push(match.range);
+    else matchRanges.push(match.range);
+  });
+
+  return { matchRanges, activeRanges };
+}
+
+function refreshVisibleVersionHistorySearchHighlights() {
+  if (!searchState.open || !searchState.query || !activeVersionHistoryPageKey()) return;
+  const { matchRanges, activeRanges } = visibleHistorySearchRanges();
+  setSearchHighlights(matchRanges, activeRanges);
+}
+
+function refreshVersionHistorySearchResults(options = {}) {
+  const pageKey = activeVersionHistoryPageKey();
+  const virtualState = historyVirtualState;
+  if (!pageKey || !virtualState) return false;
+
+  const scopedKeys = searchScopePageKeys();
+  const signature = `${pageKey}\n${searchState.query}\n${virtualState.revision}`;
+  const shouldResetActive = searchState.shouldScrollToFirst || signature !== searchState.lastSignature;
+  const results = new Map();
+
+  if (!scopedKeys.includes(pageKey)) {
+    searchState.results = results;
+    searchState.lastSignature = signature;
+    syncSearchResultBars(scopedKeys, results);
+    clearSearchHighlights();
+    if (els.searchSummary) els.searchSummary.textContent = "No pages selected.";
+    if (els.searchPrev) els.searchPrev.disabled = true;
+    if (els.searchNext) els.searchNext.disabled = true;
+    searchState.shouldScrollToFirst = false;
+    return true;
+  }
+
+  if (shouldResetActive) {
+    searchState.activeIndexes = {};
+    searchState.activeKey = null;
+  }
+
+  const matches = historySearchMatches(searchState.query);
+  results.set(pageKey, matches);
+  if (matches.length) {
+    searchState.activeIndexes[pageKey] = Math.min(
+      matches.length - 1,
+      Math.max(0, Number(searchState.activeIndexes[pageKey]) || 0)
+    );
+    searchState.activeKey = pageKey;
+  } else {
+    delete searchState.activeIndexes[pageKey];
+    searchState.activeKey = null;
+  }
+
+  searchState.results = results;
+  searchState.lastSignature = signature;
+  syncSearchResultBars(scopedKeys, results);
+  refreshVisibleVersionHistorySearchHighlights();
+
+  const matchingVersions = new Set(matches.map(match => match.historyPosition)).size;
+  if (els.searchSummary) {
+    els.searchSummary.textContent = searchSummaryText(matches.length, matchingVersions);
+  }
+  if (els.searchPrev) els.searchPrev.disabled = matches.length < 2;
+  if (els.searchNext) els.searchNext.disabled = matches.length < 2;
+
+  if ((shouldResetActive || options.scrollActive) && matches.length) {
+    scrollSearchMatchIntoView(pageKey, searchState.activeIndexes[pageKey] || 0);
+  }
+  searchState.shouldScrollToFirst = false;
+  return true;
+}
+
 function searchSummaryText(totalMatches, pageCount) {
   const query = searchState.query;
   if (!query) return "Enter a search term.";
   if (!totalMatches) return `No matches for "${query}".`;
-  return `${totalMatches.toLocaleString()} ${totalMatches === 1 ? "match" : "matches"} in ${pageCount} ${pageCount === 1 ? "page" : "pages"}.`;
+  const unit = activeVersionHistoryPageKey() ? "version" : "page";
+  return `${totalMatches.toLocaleString()} ${totalMatches === 1 ? "match" : "matches"} in ${pageCount} ${pageCount === 1 ? unit : `${unit}s`}.`;
 }
 
 function syncSearchResultBars(scopedKeys, results) {
@@ -3378,9 +4188,38 @@ function scrollSearchMatchIntoView(pageKey, index) {
   const match = searchState.results.get(pageKey)?.[index];
   if (!match) return;
 
+  const historyKey = activeVersionHistoryPageKey();
+  if (historyKey && pageKey === historyKey) {
+    if (Number.isInteger(match.historyPosition)) {
+      ensureHistoryVirtualPosition(match.historyPosition, { scroll: true });
+      refreshVisibleVersionHistorySearchHighlights();
+    }
+    if (!match.range) return;
+
+    const startElement = match.range.startContainer.nodeType === Node.ELEMENT_NODE
+      ? match.range.startContainer
+      : match.range.startContainer.parentElement;
+    const page = startElement?.closest?.(".compare-page");
+    const body = startElement?.closest?.(".compare-page-body");
+    page?.scrollIntoView({ block: "nearest", inline: "nearest", behavior: "auto" });
+    if (!body) return;
+
+    window.requestAnimationFrame(() => {
+      const rect = match.range.getBoundingClientRect();
+      const bodyRect = body.getBoundingClientRect();
+      const targetTop = body.scrollTop + rect.top - bodyRect.top;
+      const targetLeft = body.scrollLeft + rect.left - bodyRect.left;
+      body.scrollTo({
+        top: Math.max(0, targetTop - (body.clientHeight * 0.36)),
+        left: Math.max(0, targetLeft - 28),
+        behavior: "smooth"
+      });
+    });
+    return;
+  }
+
   const editorEl = editorElementForKey(pageKey);
   if (!editorEl) return;
-
   alignPageInCanvas(pageKey);
   window.requestAnimationFrame(() => {
     const rect = match.range.getBoundingClientRect();
@@ -3423,6 +4262,10 @@ function refreshSearchResults(options = {}) {
     return;
   }
 
+  if (activeVersionHistoryPageKey() && refreshVersionHistorySearchResults(options)) {
+    return;
+  }
+
   const scopedKeys = searchScopePageKeys();
   const signature = `${scopedKeys.join("\u0000")}\n${query}`;
   const shouldResetActive = searchState.shouldScrollToFirst || signature !== searchState.lastSignature;
@@ -3450,11 +4293,17 @@ function refreshSearchResults(options = {}) {
   }
 
   scopedKeys.forEach(key => {
-    const editorEl = editorElementForKey(key);
-    const matches = editorEl ? searchMatchesForEditor(editorEl, query) : [];
+    const historyKey = activeVersionHistoryPageKey();
+    const searchRoot = historyKey && key === historyKey
+      ? els.diffOutput
+      : editorElementForKey(key);
+    const matches = searchRoot ? searchMatchesForEditor(searchRoot, query) : [];
     results.set(key, matches);
     if (matches.length) {
-      pagesWithMatches += 1;
+      const matchingVersionCount = historyKey
+        ? new Set(matches.map(match => match.versionPageId).filter(Boolean)).size
+        : 0;
+      pagesWithMatches += historyKey ? (matchingVersionCount || 1) : 1;
       totalMatches += matches.length;
       const activeIndex = Math.min(
         matches.length - 1,
@@ -4820,7 +5669,236 @@ function draftIndexForId(draftId) {
   return state.drafts.findIndex(draft => draft.id === draftId);
 }
 
+function draftRangeSelectionState(start, end) {
+  const drafts = state.drafts.slice(start, end);
+  const included = drafts.filter(draft => displayedPageKeys.has(draftContentKey(draft.id))).length;
+  return {
+    total: drafts.length,
+    included,
+    checked: Boolean(drafts.length) && included === drafts.length,
+    indeterminate: included > 0 && included < drafts.length
+  };
+}
+
+function draftTabHtml(draft, index, options = {}) {
+  const historyMode = Boolean(versionHistoryDraftId);
+  const activeHistoryDraftId = parseDraftPageKey(activeVersionHistoryPageKey())?.draftId;
+  const activeDraftId = historyMode ? activeHistoryDraftId : selectedDraftId;
+  const active = draft.id === activeDraftId && (historyMode || activeArea !== "story") ? " active" : "";
+  const checked = displayedPageKeys.has(draftContentKey(draft.id)) ? " checked" : "";
+  const disabled = historyMode ? " disabled" : "";
+  const historyClass = historyMode ? " history-tab" : "";
+  const displayLabel = historyMode
+    ? `Draft display selection is not used in version history for ${draft.title}`
+    : `${showChanges ? "Compare" : "Display"} ${draft.title}`;
+  const draftNumber = String(index + 1);
+  const deleteButton = canDeleteDraft(draft)
+    ? `
+      <button class="delete-draft-tab" type="button" data-delete-draft-id="${draft.id}" title="Delete empty draft" aria-label="Delete ${escapeHtml(draft.title)}">
+        <svg viewBox="0 0 12 12" aria-hidden="true">
+          <path d="M3 3l6 6M9 3L3 9"></path>
+        </svg>
+      </button>
+    `
+    : "";
+  if (options.menu) {
+    const preview = draft.content || plainTextFromHtml(draft.contentHtml || "") || "Blank draft";
+    const referenceIndex = els.compareMode?.value === "consecutive" ? index - 1 : 0;
+    const referenceDraft = index > 0 ? state.drafts[referenceIndex] : null;
+    const previewHtml = selectionComparisonHtml(referenceDraft, draft);
+    const zoomKey = `draft:${draft.id}`;
+    selectionMenuZoomPages.set(zoomKey, {
+      title: draft.title,
+      meta: `Last edited ${formatVersionDate(draft.updatedAt || draft.createdAt)}`,
+      beforeText: selectionPageText(referenceDraft),
+      afterText: selectionPageText(draft)
+    });
+    return selectionMenuLeafHtml({
+      className: `draft-tab draft-tab-menu-item${historyClass}${active}`,
+      label: draft.title,
+      shortLabel: draftNumber,
+      preview,
+      previewHtml,
+      meta: formatVersionDate(draft.updatedAt || draft.createdAt),
+      zoomKey,
+      checked: Boolean(checked),
+      disabled: Boolean(disabled),
+      inputAriaLabel: displayLabel,
+      inputAttributes: `data-display-draft-id="${draft.id}"`,
+      buttonAriaLabel: draft.title,
+      buttonAttributes: `data-draft-id="${draft.id}"`,
+      outerAttributes: `data-draft-tab-id="${draft.id}"`,
+      trailingHtml: deleteButton
+    });
+  }
+  return `
+    <div class="page-tab draft-tab${historyClass}${active}" data-draft-tab-id="${draft.id}">
+      <input type="checkbox" data-display-draft-id="${draft.id}" aria-label="${escapeHtml(displayLabel)}"${checked}${disabled}>
+      <button class="tab-label" type="button" data-draft-id="${draft.id}" aria-label="${escapeHtml(draft.title)}">
+        <span class="tab-label-full">${escapeHtml(draft.title)}</span>
+        <span class="tab-label-short" aria-hidden="true">${escapeHtml(draftNumber)}</span>
+      </button>
+      ${deleteButton}
+    </div>
+  `;
+}
+
+function draftNestedGroupHtml(start, end, groupSize) {
+  const groups = [];
+  for (let groupStart = start; groupStart < end; groupStart += groupSize) {
+    const groupEnd = Math.min(end, groupStart + groupSize);
+    const key = `draft:nested:${groupStart}:${groupEnd}`;
+    const selection = draftRangeSelectionState(groupStart, groupEnd);
+    const isOpen = draftTabExpandedGroups.has(key);
+    const inner = isOpen
+      ? (groupSize <= 10
+        ? state.drafts
+          .slice(groupStart, groupEnd)
+          .map((draft, offset) => draftTabHtml(draft, groupStart + offset, { menu: true }))
+          .join("")
+        : draftNestedGroupHtml(groupStart, groupEnd, Math.max(10, groupSize / 10)))
+      : "";
+    groups.push(selectionMenuRangeHtml({
+      className: "draft-tab-nested-group",
+      keyAttribute: "data-draft-tab-group-key",
+      key,
+      open: isOpen,
+      partial: selection.indeterminate,
+      checked: selection.checked,
+      disabled: Boolean(versionHistoryDraftId),
+      checkboxAriaLabel: `${showChanges ? "Compare" : "Display"} drafts ${groupStart + 1} to ${groupEnd}`,
+      checkboxAttributes: `data-display-draft-group-start="${groupStart}" data-display-draft-group-end="${groupEnd}"`,
+      label: `Drafts ${selectionRangeLabel(groupStart, groupEnd)}`,
+      count: `${selection.included} of ${selection.total}`,
+      dateRange: selectionDateRange(
+        state.drafts[groupStart]?.createdAt,
+        state.drafts[groupEnd - 1]?.createdAt
+      ),
+      contents: inner
+    }));
+  }
+  return groups.join("");
+}
+
+function draftTopGroups() {
+  const groupSize = largestSelectionGroupSize(state.drafts.length);
+  const groups = [];
+  for (let start = 0; start < state.drafts.length; start += groupSize) {
+    const end = Math.min(state.drafts.length, start + groupSize);
+    groups.push({
+      key: `draft:top:${start}:${end}`,
+      start,
+      end,
+      groupSize
+    });
+  }
+  return groups;
+}
+
+function draftTopGroupHtml(group) {
+  const { key, start, end } = group;
+  const selection = draftRangeSelectionState(start, end);
+  const checked = selection.checked ? " checked" : "";
+  const activeIndex = draftIndexForId(
+    versionHistoryDraftId
+      ? parseDraftPageKey(activeVersionHistoryPageKey())?.draftId
+      : selectedDraftId
+  );
+  const active = activeIndex >= start && activeIndex < end && (versionHistoryDraftId || activeArea !== "story");
+  const isOpen = draftTabFilterOpen === key;
+  return `
+    <div class="selection-menu-trigger-shell draft-tab-group-shell${selection.indeterminate ? " is-partial" : ""}">
+      <div class="page-tab selection-menu-trigger draft-group-tab${versionHistoryDraftId ? " history-tab" : ""}${active || isOpen ? " active" : ""}">
+        <input
+          type="checkbox"
+          data-display-draft-group-start="${start}"
+          data-display-draft-group-end="${end}"
+          aria-label="${showChanges ? "Compare" : "Display"} drafts ${start + 1} to ${end}"
+          ${checked}
+          ${versionHistoryDraftId ? "disabled" : ""}
+        >
+        <button
+          class="tab-label selection-menu-trigger-toggle draft-tab-range-toggle"
+          type="button"
+          data-draft-tab-filter-toggle="${escapeHtml(key)}"
+          data-draft-tab-filter-start="${start}"
+          data-draft-tab-filter-end="${end}"
+          aria-haspopup="true"
+          aria-expanded="${String(isOpen)}"
+          aria-label="Choose drafts ${start + 1} to ${end}"
+        >
+          <span>${selectionRangeLabel(start, end)}</span>
+        </button>
+      </div>
+    </div>
+  `;
+}
+
+function draftOpenGroupMenuHtml(groups) {
+  const group = groups.find(item => item.key === draftTabFilterOpen);
+  if (!group) return "";
+
+  const selection = draftRangeSelectionState(group.start, group.end);
+  const choices = group.groupSize >= 100
+    ? draftNestedGroupHtml(
+      group.start,
+      group.end,
+      Math.max(10, group.groupSize / 10)
+    )
+    : state.drafts
+      .slice(group.start, group.end)
+      .map((draft, offset) => draftTabHtml(draft, group.start + offset, { menu: true }))
+      .join("");
+  const selected = selectedDraftDisplayCount();
+  const action = showChanges ? "compared" : "displayed";
+
+  return selectionMenuPopoverHtml({
+    className: "draft-tab-group-menu",
+    menuKey: group.key,
+    ariaLabel: `Choose drafts ${group.start + 1} to ${group.end}`,
+    title: `Drafts ${selectionRangeLabel(group.start, group.end)}`,
+    description: `Choose the drafts you want ${action}.`,
+    count: `${selection.included.toLocaleString("en-GB")} of ${selection.total.toLocaleString("en-GB")}`,
+    dateRange: selectionDateRange(
+      state.drafts[group.start]?.createdAt,
+      state.drafts[group.end - 1]?.createdAt
+    ),
+    choicesClass: "draft-tab-group-choices",
+    choicesAriaLabel: "Draft groups",
+    choices,
+    footer: `${selected.toLocaleString("en-GB")} of ${state.drafts.length.toLocaleString("en-GB")} drafts ${action}`
+  });
+}
+
+function groupedDraftTabsHtml() {
+  if (state.drafts.length <= 10) {
+    draftTabFilterOpen = null;
+    return state.drafts.map((draft, index) => draftTabHtml(draft, index)).join("");
+  }
+
+  const groups = draftTopGroups();
+  if (draftTabFilterOpen && !groups.some(group => group.key === draftTabFilterOpen)) {
+    draftTabFilterOpen = null;
+  }
+  return `${groups.map(draftTopGroupHtml).join("")}${draftOpenGroupMenuHtml(groups)}`;
+}
+
+function toggleDraftTabFilter(groupKey = null, open = null) {
+  if (!state || state.drafts.length <= 10) return;
+  if (historyVersionFilterOpen) {
+    historyVersionFilterOpen = null;
+    renderHistoryVersionFilter();
+  }
+  if (groupKey === false || open === false) {
+    draftTabFilterOpen = null;
+  } else if (typeof groupKey === "string" && groupKey) {
+    draftTabFilterOpen = draftTabFilterOpen === groupKey ? null : groupKey;
+  }
+  renderDraftTabs();
+}
+
 function renderDraftTabs() {
+  const menuScroll = selectionMenuScrollSnapshot(els.draftTabs, draftTabFilterOpen);
   const historyMode = Boolean(versionHistoryDraftId);
   const storyHistoryActive = activeVersionHistoryPageKey() === STORY_KEY;
   const storySelectionDisabled = showChanges || historyMode;
@@ -4856,38 +5934,24 @@ function renderDraftTabs() {
     els.allDraftsToggle.setAttribute("aria-checked", historyMode ? "false" : (partiallySelected ? "mixed" : String(allSelected)));
   }
 
-  els.draftTabs.innerHTML = state.drafts.map((draft, index) => {
-    const activeHistoryDraftId = parseDraftPageKey(activeVersionHistoryPageKey())?.draftId;
-    const activeDraftId = historyMode ? activeHistoryDraftId : selectedDraftId;
-    const active = draft.id === activeDraftId && (historyMode || activeArea !== "story") ? " active" : "";
-    const checked = displayedPageKeys.has(draftContentKey(draft.id)) ? " checked" : "";
-    const disabled = historyMode ? " disabled" : "";
-    const historyClass = historyMode ? " history-tab" : "";
-    const displayLabel = historyMode
-      ? `Draft display selection is not used in version history for ${draft.title}`
-      : `${showChanges ? "Compare" : "Display"} ${draft.title}`;
-    const draftNumber = String(index + 1);
-    const deleteButton = canDeleteDraft(draft)
-      ? `
-        <button class="delete-draft-tab" type="button" data-delete-draft-id="${draft.id}" title="Delete empty draft" aria-label="Delete ${escapeHtml(draft.title)}">
-          <svg viewBox="0 0 12 12" aria-hidden="true">
-            <path d="M3 3l6 6M9 3L3 9"></path>
-          </svg>
-        </button>
-      `
-      : "";
-    return `
-      <div class="page-tab draft-tab${historyClass}${active}" data-draft-tab-id="${draft.id}">
-        <input type="checkbox" data-display-draft-id="${draft.id}" aria-label="${escapeHtml(displayLabel)}"${checked}${disabled}>
-        <button class="tab-label" type="button" data-draft-id="${draft.id}" aria-label="${escapeHtml(draft.title)}">
-          <span class="tab-label-full">${escapeHtml(draft.title)}</span>
-          <span class="tab-label-short" aria-hidden="true">${escapeHtml(draftNumber)}</span>
-        </button>
-        ${deleteButton}
-      </div>
-    `;
-  }).join("");
+  els.draftTabs.classList.toggle("is-grouped", state.drafts.length > 10);
+  els.draftTabs.innerHTML = groupedDraftTabsHtml();
+  els.draftTabs
+    .querySelectorAll("[data-display-draft-group-start][data-display-draft-group-end]")
+    .forEach(control => {
+      const start = Number(control.dataset.displayDraftGroupStart);
+      const end = Number(control.dataset.displayDraftGroupEnd);
+      if (!Number.isInteger(start) || !Number.isInteger(end)) return;
+      const selection = draftRangeSelectionState(start, end);
+      control.checked = selection.checked;
+      control.indeterminate = selection.indeterminate;
+    });
+  restoreSelectionMenuScroll(els.draftTabs, menuScroll);
   updateTabDensity();
+  window.requestAnimationFrame(() => {
+    restoreSelectionMenuScroll(els.draftTabs, menuScroll);
+    positionOpenDraftTabGroupMenus();
+  });
 }
 
 function updateTabDensity() {
@@ -4900,6 +5964,37 @@ function updateTabDensity() {
   strip.classList.toggle("scrollable-tabs", strip.scrollWidth > strip.clientWidth + 1);
   updateTabScrollbar();
   requestAnimationFrame(updateTabScrollbar);
+}
+
+function positionOpenDraftTabGroupMenus() {
+  if (!els.draftTabs) return;
+
+  const menu = els.draftTabs.querySelector(":scope > .draft-tab-group-menu");
+  const toggle = draftTabFilterOpen
+    ? els.draftTabs.querySelector(
+      `[data-draft-tab-filter-toggle="${cssEscape(draftTabFilterOpen)}"]`
+    )
+    : null;
+  if (!toggle || !menu) return;
+
+  const summaryRect = toggle.closest(".draft-group-tab")?.getBoundingClientRect() || toggle.getBoundingClientRect();
+  const viewportPadding = 8;
+  const preferredWidth = Math.min(600, window.innerWidth - 36);
+  const width = Math.min(preferredWidth, window.innerWidth - (viewportPadding * 2));
+  const left = Math.max(
+    viewportPadding,
+    Math.min(summaryRect.left, window.innerWidth - width - viewportPadding)
+  );
+  const top = Math.min(summaryRect.bottom + 7, window.innerHeight - viewportPadding);
+
+  menu.style.left = `${Math.round(left)}px`;
+  menu.style.right = "auto";
+  menu.style.top = `${Math.round(top)}px`;
+  menu.style.width = `${Math.round(width)}px`;
+  menu.style.maxHeight = `${Math.max(
+    120,
+    Math.min(660, Math.round(window.innerHeight - top - viewportPadding))
+  )}px`;
 }
 
 function tabScrollMetrics() {
@@ -6296,15 +7391,18 @@ function projectNotesVersionComparePageHtml(version, index, previousVersion = nu
 
 function renderDraftVersionHistoryStrip(draft) {
   const versions = ensureDraftVersionHistory(draft);
-  const pages = versions.length ? [baseVersionPageHtml(draft, versions[0], 0)] : [];
-  coalescedDraftVersionRuns(draft).forEach(run => {
+  const entries = includedHistoryVersionEntries(versions, draftContentKey(draft.id));
+  const pages = entries.length
+    ? [baseVersionPageHtml(draft, entries[0].version, entries[0].index)]
+    : [];
+  entries.slice(1).forEach((entry, position) => {
+    const previous = entries[position];
     pages.push(versionComparePageHtml(
       draft,
-      run.afterVersion,
-      run.afterIndex,
-      run.beforeVersion,
-      run.beforeIndex,
-      { coalescedVersionCount: run.coalescedVersionCount }
+      entry.version,
+      entry.index,
+      previous.version,
+      previous.index
     ));
   });
   return compareStripHtml(pages, "version-history-strip");
@@ -6313,15 +7411,18 @@ function renderDraftVersionHistoryStrip(draft) {
 function renderDraftNotesVersionHistoryStrip(draft) {
   const notesTitle = draft.notes?.title || `${draft.title || "Untitled draft"} Notes`;
   const versions = ensurePageVersionHistory(draft.notes, notesTitle);
-  const pages = versions.length ? [baseDraftNotesVersionPageHtml(draft, versions[0], 0)] : [];
-  coalescedDraftNotesVersionRuns(draft).forEach(run => {
+  const entries = includedHistoryVersionEntries(versions, draftNotesKey(draft.id));
+  const pages = entries.length
+    ? [baseDraftNotesVersionPageHtml(draft, entries[0].version, entries[0].index)]
+    : [];
+  entries.slice(1).forEach((entry, position) => {
+    const previous = entries[position];
     pages.push(draftNotesVersionComparePageHtml(
       draft,
-      run.afterVersion,
-      run.afterIndex,
-      run.beforeVersion,
-      run.beforeIndex,
-      { coalescedVersionCount: run.coalescedVersionCount }
+      entry.version,
+      entry.index,
+      previous.version,
+      previous.index
     ));
   });
   return compareStripHtml(pages, "version-history-strip");
@@ -6329,14 +7430,17 @@ function renderDraftNotesVersionHistoryStrip(draft) {
 
 function renderProjectNotesVersionHistoryStrip() {
   const versions = ensureProjectNotesVersionHistory();
-  const pages = versions.length ? [baseProjectNotesVersionPageHtml(versions[0], 0)] : [];
-  coalescedProjectNotesVersionRuns().forEach(run => {
+  const entries = includedHistoryVersionEntries(versions, STORY_KEY);
+  const pages = entries.length
+    ? [baseProjectNotesVersionPageHtml(entries[0].version, entries[0].index)]
+    : [];
+  entries.slice(1).forEach((entry, position) => {
+    const previous = entries[position];
     pages.push(projectNotesVersionComparePageHtml(
-      run.afterVersion,
-      run.afterIndex,
-      run.beforeVersion,
-      run.beforeIndex,
-      { coalescedVersionCount: run.coalescedVersionCount }
+      entry.version,
+      entry.index,
+      previous.version,
+      previous.index
     ));
   });
   return compareStripHtml(pages, "version-history-strip");
@@ -6362,6 +7466,240 @@ function compareStripHtml(pages, className = "") {
   const style = `--compare-visible-pages: ${visiblePages}; --compare-gap-total: ${gapTotal}px;`;
   const classes = ["compare-strip", className].filter(Boolean).join(" ");
   return `<div class="${classes}" style="${style}">${pages.join("")}</div>`;
+}
+
+function clearHistoryVirtualState() {
+  if (historyVirtualScrollFrame !== null) {
+    window.cancelAnimationFrame(historyVirtualScrollFrame);
+    historyVirtualScrollFrame = null;
+  }
+  historyVirtualScrollSuppressed = false;
+  historyVirtualState = null;
+}
+
+function historyVirtualWindowSize(virtualState) {
+  const visiblePages = virtualState?.visiblePages || 1;
+  return Math.min(
+    virtualState?.entries?.length || 0,
+    Math.max(
+      HISTORY_VIRTUAL_MIN_PAGES,
+      Math.min(HISTORY_VIRTUAL_MAX_PAGES, visiblePages * 4)
+    )
+  );
+}
+
+function historyVirtualWindowBounds(virtualState, focusPosition = 0) {
+  const total = virtualState?.entries?.length || 0;
+  const size = historyVirtualWindowSize(virtualState);
+  if (!total || !size) return { start: 0, end: 0 };
+
+  const focus = Math.max(0, Math.min(total - 1, Math.floor(Number(focusPosition) || 0)));
+  let start = Math.max(0, focus - Math.floor(size / 2));
+  if (start + size > total) start = Math.max(0, total - size);
+  return { start, end: Math.min(total, start + size) };
+}
+
+function historyVirtualPageHtml(virtualState, position) {
+  if (!virtualState || position < 0 || position >= virtualState.entries.length) return "";
+  if (virtualState.pageHtmlCache.has(position)) {
+    const cached = virtualState.pageHtmlCache.get(position);
+    virtualState.pageHtmlCache.delete(position);
+    virtualState.pageHtmlCache.set(position, cached);
+    return cached;
+  }
+
+  const current = virtualState.entries[position];
+  let html = "";
+  if (position === 0) {
+    html = virtualState.basePageHtml(current.version, current.index);
+  } else {
+    const previous = virtualState.entries[position - 1];
+    html = virtualState.comparePageHtml({
+      beforeVersion: previous.version,
+      beforeIndex: previous.index,
+      afterVersion: current.version,
+      afterIndex: current.index
+    });
+  }
+
+  const annotated = html.replace(
+    "<article ",
+    `<article data-history-position="${position}" `
+  );
+  virtualState.pageHtmlCache.set(position, annotated);
+  while (virtualState.pageHtmlCache.size > HISTORY_VIRTUAL_CACHE_LIMIT) {
+    const oldest = virtualState.pageHtmlCache.keys().next().value;
+    virtualState.pageHtmlCache.delete(oldest);
+  }
+  return annotated;
+}
+
+function historyVirtualStripHtml(virtualState, bounds) {
+  const total = virtualState.entries.length;
+  const visiblePages = virtualState.visiblePages;
+  const leftWidth = (bounds.start / visiblePages) * 100;
+  const rightWidth = ((total - bounds.end) / visiblePages) * 100;
+  const pages = [];
+  for (let position = bounds.start; position < bounds.end; position += 1) {
+    pages.push(historyVirtualPageHtml(virtualState, position));
+  }
+
+  return `
+    <div
+      class="compare-strip version-history-strip history-virtual-strip"
+      data-history-total-pages="${total}"
+      data-history-window-start="${bounds.start}"
+      data-history-window-end="${bounds.end}"
+      style="--compare-visible-pages: ${visiblePages}; --compare-gap-total: 0px;"
+    >
+      <div class="history-virtual-spacer" aria-hidden="true" style="flex-basis: ${leftWidth}%;"></div>
+      ${pages.join("")}
+      <div class="history-virtual-spacer" aria-hidden="true" style="flex-basis: ${rightWidth}%;"></div>
+    </div>
+  `;
+}
+
+function captureHistoryVirtualPageScrollPositions(virtualState) {
+  if (!virtualState?.pageScrollPositions) return;
+  els.diffOutput.querySelectorAll("[data-history-position]").forEach(page => {
+    const position = Number(page.dataset.historyPosition);
+    const body = page.querySelector(".compare-page-body");
+    if (!Number.isInteger(position) || !body) return;
+    virtualState.pageScrollPositions.set(position, {
+      top: body.scrollTop,
+      left: body.scrollLeft
+    });
+  });
+}
+
+function restoreHistoryVirtualPageScrollPositions(virtualState) {
+  if (!virtualState?.pageScrollPositions) return;
+  els.diffOutput.querySelectorAll("[data-history-position]").forEach(page => {
+    const position = Number(page.dataset.historyPosition);
+    const body = page.querySelector(".compare-page-body");
+    const saved = virtualState.pageScrollPositions.get(position);
+    if (!body || !saved) return;
+    body.scrollTop = saved.top;
+    body.scrollLeft = saved.left;
+  });
+}
+
+function renderHistoryVirtualWindow(virtualState, focusPosition, options = {}) {
+  if (
+    !virtualState ||
+    historyVirtualState !== virtualState ||
+    !diffRenderIsCurrent(virtualState.token)
+  ) {
+    return false;
+  }
+
+  const bounds = historyVirtualWindowBounds(virtualState, focusPosition);
+  const unchanged = bounds.start === virtualState.start && bounds.end === virtualState.end;
+  const previousScrollLeft = els.diffOutput.scrollLeft;
+
+  if (!unchanged || options.force) {
+    historyVirtualScrollSuppressed = true;
+    captureHistoryVirtualPageScrollPositions(virtualState);
+    els.diffOutput.innerHTML = historyVirtualStripHtml(virtualState, bounds);
+    virtualState.start = bounds.start;
+    virtualState.end = bounds.end;
+    restoreHistoryVirtualPageScrollPositions(virtualState);
+  }
+
+  const hasTargetPosition = options.targetPosition !== undefined && options.targetPosition !== null;
+  const targetPosition = hasTargetPosition ? Number(options.targetPosition) : null;
+  const targetScrollLeft = Number.isInteger(targetPosition)
+    ? (targetPosition * els.diffOutput.clientWidth) / virtualState.visiblePages
+    : previousScrollLeft;
+  els.diffOutput.scrollLeft = Math.max(0, targetScrollLeft);
+
+  window.requestAnimationFrame(() => {
+    historyVirtualScrollSuppressed = false;
+    updateCompactTitleLabels(els.diffOutput);
+    refreshVisibleVersionHistorySearchHighlights();
+    scheduleHistoryVirtualWindowUpdate();
+  });
+  return true;
+}
+
+function ensureHistoryVirtualPosition(position, options = {}) {
+  const virtualState = historyVirtualState;
+  const target = Number(position);
+  if (
+    !virtualState ||
+    !Number.isInteger(target) ||
+    target < 0 ||
+    target >= virtualState.entries.length
+  ) {
+    return null;
+  }
+
+  const isMounted = target >= virtualState.start && target < virtualState.end;
+  if (!isMounted) {
+    renderHistoryVirtualWindow(virtualState, target, {
+      force: true,
+      targetPosition: options.scroll === false ? null : target
+    });
+  } else if (options.scroll !== false) {
+    const targetLeft = (target * els.diffOutput.clientWidth) / virtualState.visiblePages;
+    els.diffOutput.scrollLeft = Math.max(0, targetLeft);
+  }
+
+  return els.diffOutput.querySelector(`[data-history-position="${target}"]`);
+}
+
+function updateHistoryVirtualWindowFromScroll() {
+  historyVirtualScrollFrame = null;
+  const virtualState = historyVirtualState;
+  if (
+    historyVirtualScrollSuppressed ||
+    !virtualState ||
+    historyVirtualState !== virtualState ||
+    !diffRenderIsCurrent(virtualState.token) ||
+    !els.diffOutput.clientWidth
+  ) {
+    return;
+  }
+
+  const pageWidth = els.diffOutput.clientWidth / virtualState.visiblePages;
+  const firstVisible = Math.max(
+    0,
+    Math.min(
+      virtualState.entries.length - 1,
+      Math.floor(els.diffOutput.scrollLeft / Math.max(1, pageWidth))
+    )
+  );
+  const rightVisible = firstVisible + virtualState.visiblePages;
+  const mountedPageCount = virtualState.end - virtualState.start;
+  const sparePageCount = Math.max(0, mountedPageCount - virtualState.visiblePages);
+  const bufferPageCount = Math.max(1, Math.floor(sparePageCount / 3));
+  const needsWindowUpdate = (
+    firstVisible < virtualState.start ||
+    rightVisible > virtualState.end ||
+    (
+      virtualState.start > 0 &&
+      firstVisible < virtualState.start + bufferPageCount
+    ) ||
+    (
+      virtualState.end < virtualState.entries.length &&
+      rightVisible > virtualState.end - bufferPageCount
+    )
+  );
+  if (!needsWindowUpdate) return;
+
+  const focusPosition = firstVisible + Math.floor(virtualState.visiblePages / 2);
+  const nextBounds = historyVirtualWindowBounds(virtualState, focusPosition);
+  if (nextBounds.start === virtualState.start && nextBounds.end === virtualState.end) return;
+
+  renderHistoryVirtualWindow(
+    virtualState,
+    focusPosition
+  );
+}
+
+function scheduleHistoryVirtualWindowUpdate() {
+  if (historyVirtualScrollFrame !== null || historyVirtualScrollSuppressed) return;
+  historyVirtualScrollFrame = window.requestAnimationFrame(updateHistoryVirtualWindowFromScroll);
 }
 
 function renderComparisonStrip(indexes) {
@@ -6441,30 +7779,21 @@ function jumpToComparedToken(sourceToken) {
   highlightCompareTarget(target);
 }
 
+function versionHistoryViewDidRender() {
+  renderHistoryVersionFilter();
+  if (!searchState.open) return;
+  window.requestAnimationFrame(() => refreshSearchResults({ allowRender: false }));
+}
+
 function renderDiff() {
   diffRenderToken += 1;
   const compareKicker = els.changesPanel?.querySelector(".compare-kicker");
   if (versionHistoryDraftId) {
-    const pageKey = activeVersionHistoryPageKey();
-    if (compareKicker) compareKicker.textContent = "VERSION HISTORY";
-    if (pageKey === STORY_KEY) {
-      els.compareSubtitle.textContent = "Version history for Project notes";
-      els.diffOutput.innerHTML = renderProjectNotesVersionHistoryStrip();
-      return;
-    }
-
-    const parsed = parseDraftPageKey(pageKey);
-    const draft = draftById(parsed?.draftId);
-    const isNotes = parsed?.type === "notes";
-    els.compareSubtitle.textContent = draft
-      ? `Version history for ${isNotes ? `${draft.title} notes` : draft.title}`
-      : "Version history";
-    els.diffOutput.innerHTML = draft
-      ? (isNotes ? renderDraftNotesVersionHistoryStrip(draft) : renderDraftVersionHistoryStrip(draft))
-      : `<p class="empty-state">Draft not found.</p>`;
+    renderDiffSoon("Loading version history");
     return;
   }
 
+  clearHistoryVirtualState();
   if (!showChanges) {
     if (compareKicker) compareKicker.textContent = "DRAFT COMPARISON";
     els.diffOutput.innerHTML = "";
@@ -6579,118 +7908,79 @@ async function renderVersionHistoryStripProgressively(options) {
   const {
     token,
     label,
-    versions,
-    pageForVersion,
+    pageKey,
+    entries,
     basePageHtml,
     comparePageHtml,
     versionLabel,
-    emptyHtml = `<p class="empty-state">No version history to show.</p>`
+    emptyHtml = `<p class="empty-state">No versions are currently included.</p>`
   } = options;
-  const total = versions.length;
+  const total = entries.length;
 
   if (!total) {
-    if (diffRenderIsCurrent(token)) els.diffOutput.innerHTML = emptyHtml;
+    if (diffRenderIsCurrent(token)) {
+      clearHistoryVirtualState();
+      els.diffOutput.innerHTML = emptyHtml;
+      versionHistoryViewDidRender();
+    }
     return;
   }
 
-  const pages = [];
-  const renderScanProgress = (completed, detail) => {
+  historyVirtualRevision += 1;
+  const virtualState = {
+    token,
+    revision: historyVirtualRevision,
+    pageKey,
+    entries,
+    basePageHtml,
+    comparePageHtml,
+    versionLabel,
+    visiblePages: compareVisiblePageCount(total),
+    start: -1,
+    end: -1,
+    pageHtmlCache: new Map(),
+    pageScrollPositions: new Map()
+  };
+  clearHistoryVirtualState();
+  historyVirtualState = virtualState;
+  const initialBounds = historyVirtualWindowBounds(virtualState, 0);
+  const initialTotal = initialBounds.end - initialBounds.start;
+  const renderProgress = (completed, detail) => {
     if (!diffRenderIsCurrent(token)) return;
     renderDiffLoading({
       label,
       completed,
-      total,
-      unit: "version",
-      verb: "checked",
+      total: initialTotal,
+      unit: "visible history page",
+      verb: "prepared",
+      meta: `${completed.toLocaleString("en-GB")} of ${initialTotal.toLocaleString("en-GB")} visible history pages prepared`,
       detail
     });
   };
 
-  renderScanProgress(0, "Preparing version history");
+  renderProgress(0, `Opening ${total.toLocaleString("en-GB")} included versions`);
   await nextDiffProgressFrame();
-  if (!diffRenderIsCurrent(token)) return;
+  if (!diffRenderIsCurrent(token) || historyVirtualState !== virtualState) return;
 
-  pages.push(basePageHtml(versions[0], 0));
-  renderScanProgress(1, total > 1 ? `Checking ${versionLabel(1)}` : "Loaded first version");
-  await nextDiffProgressFrame();
-
-  const runs = [];
-  let run = null;
-  const flushRun = () => {
-    if (!run) return;
-    runs.push({
-      beforeIndex: run.beforeIndex,
-      afterIndex: run.afterIndex,
-      beforeVersion: versions[run.beforeIndex],
-      afterVersion: versions[run.afterIndex],
-      coalescedVersionCount: run.afterIndex - run.beforeIndex
-    });
-    run = null;
-  };
-
-  for (let index = 0; index < versions.length - 1; index += 1) {
-    if (!diffRenderIsCurrent(token)) return;
-
-    const info = versionTransitionInfo(versions, pageForVersion, index);
-    if (info) {
-      if (
-        run &&
-        run.afterIndex === info.beforeIndex &&
-        shouldMergeVersionTransitions(run.lastInfo, info, pageForVersion(versions[info.beforeIndex], info.beforeIndex))
-      ) {
-        run.afterIndex = info.afterIndex;
-        run.lastInfo = info;
-      } else {
-        flushRun();
-        run = {
-          beforeIndex: info.beforeIndex,
-          afterIndex: info.afterIndex,
-          lastInfo: info
-        };
-      }
-    }
-
-    const completed = index + 2;
-    renderScanProgress(completed, completed < total
-      ? `Checking ${versionLabel(completed)}`
-      : "Preparing changed version groups");
-    await nextDiffProgressFrame();
-  }
-
-  flushRun();
-  if (!diffRenderIsCurrent(token)) return;
-
-  if (runs.length) {
-    const pageTotal = 1 + runs.length;
-    const renderPageProgress = (completed, detail) => {
-      if (!diffRenderIsCurrent(token)) return;
-      renderDiffLoading({
-        label,
-        completed,
-        total: pageTotal,
-        unit: "history page",
-        verb: "rendered",
-        detail
-      });
-    };
-
-    renderPageProgress(1, `Rendering ${versionLabel(runs[0].afterIndex)}`);
-    await nextDiffProgressFrame();
-
-    for (let index = 0; index < runs.length; index += 1) {
-      if (!diffRenderIsCurrent(token)) return;
-      const currentRun = runs[index];
-      pages.push(comparePageHtml(currentRun));
-      const nextRun = runs[index + 1];
-      renderPageProgress(index + 2, nextRun
-        ? `Rendering ${versionLabel(nextRun.afterIndex)}`
-        : "Building history view");
+  for (let position = initialBounds.start; position < initialBounds.end; position += 1) {
+    if (!diffRenderIsCurrent(token) || historyVirtualState !== virtualState) return;
+    historyVirtualPageHtml(virtualState, position);
+    const completed = position - initialBounds.start + 1;
+    const nextPosition = position + 1;
+    renderProgress(completed, nextPosition < initialBounds.end
+      ? `Preparing ${versionLabel(entries[nextPosition].index)}`
+      : "Opening history view");
+    if (completed % 2 === 0 || completed === initialTotal) {
       await nextDiffProgressFrame();
     }
   }
 
-  if (!diffRenderIsCurrent(token)) return;
-  els.diffOutput.innerHTML = compareStripHtml(pages, "version-history-strip");
+  if (!diffRenderIsCurrent(token) || historyVirtualState !== virtualState) return;
+  renderHistoryVirtualWindow(virtualState, 0, {
+    force: true,
+    targetPosition: 0
+  });
+  versionHistoryViewDidRender();
 }
 
 function renderDraftVersionHistoryProgressively(draft, token, label) {
@@ -6698,16 +7988,15 @@ function renderDraftVersionHistoryProgressively(draft, token, label) {
   return renderVersionHistoryStripProgressively({
     token,
     label,
-    versions,
-    pageForVersion: (version, index) => draftVersionPage(draft, version, index),
+    pageKey: draftContentKey(draft.id),
+    entries: includedHistoryVersionEntries(versions, draftContentKey(draft.id)),
     basePageHtml: (version, index) => baseVersionPageHtml(draft, version, index),
     comparePageHtml: run => versionComparePageHtml(
       draft,
       run.afterVersion,
       run.afterIndex,
       run.beforeVersion,
-      run.beforeIndex,
-      { coalescedVersionCount: run.coalescedVersionCount }
+      run.beforeIndex
     ),
     versionLabel: index => `Draft ${draftVersionNumber(draft, index)}`
   });
@@ -6719,16 +8008,15 @@ function renderDraftNotesVersionHistoryProgressively(draft, token, label) {
   return renderVersionHistoryStripProgressively({
     token,
     label,
-    versions,
-    pageForVersion: (version, index) => draftNotesVersionPage(draft, version, index),
+    pageKey: draftNotesKey(draft.id),
+    entries: includedHistoryVersionEntries(versions, draftNotesKey(draft.id)),
     basePageHtml: (version, index) => baseDraftNotesVersionPageHtml(draft, version, index),
     comparePageHtml: run => draftNotesVersionComparePageHtml(
       draft,
       run.afterVersion,
       run.afterIndex,
       run.beforeVersion,
-      run.beforeIndex,
-      { coalescedVersionCount: run.coalescedVersionCount }
+      run.beforeIndex
     ),
     versionLabel: index => `Draft ${draftNotesVersionNumber(draft, index)}`
   });
@@ -6739,15 +8027,14 @@ function renderProjectNotesVersionHistoryProgressively(token, label) {
   return renderVersionHistoryStripProgressively({
     token,
     label,
-    versions,
-    pageForVersion: projectNotesVersionPage,
+    pageKey: STORY_KEY,
+    entries: includedHistoryVersionEntries(versions, STORY_KEY),
     basePageHtml: baseProjectNotesVersionPageHtml,
     comparePageHtml: run => projectNotesVersionComparePageHtml(
       run.afterVersion,
       run.afterIndex,
       run.beforeVersion,
-      run.beforeIndex,
-      { coalescedVersionCount: run.coalescedVersionCount }
+      run.beforeIndex
     ),
     versionLabel: index => `Project notes ${projectNotesVersionNumber(index)}`
   });
@@ -6773,7 +8060,10 @@ async function renderDiffProgressively(token, label = "Loading changes") {
       ? `Version history for ${isNotes ? `${draft.title} notes` : draft.title}`
       : "Version history";
     if (!draft) {
-      if (diffRenderIsCurrent(token)) els.diffOutput.innerHTML = `<p class="empty-state">Draft not found.</p>`;
+      if (diffRenderIsCurrent(token)) {
+        els.diffOutput.innerHTML = `<p class="empty-state">Draft not found.</p>`;
+        versionHistoryViewDidRender();
+      }
       return;
     }
 
@@ -6828,6 +8118,13 @@ function renderChangesVisibility() {
   els.editorSurface.classList.toggle("compare-open", panelOpen);
   els.changesPanel.hidden = !panelOpen;
   els.changesPanel.classList.toggle("version-history-open", Boolean(versionHistoryDraftId));
+  if (versionHistoryDraftId) {
+    renderHistoryVersionFilter();
+  } else if (els.historyVersionFilter) {
+    historyVersionFilterOpen = null;
+    els.historyVersionFilter.hidden = true;
+    els.historyVersionFilter.innerHTML = "";
+  }
   els.toggleChanges.setAttribute("aria-pressed", String(panelOpen));
   const label = els.toggleChanges.querySelector(".toggle-changes-label");
   const buttonLabel = versionHistoryDraftId
@@ -6961,13 +8258,20 @@ function resetViewStateForProject() {
   activeArea = "story";
   activeEditorKey = STORY_KEY;
   showChanges = false;
+  versionHistoryDraftId = null;
+  historyVersionFilterOpen = null;
+  historyVersionExclusions = new Map();
+  historyVersionExpandedGroups = new Set();
+  draftTabFilterOpen = null;
+  draftTabExpandedGroups = new Set();
+  selectionMenuZoomPages = new Map();
   hasStoredDisplaySelection = true;
   displayedPageKeys = new Set(defaultDisplayKeys());
   collapsedNotesIds = new Set();
   notesPanePercents = {};
   pagePanePercents = {};
   pagesOnScreen = DEFAULT_PAGES_ON_SCREEN;
-  els.compareMode.value = "first";
+  els.compareMode.value = "consecutive";
   saveCurrentViewState();
   setPagesOnScreen(pagesOnScreen);
 }
@@ -8606,19 +9910,35 @@ function hideTransferReview() {
   if (els.transferImportProceed) els.transferImportProceed.disabled = false;
 }
 
-function showTransferPageZoom(index) {
-  const page = transferTimelineZoomPages[Number(index)];
+function showPagePreviewZoom(page, returnFocus = null) {
   if (!page || !els.transferPageZoom) return;
+  pagePreviewZoomReturnFocus = returnFocus instanceof HTMLElement ? returnFocus : null;
   if (els.transferPageZoomTitle) els.transferPageZoomTitle.textContent = page.title;
   if (els.transferPageZoomMeta) els.transferPageZoomMeta.textContent = page.meta;
-  if (els.transferPageZoomPaper) els.transferPageZoomPaper.innerHTML = page.html;
+  if (els.transferPageZoomPaper) {
+    els.transferPageZoomPaper.innerHTML = page.html
+      ?? (Object.hasOwn(page, "afterText")
+        ? selectionComparisonTextHtml(page.beforeText || "", page.afterText || "")
+        : escapeHtml(page.text || ""));
+  }
   els.transferPageZoom.hidden = false;
   els.transferPageZoomClose?.focus();
+}
+
+function showTransferPageZoom(index, returnFocus = null) {
+  showPagePreviewZoom(transferTimelineZoomPages[Number(index)], returnFocus);
+}
+
+function showSelectionMenuPageZoom(key, returnFocus = null) {
+  showPagePreviewZoom(selectionMenuZoomPages.get(String(key || "")), returnFocus);
 }
 
 function hideTransferPageZoom() {
   if (els.transferPageZoom) els.transferPageZoom.hidden = true;
   if (els.transferPageZoomPaper) els.transferPageZoomPaper.innerHTML = "";
+  const returnFocus = pagePreviewZoomReturnFocus;
+  pagePreviewZoomReturnFocus = null;
+  if (returnFocus?.isConnected) returnFocus.focus();
 }
 
 function toggleTransferTimeline(entryKey) {
@@ -9264,6 +10584,7 @@ function openDraftVersionHistoryForDraft(draftId) {
     scheduleVersionHistoryPageSave(draftContentKey(draft.id));
   }
   versionHistoryDraftId = draftContentKey(draft.id);
+  historyVersionFilterOpen = null;
   showChanges = false;
   activeArea = "draft";
   selectedDraftId = draft.id;
@@ -9285,6 +10606,7 @@ function openDraftNotesVersionHistory(draftId) {
     scheduleVersionHistoryPageSave(pageKey);
   }
   versionHistoryDraftId = pageKey;
+  historyVersionFilterOpen = null;
   showChanges = false;
   activeArea = "draft";
   selectedDraftId = draft.id;
@@ -9304,6 +10626,7 @@ function openProjectNotesVersionHistory() {
     scheduleVersionHistoryPageSave(STORY_KEY);
   }
   versionHistoryDraftId = STORY_KEY;
+  historyVersionFilterOpen = null;
   showChanges = false;
   activeArea = "story";
   activeEditorKey = STORY_KEY;
@@ -9327,6 +10650,8 @@ function openDraftVersionHistoryForPage(editorKey) {
 function closeVersionHistory() {
   if (!versionHistoryDraftId) return;
   versionHistoryDraftId = null;
+  historyVersionFilterOpen = null;
+  clearHistoryVirtualState();
   renderDraftTabs();
   renderChangesVisibility();
   renderDiff();
@@ -9549,7 +10874,7 @@ els.transferReviewContent?.addEventListener("click", event => {
     return;
   }
   const button = event.target.closest("[data-transfer-timeline-zoom]");
-  if (button) showTransferPageZoom(button.dataset.transferTimelineZoom);
+  if (button) showTransferPageZoom(button.dataset.transferTimelineZoom, button);
 });
 els.transferPageZoomClose?.addEventListener("click", hideTransferPageZoom);
 els.transferPageZoom?.addEventListener("click", event => {
@@ -9660,6 +10985,23 @@ els.allDraftsToggle.addEventListener("change", event => {
 });
 
 els.draftTabs.addEventListener("click", event => {
+  const zoomButton = event.target.closest("[data-selection-menu-zoom]");
+  if (zoomButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    showSelectionMenuPageZoom(zoomButton.dataset.selectionMenuZoom, zoomButton);
+    return;
+  }
+
+  const groupToggle = event.target.closest("[data-draft-tab-filter-toggle]");
+  if (groupToggle) {
+    event.preventDefault();
+    event.stopPropagation();
+    const groupKey = groupToggle.dataset.draftTabFilterToggle;
+    window.setTimeout(() => toggleDraftTabFilter(groupKey), 0);
+    return;
+  }
+
   const deleteButton = event.target.closest("[data-delete-draft-id]");
   if (deleteButton) {
     deleteDraft(deleteButton.dataset.deleteDraftId);
@@ -9682,6 +11024,24 @@ els.draftTabs.addEventListener("click", event => {
 });
 
 els.draftTabs.addEventListener("change", event => {
+  const groupCheckbox = event.target.closest(
+    "[data-display-draft-group-start][data-display-draft-group-end]"
+  );
+  if (groupCheckbox) {
+    if (versionHistoryDraftId) {
+      renderDraftTabs();
+      return;
+    }
+    const start = Number(groupCheckbox.dataset.displayDraftGroupStart);
+    const end = Number(groupCheckbox.dataset.displayDraftGroupEnd);
+    if (!Number.isInteger(start) || !Number.isInteger(end)) return;
+    syncViewStateFromDom();
+    displayDraftRange(start, end, groupCheckbox.checked);
+    render();
+    persistViewStateChange(0);
+    return;
+  }
+
   const checkbox = event.target.closest("[data-display-draft-id]");
   if (!checkbox) return;
   if (versionHistoryDraftId) {
@@ -9695,7 +11055,30 @@ els.draftTabs.addEventListener("change", event => {
   persistViewStateChange(0);
 });
 
-els.tabStrip?.addEventListener("scroll", updateTabScrollbar, { passive: true });
+els.draftTabs.addEventListener("toggle", event => {
+  const group = event.target.closest?.("[data-draft-tab-group-key]");
+  if (!group) return;
+  const key = group.dataset.draftTabGroupKey;
+  if (group.open) {
+    draftTabExpandedGroups.add(key);
+    if (!group.querySelector(":scope > .selection-menu-range-contents")?.children.length) {
+      renderDraftTabs();
+      return;
+    }
+  } else {
+    draftTabExpandedGroups.delete(key);
+  }
+  window.requestAnimationFrame(positionOpenDraftTabGroupMenus);
+}, true);
+
+els.draftTabs.addEventListener("wheel", event => handleSelectionMenuWheel(els.draftTabs, event), {
+  passive: false
+});
+
+els.tabStrip?.addEventListener("scroll", () => {
+  updateTabScrollbar();
+  positionOpenDraftTabGroupMenus();
+}, { passive: true });
 els.tabScrollbar?.addEventListener("pointerdown", beginTabScrollbarDrag);
 els.newDraftBlank.addEventListener("click", () => addDraft(false));
 els.newDraftCopy.addEventListener("click", () => addDraft(true));
@@ -10081,8 +11464,97 @@ els.pageCanvas.addEventListener("keydown", event => {
 
 els.compareMode.addEventListener("change", () => {
   persistViewStateChange(0);
+  renderDraftTabs();
   renderDiffSoon("Loading changes");
 });
+
+els.historyVersionFilter?.addEventListener("click", event => {
+  const zoomButton = event.target.closest("[data-selection-menu-zoom]");
+  if (zoomButton) {
+    event.preventDefault();
+    event.stopPropagation();
+    showSelectionMenuPageZoom(zoomButton.dataset.selectionMenuZoom, zoomButton);
+    return;
+  }
+
+  const toggle = event.target.closest("[data-history-version-filter-toggle]");
+  if (toggle) {
+    event.preventDefault();
+    event.stopPropagation();
+    const groupKey = toggle.dataset.historyVersionFilterToggle;
+    window.setTimeout(() => toggleHistoryVersionFilter(groupKey), 0);
+    return;
+  }
+
+  const allLabel = event.target.closest("[data-history-version-all-label]");
+  if (allLabel) {
+    event.preventDefault();
+    const versions = versionHistoryForPageKey();
+    const exclusions = normalizedHistoryVersionExclusions(activeVersionHistoryPageKey(), versions);
+    setHistoryVersionRangeIncluded(0, versions.length, exclusions.size > 0);
+    updateHistoryVersionSelection();
+    return;
+  }
+
+  const focusVersion = event.target.closest("[data-history-version-focus-index]");
+  if (!focusVersion) return;
+  const index = Number(focusVersion.dataset.historyVersionFocusIndex);
+  const versions = versionHistoryForPageKey();
+  const includedEntries = includedHistoryVersionEntries(versions);
+  const position = includedEntries.findIndex(entry => entry.index === index);
+  if (position >= 0) ensureHistoryVirtualPosition(position, { scroll: true });
+});
+
+els.historyVersionFilter?.addEventListener("change", event => {
+  const allControl = event.target.closest("[data-history-version-all]");
+  if (allControl) {
+    const versions = versionHistoryForPageKey();
+    setHistoryVersionRangeIncluded(0, versions.length, allControl.checked);
+    updateHistoryVersionSelection();
+    return;
+  }
+
+  const versionControl = event.target.closest("[data-history-version-index]");
+  if (versionControl) {
+    const index = Number(versionControl.dataset.historyVersionIndex);
+    if (Number.isInteger(index)) {
+      setHistoryVersionRangeIncluded(index, index + 1, versionControl.checked);
+      updateHistoryVersionSelection();
+    }
+    return;
+  }
+
+  const groupControl = event.target.closest(
+    "[data-history-version-group-start][data-history-version-group-end]"
+  );
+  if (!groupControl) return;
+  const start = Number(groupControl.dataset.historyVersionGroupStart);
+  const end = Number(groupControl.dataset.historyVersionGroupEnd);
+  if (!Number.isInteger(start) || !Number.isInteger(end)) return;
+  setHistoryVersionRangeIncluded(start, end, groupControl.checked);
+  updateHistoryVersionSelection();
+});
+
+els.historyVersionFilter?.addEventListener("toggle", event => {
+  const group = event.target.closest?.("[data-history-version-group-key]");
+  if (!group) return;
+  const key = group.dataset.historyVersionGroupKey;
+  if (group.open) {
+    historyVersionExpandedGroups.add(key);
+    if (!group.querySelector(":scope > .selection-menu-range-contents")?.children.length) {
+      renderHistoryVersionFilter();
+      return;
+    }
+  } else {
+    historyVersionExpandedGroups.delete(key);
+  }
+}, true);
+
+els.historyVersionFilter?.addEventListener(
+  "wheel",
+  event => handleSelectionMenuWheel(els.historyVersionFilter, event),
+  { passive: false }
+);
 
 els.diffOutput.addEventListener("dblclick", event => {
   if (!(event.target instanceof Element)) return;
@@ -10093,6 +11565,8 @@ els.diffOutput.addEventListener("dblclick", event => {
   event.preventDefault();
   jumpToComparedToken(sourceToken);
 });
+
+els.diffOutput.addEventListener("scroll", scheduleHistoryVirtualWindowUpdate, { passive: true });
 
 els.diffOutput.addEventListener("click", event => {
   if (!(event.target instanceof Element)) return;
@@ -10138,6 +11612,12 @@ els.toggleChanges.addEventListener("click", () => {
 
 els.searchInput?.addEventListener("input", event => {
   setSearchQuery(event.target.value);
+});
+
+els.searchInput?.addEventListener("keydown", event => {
+  if (event.isComposing || event.key !== "Enter") return;
+  event.preventDefault();
+  cycleSearch(event.shiftKey ? -1 : 1);
 });
 
 els.searchScopeToggle?.addEventListener("click", event => {
@@ -10208,6 +11688,24 @@ document.addEventListener("click", event => {
     toggleSearchScopeMenu(false);
   }
 
+  if (
+    historyVersionFilterOpen &&
+    event.target instanceof Element &&
+    !event.target.closest(".history-version-filter") &&
+    !event.target.closest(".transfer-page-zoom")
+  ) {
+    toggleHistoryVersionFilter(false);
+  }
+
+  if (
+    draftTabFilterOpen &&
+    event.target instanceof Element &&
+    !event.target.closest("#draft-tabs") &&
+    !event.target.closest(".transfer-page-zoom")
+  ) {
+    toggleDraftTabFilter(false);
+  }
+
   if (event.target instanceof Element && event.target.closest(".fr-picker")) return;
   closeFormatPickers();
 });
@@ -10222,6 +11720,14 @@ document.addEventListener("keydown", event => {
       hideTransferPageZoom();
       return;
     }
+    if (historyVersionFilterOpen) {
+      toggleHistoryVersionFilter(false);
+      return;
+    }
+    if (draftTabFilterOpen) {
+      toggleDraftTabFilter(false);
+      return;
+    }
     closeSpellcheckMenu();
     toggleSearchScopeMenu(false);
     if (searchState.open) closeSearch();
@@ -10232,8 +11738,11 @@ document.addEventListener("keydown", event => {
 });
 
 document.addEventListener("scroll", positionOpenFormatPickers, true);
+document.addEventListener("scroll", positionOpenDraftTabGroupMenus, true);
 window.addEventListener("resize", positionOpenFormatPickers);
 window.addEventListener("resize", updateTabDensity);
+window.addEventListener("resize", positionOpenDraftTabGroupMenus);
+window.addEventListener("resize", () => window.requestAnimationFrame(updateAllVersionsLabelDensity));
 window.addEventListener("resize", updateAllNotesHeadingDensity);
 window.addEventListener("resize", () => window.requestAnimationFrame(() => updateCompactTitleLabels()));
 

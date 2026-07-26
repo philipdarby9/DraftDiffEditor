@@ -534,7 +534,7 @@
       editorSelections: normalizeEditorSelections(viewState.editorSelections, drafts),
       activeArea,
       showChanges: Boolean(viewState.showChanges),
-      compareMode: viewState.compareMode === "consecutive" ? "consecutive" : "first"
+      compareMode: viewState.compareMode === "first" ? "first" : "consecutive"
     };
   }
 

@@ -81,6 +81,14 @@ function run() {
     assert.equal(normalized.viewState.pagesOnScreen, 4);
     assert.equal(normalized.viewState.activeEditorKey, "draft:draft-a:notes");
     assert.equal(normalized.viewState.pagePanePercents["draft:draft-a:content"], StateCore.MIN_PAGE_PANE_PERCENT);
+    assert.equal(normalized.viewState.compareMode, "consecutive");
+
+    const explicitFirstMode = StateCore.normalizeState({
+      initialNotes: { content: "" },
+      drafts: [{ id: "draft-first-mode", title: "Draft 1", content: "" }],
+      viewState: { compareMode: "first" }
+    });
+    assert.equal(explicitFirstMode.viewState.compareMode, "first");
   }
 
   {

@@ -1,0 +1,5 @@
+{
+  "name": "draft-diff-history-ui-test",
+  "private": true,
+  "main": "../test-version-history-ui.js"
+}

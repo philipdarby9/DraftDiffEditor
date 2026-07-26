@@ -758,6 +758,28 @@ function draftNotesHistoryFromPayloadEntry(entry) {
   return null;
 }
 
+function versionHistoryEntryIsRetiredForDraft(entry, draft) {
+  if (entry?.retired === true) return true;
+
+  const previousCreatedAt = Date.parse(asText(entry?.createdAt));
+  const incomingCreatedAt = Date.parse(asText(draft?.createdAt));
+  if (
+    !Number.isFinite(previousCreatedAt) ||
+    !Number.isFinite(incomingCreatedAt) ||
+    incomingCreatedAt <= previousCreatedAt
+  ) {
+    return false;
+  }
+
+  const history = historyArrayFromPayloadEntry(entry);
+  const newest = latestVersionHistoryEntry(history);
+  return Boolean(
+    newest &&
+    history.some(version => textForHistoryVersion(version).trim()) &&
+    !textForHistoryVersion(newest).trim()
+  );
+}
+
 function versionHistoryDraftPageKey(draft, index) {
   const idValue = asText(draft?.id || draft?.draftId);
   return idValue ? `draft-id:${idValue}` : `draft-index:${index}`;
@@ -779,7 +801,9 @@ function applyVersionHistoryPayloadToState(state, payload, options = {}) {
       state.initialNotes,
       PROJECT_NOTES_TITLE
     );
-    promotePageToNewestHistoryVersion(state.initialNotes, PROJECT_NOTES_TITLE);
+    if (options.promotePages !== false) {
+      promotePageToNewestHistoryVersion(state.initialNotes, PROJECT_NOTES_TITLE);
+    }
   }
 
   const incomingDrafts = Array.isArray(payload.drafts) ? payload.drafts : [];
@@ -810,7 +834,9 @@ function applyVersionHistoryPayloadToState(state, payload, options = {}) {
       || (titleKey ? titles.get(titleKey) : null)
       || byIndex.get(index);
     const matchingDraftId = asText(matchingDraft?.id || matchingDraft?.draftId);
-    if (matchingDraftId) draft.id = matchingDraftId;
+    const matchingDraftIsRetired = versionHistoryEntryIsRetiredForDraft(matchingDraft, draft);
+    const shouldAdoptMatchingDraftIds = !matchingDraftIsRetired || options.adoptRetiredDraftIds !== false;
+    if (matchingDraftId && shouldAdoptMatchingDraftIds) draft.id = matchingDraftId;
 
     const history = Array.isArray(matchingDraft?.history)
       ? matchingDraft.history
@@ -822,13 +848,15 @@ function applyVersionHistoryPayloadToState(state, payload, options = {}) {
         draft,
         draft.title || "Untitled draft"
       );
-      promotePageToNewestHistoryVersion(draft, draft.title || "Untitled draft");
+      if (options.promotePages !== false) {
+        promotePageToNewestHistoryVersion(draft, draft.title || "Untitled draft");
+      }
     }
 
     const notesHistory = draftNotesHistoryFromPayloadEntry(matchingDraft);
     if (draft.notes && Array.isArray(notesHistory)) {
       const matchingNotesId = asText(matchingDraft?.notes?.id || matchingDraft?.notesId || matchingDraft?.draftNotesId);
-      if (matchingNotesId) draft.notes.id = matchingNotesId;
+      if (matchingNotesId && shouldAdoptMatchingDraftIds) draft.notes.id = matchingNotesId;
       const notesTitle = draft.notes.title || `${draft.title || "Untitled draft"} Notes`;
       draft.notes.versionHistory = mergePageVersionHistories(
         draft.notes.versionHistory,
@@ -836,7 +864,9 @@ function applyVersionHistoryPayloadToState(state, payload, options = {}) {
         draft.notes,
         notesTitle
       );
-      promotePageToNewestHistoryVersion(draft.notes, notesTitle);
+      if (options.promotePages !== false) {
+        promotePageToNewestHistoryVersion(draft.notes, notesTitle);
+      }
     }
   });
 
@@ -876,13 +906,24 @@ function stateWithVersionHistoriesCompatibleWithPayload(state, payload) {
     if (!matchingDraft) return;
 
     const matchingDraftId = asText(matchingDraft.id || matchingDraft.draftId);
-    if (matchingDraftId && draftId && matchingDraftId !== draftId) {
+    if (
+      matchingDraftId &&
+      draftId &&
+      matchingDraftId !== draftId &&
+      !versionHistoryEntryIsRetiredForDraft(matchingDraft, draft)
+    ) {
       draft.versionHistory = [];
     }
 
     const matchingNotesId = asText(matchingDraft?.notes?.id || matchingDraft?.notesId || matchingDraft?.draftNotesId);
     const notesId = asText(draft.notes?.id);
-    if (draft.notes && matchingNotesId && notesId && matchingNotesId !== notesId) {
+    if (
+      draft.notes &&
+      matchingNotesId &&
+      notesId &&
+      matchingNotesId !== notesId &&
+      !versionHistoryEntryIsRetiredForDraft(matchingDraft, draft)
+    ) {
       draft.notes.versionHistory = [];
     }
   });
@@ -907,6 +948,7 @@ function versionHistoryPayloadPages(payload) {
 
   pages.push({
     key: "story",
+    matchKey: "story",
     label: PROJECT_NOTES_TITLE,
     entries: historyArrayFromPayloadEntry(payload.story || payload.initialNotes)
   });
@@ -917,11 +959,13 @@ function versionHistoryPayloadPages(payload) {
     const key = versionHistoryDraftPageKey(draft, index);
     pages.push({
       key,
+      matchKey: `draft:${index}:${normalizeHistoryTitle(title)}`,
       label: title,
       entries: historyArrayFromPayloadEntry(draft)
     });
     pages.push({
       key: `${key}:notes`,
+      matchKey: `draft-notes:${index}:${normalizeHistoryTitle(title)}`,
       label: asText(draft?.notes?.title) || `${title} Notes`,
       entries: draftNotesHistoryFromPayloadEntry(draft) || []
     });
@@ -955,17 +999,19 @@ function historyTextValues(entry) {
 
 function missingVersionHistoryTextEntries(previousPayload, nextPayload) {
   const nextPages = new Map();
+  const nextPagesByMatchKey = new Map();
   versionHistoryPayloadPages(nextPayload).forEach(page => {
     const values = new Map();
     (page.entries || []).forEach(entry => {
       historyTextValues(entry).forEach(([kind, value]) => incrementCount(values, `${kind}\0${value}`));
     });
     nextPages.set(page.key, values);
+    nextPagesByMatchKey.set(page.matchKey, values);
   });
 
   const missing = [];
   versionHistoryPayloadPages(previousPayload).forEach(page => {
-    const nextValues = nextPages.get(page.key) || new Map();
+    const nextValues = nextPages.get(page.key) || nextPagesByMatchKey.get(page.matchKey) || new Map();
     (page.entries || []).forEach((entry, index) => {
       historyTextValues(entry).forEach(([kind, value]) => {
         if (decrementCount(nextValues, `${kind}\0${value}`)) return;
@@ -985,15 +1031,18 @@ function missingVersionHistoryTextEntries(previousPayload, nextPayload) {
 
 function versionHistoryEntryCountLosses(previousPayload, nextPayload) {
   const nextPages = new Map();
+  const nextPagesByMatchKey = new Map();
   versionHistoryPayloadPages(nextPayload).forEach(page => {
-    nextPages.set(page.key, Array.isArray(page.entries) ? page.entries.length : 0);
+    const count = Array.isArray(page.entries) ? page.entries.length : 0;
+    nextPages.set(page.key, count);
+    nextPagesByMatchKey.set(page.matchKey, count);
   });
 
   const losses = [];
   versionHistoryPayloadPages(previousPayload).forEach(page => {
     const previousCount = Array.isArray(page.entries) ? page.entries.length : 0;
     if (!previousCount) return;
-    const nextCount = nextPages.get(page.key) || 0;
+    const nextCount = nextPages.get(page.key) ?? nextPagesByMatchKey.get(page.matchKey) ?? 0;
     if (nextCount >= previousCount) return;
     losses.push({
       page: page.label,
@@ -1160,7 +1209,7 @@ function assertCarriedVersionHistoryFilesSafe(carriedHistoryFiles) {
 
 function versionHistoryPayloadFromState(state, options = {}) {
   const source = historySourceInfo(options);
-  return {
+  const payload = {
     version: 1,
     storyId: state.storyId,
     sourceFileName: source.fileName,
@@ -1186,6 +1235,41 @@ function versionHistoryPayloadFromState(state, options = {}) {
       }
     }))
   };
+
+  const previousPayload = options.previousPayload;
+  if (!previousPayload || !Array.isArray(previousPayload.drafts)) return payload;
+
+  previousPayload.drafts.forEach((previousDraft, previousIndex) => {
+    const draftHistory = historyArrayFromPayloadEntry(previousDraft);
+    const notesHistory = draftNotesHistoryFromPayloadEntry(previousDraft) || [];
+    if (!draftHistory.length && !notesHistory.length) return;
+
+    const previousId = asText(previousDraft?.id || previousDraft?.draftId);
+    const previousTitle = normalizeHistoryTitle(previousDraft?.title);
+    const previousDraftIndex = Number.isInteger(previousDraft?.index)
+      ? previousDraft.index
+      : previousIndex;
+    const stillLive = payload.drafts.some((draft, draftIndex) => {
+      const draftId = asText(draft?.id || draft?.draftId);
+      if (previousId && draftId && previousId === draftId) return true;
+
+      const draftTitle = normalizeHistoryTitle(draft?.title);
+      if (previousTitle && draftTitle && previousTitle === draftTitle) return true;
+
+      const normalizedDraftIndex = Number.isInteger(draft?.index) ? draft.index : draftIndex;
+      return !previousId && !draftId && previousDraftIndex === normalizedDraftIndex;
+    });
+    if (stillLive) return;
+
+    payload.drafts.push({
+      ...previousDraft,
+      index: previousDraftIndex,
+      retired: true,
+      retiredAt: asText(previousDraft?.retiredAt) || nowIso()
+    });
+  });
+
+  return payload;
 }
 
 function textHash(value) {
@@ -1647,10 +1731,17 @@ function versionHistoryTransactionWrite(state, options = {}) {
     ? stateWithVersionHistoriesCompatibleWithPayload(state, existingPayload)
     : normalizeState(state);
   if (existingPayload && options.mergeExisting !== false) {
-    applyVersionHistoryPayloadToState(sourceState, existingPayload, { adoptStoryId: false });
+    applyVersionHistoryPayloadToState(sourceState, existingPayload, {
+      adoptStoryId: false,
+      adoptRetiredDraftIds: false,
+      promotePages: false
+    });
   }
   const stateToWrite = normalizeState(sourceState);
-  const nextPayload = versionHistoryPayloadFromState(stateToWrite, options);
+  const nextPayload = versionHistoryPayloadFromState(stateToWrite, {
+    ...options,
+    previousPayload: existingPayload
+  });
   if (existingPayload) {
     assertVersionHistoryPreservesExistingText(existingPayload, nextPayload, existingHistoryPath);
   }
@@ -1661,6 +1752,7 @@ function versionHistoryTransactionWrite(state, options = {}) {
   return {
     filePath,
     content,
+    state: stateToWrite,
     onCommit: () => rememberVersionHistoryFilePath(rootFolderPath, source, filePath)
   };
 }
@@ -4128,10 +4220,29 @@ function writeProjectStateOnly(state, options = {}) {
 function writeAll(state, options = {}) {
   ensureDataDir();
   recoverPersistenceTransaction();
-  const normalized = normalizeState(stateWithNewestStoredViewState(state), { touch: true });
-  const exportText = formatExport(normalized);
+  let normalized = normalizeState(stateWithNewestStoredViewState(state), { touch: true });
   const linkedTextPath = readTextFileLink();
   const missingLinkedTextFile = !options.allowCreateLinkedTextFile && linkedTextFileMissing(linkedTextPath);
+  const versionHistoryWrites = [];
+
+  if (!options.skipVersionHistory) {
+    try {
+      const versionHistoryWrite = versionHistoryTransactionWrite(normalized, {
+        filePath: options.filePath || linkedTextPath || (options.fileName ? "" : EXPORT_FILE),
+        fileName: options.fileName,
+        mergeExisting: options.mergeExisting
+      });
+      if (versionHistoryWrite) {
+        normalized = versionHistoryWrite.state || normalized;
+        versionHistoryWrite.preserveFileIdentity = Boolean(options.preserveExternalFileIdentity);
+        versionHistoryWrites.push(versionHistoryWrite);
+      }
+    } catch (error) {
+      if (!options.allowMissingVersionHistoryFolder || !isBackupFolderMissingError(error)) throw error;
+    }
+  }
+
+  const exportText = formatExport(normalized);
   const coreWrites = [
     {
       filePath: STATE_FILE,
@@ -4156,24 +4267,6 @@ function writeAll(state, options = {}) {
     }
     const cacheWrite = textFileStateTransactionWrite(linkedTextPath, normalized);
     if (cacheWrite) linkedWrites.push(cacheWrite);
-  }
-
-  const versionHistoryWrites = [];
-
-  if (!options.skipVersionHistory) {
-    try {
-      const versionHistoryWrite = versionHistoryTransactionWrite(normalized, {
-        filePath: options.filePath || linkedTextPath || (options.fileName ? "" : EXPORT_FILE),
-        fileName: options.fileName,
-        mergeExisting: options.mergeExisting
-      });
-      if (versionHistoryWrite) {
-        versionHistoryWrite.preserveFileIdentity = Boolean(options.preserveExternalFileIdentity);
-        versionHistoryWrites.push(versionHistoryWrite);
-      }
-    } catch (error) {
-      if (!options.allowMissingVersionHistoryFolder || !isBackupFolderMissingError(error)) throw error;
-    }
   }
 
   const allWrites = [...coreWrites, ...linkedWrites, ...versionHistoryWrites];

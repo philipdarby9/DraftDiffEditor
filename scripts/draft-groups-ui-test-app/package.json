@@ -1,0 +1,5 @@
+{
+  "name": "draft-diff-draft-groups-ui-test",
+  "private": true,
+  "main": "../test-draft-groups-ui.js"
+}

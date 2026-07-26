@@ -301,6 +301,162 @@ try {
     "normal save should preserve separate saved versions even when their text is identical"
   );
 
+  const retiredStoryPath = path.join(dataDir, "retired-story.txt");
+  t.writeTextFileLink(retiredStoryPath);
+  const stateWithRetirableDraft = StateCore.normalizeState({
+    storyId: "retired-story",
+    createdAt: "2026-01-01T00:00:00.000Z",
+    updatedAt: "2026-01-03T00:00:00.000Z",
+    initialNotes: {
+      title: "Project notes",
+      content: "",
+      contentHtml: ""
+    },
+    drafts: [
+      {
+        id: "retired-draft-1",
+        title: "Draft 1",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-03T00:00:00.000Z",
+        content: "Live Draft 1",
+        contentHtml: "<p>Live Draft 1</p>",
+        notes: {
+          id: "retired-notes-1",
+          title: "Draft 1 Notes",
+          content: "",
+          contentHtml: ""
+        }
+      },
+      {
+        id: "retired-draft-2",
+        title: "Draft 2",
+        createdAt: "2026-01-01T00:00:00.000Z",
+        updatedAt: "2026-01-03T00:00:00.000Z",
+        content: "",
+        contentHtml: "",
+        versionHistory: [
+          {
+            id: "retired-draft-2-v1",
+            createdAt: "2026-01-01T00:00:00.000Z",
+            title: "Draft 2",
+            content: "Original Draft 2 text",
+            contentHtml: "<p>Original Draft 2 text</p>"
+          },
+          {
+            id: "retired-draft-2-cleared",
+            createdAt: "2026-01-03T00:00:00.000Z",
+            title: "Draft 2",
+            content: "",
+            contentHtml: ""
+          }
+        ],
+        notes: {
+          id: "retired-notes-2",
+          title: "Draft 2 Notes",
+          content: "",
+          contentHtml: "",
+          versionHistory: [{
+            id: "retired-notes-2-v1",
+            createdAt: "2026-01-02T00:00:00.000Z",
+            title: "Draft 2 Notes",
+            content: "Original Draft 2 notes",
+            contentHtml: "<p>Original Draft 2 notes</p>"
+          }]
+        }
+      }
+    ]
+  });
+  t.writeAll(stateWithRetirableDraft, {
+    filePath: retiredStoryPath,
+    fileName: "retired-story.txt",
+    allowCreateLinkedTextFile: true
+  });
+  const retiredSidecarPath = path.join(historyDir, "json", "retired-story.version-history.json");
+
+  const stateAfterDraftDeletion = StateCore.normalizeState({
+    ...stateWithRetirableDraft,
+    updatedAt: "2026-01-04T00:00:00.000Z",
+    drafts: [stateWithRetirableDraft.drafts[0]]
+  });
+  assert.doesNotThrow(() => t.writeAll(stateAfterDraftDeletion, {
+    filePath: retiredStoryPath,
+    fileName: "retired-story.txt",
+    allowCreateLinkedTextFile: true
+  }), "deleting a live draft should not delete its saved version history");
+
+  const afterDraftDeletion = JSON.parse(readText(retiredSidecarPath));
+  const retiredDraft = afterDraftDeletion.drafts.find(draft => draft.id === "retired-draft-2");
+  assert.equal(JSON.parse(readText(t.STATE_FILE)).drafts.length, 1, "deleted draft should leave the live project");
+  assert.equal(afterDraftDeletion.drafts.length, 2, "deleted draft history should remain in the sidecar");
+  assert.equal(retiredDraft?.retired, true, "deleted draft history should be marked as retired");
+  assert.equal(
+    retiredDraft?.history?.some(version => version.id === "retired-draft-2-v1"),
+    true,
+    "deleted draft text versions should remain intact"
+  );
+  assert.equal(
+    retiredDraft?.notes?.history?.some(version => version.id === "retired-notes-2-v1"),
+    true,
+    "deleted draft notes versions should remain intact"
+  );
+  assert.doesNotMatch(readText(retiredStoryPath), /Original Draft 2 text/, "deleted draft should leave the text viewer export");
+
+  delete retiredDraft.retired;
+  delete retiredDraft.retiredAt;
+  fs.writeFileSync(retiredSidecarPath, `${JSON.stringify(afterDraftDeletion, null, 2)}\n`, "utf8");
+
+  const reincarnatedState = StateCore.normalizeState({
+    ...stateAfterDraftDeletion,
+    updatedAt: "2026-01-05T00:00:00.000Z",
+    drafts: [
+      stateAfterDraftDeletion.drafts[0],
+      {
+        id: "new-draft-2-id",
+        title: "Draft 2",
+        createdAt: "2026-01-05T00:00:00.000Z",
+        updatedAt: "2026-01-05T00:00:00.000Z",
+        content: "New Draft 2 text",
+        contentHtml: "<p>New Draft 2 text</p>",
+        versionHistory: [{
+          id: "new-draft-2-v1",
+          createdAt: "2026-01-05T00:00:00.000Z",
+          title: "Draft 2",
+          content: "New Draft 2 text",
+          contentHtml: "<p>New Draft 2 text</p>"
+        }],
+        notes: {
+          id: "new-notes-2-id",
+          title: "Draft 2 Notes",
+          content: "",
+          contentHtml: ""
+        }
+      }
+    ]
+  });
+  const revivedState = t.writeAll(reincarnatedState, {
+    filePath: retiredStoryPath,
+    fileName: "retired-story.txt",
+    allowCreateLinkedTextFile: true
+  });
+  const afterDraftRecreation = JSON.parse(readText(retiredSidecarPath));
+  const revivedDraft = afterDraftRecreation.drafts.find(draft => draft.id === "new-draft-2-id");
+  assert.equal(afterDraftRecreation.drafts.length, 2, "recreated Draft 2 should reuse its retired history slot");
+  assert.equal(revivedDraft?.retired, undefined, "recreated Draft 2 should become live history again");
+  assert.equal(revivedDraft?.history?.[0]?.id, "retired-draft-2-v1");
+  assert.equal(
+    revivedDraft?.history?.some(version => version.id === "new-draft-2-v1"),
+    true,
+    "new Draft 2 versions should append to the original versions"
+  );
+  assert.equal(revivedState.drafts[1].id, "new-draft-2-id", "live recreated draft should keep its active editor ID");
+  assert.equal(revivedState.drafts[1].content, "New Draft 2 text", "reconnecting history should not replace new live text");
+  assert.equal(
+    revivedState.drafts[1].versionHistory.some(version => version.id === "retired-draft-2-v1"),
+    true,
+    "save response should immediately expose original versions to the recreated draft"
+  );
+  t.writeTextFileLink(linkedPath);
+
   fs.writeFileSync(linkedHistoryPath, `${JSON.stringify({
     version: 1,
     sourceFileName: "linked.txt",

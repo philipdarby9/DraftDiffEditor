@@ -1,0 +1,5 @@
+{
+  "name": "draft-diff-retired-history-ui-test",
+  "private": true,
+  "main": "../test-retired-draft-history-ui.js"
+}
