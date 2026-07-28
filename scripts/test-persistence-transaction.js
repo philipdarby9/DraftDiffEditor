@@ -476,7 +476,24 @@ try {
         id: "draft-empty-8",
         index: 7,
         title: "Draft 8",
-        history: []
+        history: [{
+          id: "deleted-draft-v1",
+          createdAt: "2025-12-31T00:00:00.000Z",
+          title: "Draft 8",
+          content: "Deleted draft history",
+          contentHtml: "<p>Deleted draft history</p>"
+        }],
+        notes: {
+          id: "deleted-draft-notes",
+          title: "Draft 8 Notes",
+          history: [{
+            id: "deleted-draft-notes-v1",
+            createdAt: "2025-12-31T00:01:00.000Z",
+            title: "Draft 8 Notes",
+            content: "Deleted draft notes history",
+            contentHtml: "<p>Deleted draft notes history</p>"
+          }]
+        }
       },
       {
         id: "draft-copied-9",
@@ -538,7 +555,7 @@ try {
   assert.equal(
     renamedAfterDeletedDraftHistory.drafts.length,
     2,
-    "deleted empty drafts should not leave an extra sidecar draft"
+    "a deleted draft whose number is reused should merge into the surviving sidecar draft"
   );
   assert.equal(
     renamedAfterDeletedDraftHistory.drafts[1].id,
@@ -554,6 +571,16 @@ try {
     renamedAfterDeletedDraftHistory.drafts[1].history.some(version => version.id === "copied-draft-v1"),
     true,
     "renumbered copied draft should preserve history saved under its old draft number"
+  );
+  assert.equal(
+    renamedAfterDeletedDraftHistory.drafts[1].history.some(version => version.id === "deleted-draft-v1"),
+    true,
+    "renumbered copied draft should merge history saved under its new draft number"
+  );
+  assert.equal(
+    renamedAfterDeletedDraftHistory.drafts[1].notes.history.some(version => version.id === "deleted-draft-notes-v1"),
+    true,
+    "renumbered copied draft should merge notes history saved under its new draft number"
   );
 
   fs.writeFileSync(linkedHistoryPath, `${JSON.stringify({

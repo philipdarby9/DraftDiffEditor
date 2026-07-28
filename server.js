@@ -830,41 +830,61 @@ function applyVersionHistoryPayloadToState(state, payload, options = {}) {
 
   state.drafts?.forEach((draft, index) => {
     const titleKey = normalizeHistoryTitle(draft.title);
-    const matchingDraft = byId.get(draft.id)
-      || (titleKey ? titles.get(titleKey) : null)
+    const idMatchingDraft = byId.get(draft.id);
+    const titleMatchingDraft = titleKey ? titles.get(titleKey) : null;
+    const matchingDraft = idMatchingDraft
+      || titleMatchingDraft
       || byIndex.get(index);
+    const matchingDrafts = [matchingDraft];
+    if (
+      idMatchingDraft &&
+      titleMatchingDraft &&
+      titleMatchingDraft !== idMatchingDraft
+    ) {
+      matchingDrafts.push(titleMatchingDraft);
+    }
     const matchingDraftId = asText(matchingDraft?.id || matchingDraft?.draftId);
     const matchingDraftIsRetired = versionHistoryEntryIsRetiredForDraft(matchingDraft, draft);
     const shouldAdoptMatchingDraftIds = !matchingDraftIsRetired || options.adoptRetiredDraftIds !== false;
     if (matchingDraftId && shouldAdoptMatchingDraftIds) draft.id = matchingDraftId;
 
-    const history = Array.isArray(matchingDraft?.history)
-      ? matchingDraft.history
-      : matchingDraft?.versionHistory;
-    if (Array.isArray(history)) {
-      draft.versionHistory = mergePageVersionHistories(
-        draft.versionHistory,
-        history,
-        draft,
-        draft.title || "Untitled draft"
-      );
-      if (options.promotePages !== false) {
+    let mergedDraftHistory = false;
+    let mergedNotesHistory = false;
+    matchingDrafts.forEach(historyDraft => {
+      const history = Array.isArray(historyDraft?.history)
+        ? historyDraft.history
+        : historyDraft?.versionHistory;
+      if (Array.isArray(history)) {
+        draft.versionHistory = mergePageVersionHistories(
+          draft.versionHistory,
+          history,
+          draft,
+          draft.title || "Untitled draft"
+        );
+        mergedDraftHistory = true;
+      }
+
+      const notesHistory = draftNotesHistoryFromPayloadEntry(historyDraft);
+      if (draft.notes && Array.isArray(notesHistory)) {
+        const notesTitle = draft.notes.title || `${draft.title || "Untitled draft"} Notes`;
+        draft.notes.versionHistory = mergePageVersionHistories(
+          draft.notes.versionHistory,
+          notesHistory,
+          draft.notes,
+          notesTitle
+        );
+        mergedNotesHistory = true;
+      }
+    });
+
+    const matchingNotesId = asText(matchingDraft?.notes?.id || matchingDraft?.notesId || matchingDraft?.draftNotesId);
+    if (draft.notes && matchingNotesId && shouldAdoptMatchingDraftIds) draft.notes.id = matchingNotesId;
+    if (options.promotePages !== false) {
+      if (mergedDraftHistory) {
         promotePageToNewestHistoryVersion(draft, draft.title || "Untitled draft");
       }
-    }
-
-    const notesHistory = draftNotesHistoryFromPayloadEntry(matchingDraft);
-    if (draft.notes && Array.isArray(notesHistory)) {
-      const matchingNotesId = asText(matchingDraft?.notes?.id || matchingDraft?.notesId || matchingDraft?.draftNotesId);
-      if (matchingNotesId && shouldAdoptMatchingDraftIds) draft.notes.id = matchingNotesId;
-      const notesTitle = draft.notes.title || `${draft.title || "Untitled draft"} Notes`;
-      draft.notes.versionHistory = mergePageVersionHistories(
-        draft.notes.versionHistory,
-        notesHistory,
-        draft.notes,
-        notesTitle
-      );
-      if (options.promotePages !== false) {
+      if (draft.notes && mergedNotesHistory) {
+        const notesTitle = draft.notes.title || `${draft.title || "Untitled draft"} Notes`;
         promotePageToNewestHistoryVersion(draft.notes, notesTitle);
       }
     }
@@ -949,6 +969,7 @@ function versionHistoryPayloadPages(payload) {
   pages.push({
     key: "story",
     matchKey: "story",
+    titleMatchKey: "story",
     label: PROJECT_NOTES_TITLE,
     entries: historyArrayFromPayloadEntry(payload.story || payload.initialNotes)
   });
@@ -960,12 +981,14 @@ function versionHistoryPayloadPages(payload) {
     pages.push({
       key,
       matchKey: `draft:${index}:${normalizeHistoryTitle(title)}`,
+      titleMatchKey: `draft:${normalizeHistoryTitle(title)}`,
       label: title,
       entries: historyArrayFromPayloadEntry(draft)
     });
     pages.push({
       key: `${key}:notes`,
       matchKey: `draft-notes:${index}:${normalizeHistoryTitle(title)}`,
+      titleMatchKey: `draft-notes:${normalizeHistoryTitle(title)}`,
       label: asText(draft?.notes?.title) || `${title} Notes`,
       entries: draftNotesHistoryFromPayloadEntry(draft) || []
     });
@@ -990,6 +1013,12 @@ function decrementCount(map, key) {
   return true;
 }
 
+function setUniqueHistoryPageMatch(map, key, value) {
+  if (!key) return;
+  if (map.has(key)) map.set(key, null);
+  else map.set(key, value);
+}
+
 function historyTextValues(entry) {
   return [
     ["content", normalizedHistoryTextValue(entry?.content ?? entry?.text)],
@@ -1000,6 +1029,7 @@ function historyTextValues(entry) {
 function missingVersionHistoryTextEntries(previousPayload, nextPayload) {
   const nextPages = new Map();
   const nextPagesByMatchKey = new Map();
+  const nextPagesByTitleMatchKey = new Map();
   versionHistoryPayloadPages(nextPayload).forEach(page => {
     const values = new Map();
     (page.entries || []).forEach(entry => {
@@ -1007,11 +1037,15 @@ function missingVersionHistoryTextEntries(previousPayload, nextPayload) {
     });
     nextPages.set(page.key, values);
     nextPagesByMatchKey.set(page.matchKey, values);
+    setUniqueHistoryPageMatch(nextPagesByTitleMatchKey, page.titleMatchKey, values);
   });
 
   const missing = [];
   versionHistoryPayloadPages(previousPayload).forEach(page => {
-    const nextValues = nextPages.get(page.key) || nextPagesByMatchKey.get(page.matchKey) || new Map();
+    const nextValues = nextPages.get(page.key)
+      || nextPagesByMatchKey.get(page.matchKey)
+      || nextPagesByTitleMatchKey.get(page.titleMatchKey)
+      || new Map();
     (page.entries || []).forEach((entry, index) => {
       historyTextValues(entry).forEach(([kind, value]) => {
         if (decrementCount(nextValues, `${kind}\0${value}`)) return;
@@ -1032,17 +1066,22 @@ function missingVersionHistoryTextEntries(previousPayload, nextPayload) {
 function versionHistoryEntryCountLosses(previousPayload, nextPayload) {
   const nextPages = new Map();
   const nextPagesByMatchKey = new Map();
+  const nextPagesByTitleMatchKey = new Map();
   versionHistoryPayloadPages(nextPayload).forEach(page => {
     const count = Array.isArray(page.entries) ? page.entries.length : 0;
     nextPages.set(page.key, count);
     nextPagesByMatchKey.set(page.matchKey, count);
+    setUniqueHistoryPageMatch(nextPagesByTitleMatchKey, page.titleMatchKey, count);
   });
 
   const losses = [];
   versionHistoryPayloadPages(previousPayload).forEach(page => {
     const previousCount = Array.isArray(page.entries) ? page.entries.length : 0;
     if (!previousCount) return;
-    const nextCount = nextPages.get(page.key) ?? nextPagesByMatchKey.get(page.matchKey) ?? 0;
+    const nextCount = nextPages.get(page.key)
+      ?? nextPagesByMatchKey.get(page.matchKey)
+      ?? nextPagesByTitleMatchKey.get(page.titleMatchKey)
+      ?? 0;
     if (nextCount >= previousCount) return;
     losses.push({
       page: page.label,
