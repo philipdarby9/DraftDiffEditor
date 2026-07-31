@@ -112,6 +112,86 @@ async function api(baseUrl, pathname, options = {}, expectedStatus = 200) {
   return payload;
 }
 
+async function waitForRetentionJob(baseUrl, jobId) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const payload = await api(
+      baseUrl,
+      `/api/version-history-backups/retention/progress?id=${encodeURIComponent(jobId)}`
+    );
+    const status = payload?.progress?.status;
+    if (status === "complete" || status === "failed") return payload.progress;
+    await new Promise(resolve => setTimeout(resolve, 20));
+  }
+  throw new Error(`Timed out waiting for retention job ${jobId}`);
+}
+
+function htmlAttribute(tag, name) {
+  return tag.match(new RegExp(`\\b${name}="([^"]*)"`, "u"))?.[1] || "";
+}
+
+function htmlClassNames(tag) {
+  return htmlAttribute(tag, "class").split(/\s+/u).filter(Boolean);
+}
+
+function visibleText(html) {
+  return html.replace(/<[^>]*>/gu, "").replace(/\s+/gu, " ").trim();
+}
+
+function parseDetailsNodes(html) {
+  const nodes = [];
+  const stack = [];
+  for (const match of html.matchAll(/<\/?details\b[^>]*>/gu)) {
+    if (match[0].startsWith("</")) {
+      const node = stack.pop();
+      assert.ok(node, "details closing tag should have a matching opening tag");
+      node.closingStart = match.index;
+      node.closingEnd = match.index + match[0].length;
+      continue;
+    }
+    const parent = stack[stack.length - 1] || null;
+    const node = {
+      tag: match[0],
+      openingStart: match.index,
+      openingEnd: match.index + match[0].length,
+      closingStart: null,
+      closingEnd: null,
+      parent,
+      children: []
+    };
+    if (parent) parent.children.push(node);
+    nodes.push(node);
+    stack.push(node);
+  }
+  assert.equal(stack.length, 0, "all details elements should be closed");
+  return nodes;
+}
+
+function detailsSummaryHtml(html, node) {
+  const summary = html.slice(node.openingEnd, node.closingStart).trimStart().match(
+    /^<summary\b[^>]*>[\s\S]*?<\/summary>/u
+  )?.[0];
+  assert.ok(summary, `${htmlAttribute(node.tag, "id") || htmlAttribute(node.tag, "class")} should have a summary`);
+  return summary;
+}
+
+function assertNestedActions(html, node, label) {
+  assert.match(node.tag, /\bdata-nested-container\b/u, `${label} should scope its nested actions`);
+  const summary = detailsSummaryHtml(html, node);
+  const buttons = [...summary.matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/gu)]
+    .filter(match => htmlAttribute(match[1], "data-nested-action"));
+  assert.deepEqual(
+    buttons.map(match => ({
+      action: htmlAttribute(match[1], "data-nested-action"),
+      name: htmlAttribute(match[1], "aria-label") || visibleText(match[2])
+    })),
+    [
+      { action: "expand", name: "Expand all" },
+      { action: "collapse", name: "Collapse all" }
+    ],
+    `${label} should provide scoped Expand all and Collapse all actions`
+  );
+}
+
 function fixtureState() {
   return StateCore.normalizeState({
     createdAt: "2026-01-01T00:00:00.000Z",
@@ -447,17 +527,90 @@ async function run() {
     assert.match(await exportResponse.text(), /Alpha from unit/);
 
     const summaryFolder = path.join(dataDir, "version-history-folder");
+    fs.mkdirSync(summaryFolder, { recursive: true });
     __test.writeVersionHistoryFolderPath(summaryFolder);
+    const readyFolder = path.join(
+      summaryFolder,
+      "version history JSON archive",
+      "Ready for manual deletion"
+    );
+    const queuedRunFolder = path.join(
+      readyFolder,
+      "retention-2026-07-31T12-00-00-000Z-test-ready-run"
+    );
+    fs.mkdirSync(queuedRunFolder, { recursive: true });
+    fs.writeFileSync(
+      path.join(queuedRunFolder, "queued.version-history.json"),
+      "{\"queued\":true}\n",
+      "utf8"
+    );
+    const stateWithReadyArchive = await api(baseUrl, "/api/state");
+    assert.equal(stateWithReadyArchive.readyForManualDeletion.ready, true);
+    assert.equal(stateWithReadyArchive.readyForManualDeletion.itemCount, 1);
+    assert.equal(stateWithReadyArchive.readyForManualDeletion.runCount, 1);
+    assert.equal(
+      stateWithReadyArchive.readyForManualDeletion.folderPath,
+      readyFolder
+    );
+
+    let openedReadyFolder = "";
+    await __test.openVersionHistoryArchiveReadyFolder({
+      openFileLocation: async folderPath => {
+        openedReadyFolder = folderPath;
+        return { filePath: folderPath, directoryPath: folderPath };
+      }
+    });
+    assert.equal(path.resolve(openedReadyFolder), path.resolve(readyFolder));
+    await api(
+      baseUrl,
+      "/api/version-history-backups/archive-expiry/delete",
+      { method: "POST", body: "{}" },
+      404
+    );
+    await api(
+      baseUrl,
+      "/api/version-history-backups/archive-expiry/move-to-manual-deletion",
+      { method: "POST", body: "{}" },
+      404
+    );
+    const expiryPreviewStart = await api(
+      baseUrl,
+      "/api/version-history-backups/archive-expiry/start",
+      { method: "POST" }
+    );
+    const expiryPreviewProgress = await waitForRetentionJob(
+      baseUrl,
+      expiryPreviewStart.jobId
+    );
+    assert.equal(expiryPreviewProgress.status, "complete");
+    assert.equal(expiryPreviewProgress.result.movableRunCount, 0);
+    const expiryMoveStart = await api(
+      baseUrl,
+      "/api/version-history-backups/archive-expiry/move-to-manual-deletion",
+      {
+        method: "POST",
+        body: JSON.stringify({ planId: expiryPreviewStart.planId })
+      }
+    );
+    const expiryMoveProgress = await waitForRetentionJob(
+      baseUrl,
+      expiryMoveStart.jobId
+    );
+    assert.equal(expiryMoveProgress.status, "complete");
+    assert.equal(expiryMoveProgress.operation, "archive-expiry-move");
+    assert.equal(expiryMoveProgress.result.status, "no-op");
+    assert.equal(expiryMoveProgress.result.movedRunCount, 0);
 
     const unchangedVersionState = StateCore.normalizeState({
       createdAt: "2026-01-01T00:00:00.000Z",
-      updatedAt: "2026-01-01T00:00:03.000Z",
+      updatedAt: "2026-01-01T00:00:04.000Z",
       initialNotes: {
         title: "Project notes",
         createdAt: "2026-01-01T00:00:00.000Z",
-        updatedAt: "2026-01-01T00:00:03.000Z",
+        updatedAt: "2026-01-01T00:00:04.000Z",
         content: "Story changed",
         contentHtml: "Story changed",
+        format: { fontSize: "22" },
         versionHistory: [
           {
             id: "story-v1",
@@ -480,6 +633,14 @@ async function run() {
             title: "Project notes",
             content: "Story changed",
             contentHtml: "Story changed"
+          },
+          {
+            id: "story-v4-format-only",
+            createdAt: "2026-01-01T00:00:03.000Z",
+            title: "Project notes",
+            content: "Story changed",
+            contentHtml: "<em>Story changed</em>",
+            format: { fontSize: "22" }
           }
         ]
       },
@@ -493,7 +654,21 @@ async function run() {
     assert.doesNotMatch(unchangedSummaryHtml, /No text changes from the previous version/u);
     assert.match(unchangedSummaryHtml, /Version 2 \/ current/u);
     assert.doesNotMatch(unchangedSummaryHtml, /Version 3/u);
-    assert.match(unchangedSummaryHtml, /1 unchanged version skipped/u);
+    assert.match(unchangedSummaryHtml, /2 unchanged versions skipped/u);
+    const unchangedHistoryPage = parseDetailsNodes(unchangedSummaryHtml)
+      .find(node => htmlAttribute(node.tag, "id") === "project-notes");
+    assert.ok(unchangedHistoryPage, "unchanged-version report should contain Project notes");
+    assert.deepEqual(
+      [...detailsSummaryHtml(unchangedSummaryHtml, unchangedHistoryPage)
+        .matchAll(/<time\b[^>]*\bdatetime="([^"]+)"/gu)]
+        .map(match => match[1]),
+      [
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:00.000Z",
+        "2026-01-01T00:00:03.000Z"
+      ],
+      "page date range should use the actual first and last versions, including unchanged versions"
+    );
 
     const firstPeriodStart = "2026-01-01T00:00:00.000Z";
     const firstPeriodEnd = "2026-01-01T12:00:00.000Z";
@@ -546,30 +721,60 @@ async function run() {
       filePath: path.join(dataDir, "grouped-summary.txt")
     });
     const groupedSummaryHtml = fs.readFileSync(groupedSummaryResult.reportPath, "utf8");
-    const periodOpeningTags = className => [...groupedSummaryHtml.matchAll(/<details\b[^>]*>/gu)]
-      .map(match => match[0])
-      .filter(tag => (tag.match(/\bclass="([^"]*)"/u)?.[1] || "").split(/\s+/u).includes(className));
-    const periodRanges = tags => tags.map(tag => ({
-      start: tag.match(/\bdata-version-period-start="([^"]+)"/u)?.[1],
-      end: tag.match(/\bdata-version-period-end="([^"]+)"/u)?.[1]
+    const detailsClassNames = tag => (tag.match(/\bclass="([^"]*)"/u)?.[1] || "").split(/\s+/u).filter(Boolean);
+    const detailsNodes = parseDetailsNodes(groupedSummaryHtml);
+    const detailsNodesWithClass = className => detailsNodes.filter(node => detailsClassNames(node.tag).includes(className));
+    const periodRanges = nodes => nodes.map(node => ({
+      start: node.tag.match(/\bdata-version-period-start="([^"]+)"/u)?.[1],
+      end: node.tag.match(/\bdata-version-period-end="([^"]+)"/u)?.[1]
     }));
     const expectedPeriodRanges = [
       { start: firstPeriodStart, end: firstPeriodEnd },
       { start: secondPeriodStart, end: secondPeriodEnd }
     ];
-    const contentsPeriodTags = periodOpeningTags("contents-version-period");
-    const bodyPeriodTags = periodOpeningTags("version-period");
-    assert.equal(contentsPeriodTags.length, 2);
-    assert.equal(bodyPeriodTags.length, 2);
-    assert.deepEqual(periodRanges(contentsPeriodTags), expectedPeriodRanges);
-    assert.deepEqual(periodRanges(bodyPeriodTags), expectedPeriodRanges);
-    assert.equal(contentsPeriodTags.every(tag => /\bdata-collapsible\b/u.test(tag)), true);
-    assert.equal(bodyPeriodTags.every(tag => /\bdata-collapsible\b/u.test(tag)), true);
+    const contentsPeriodNodes = detailsNodesWithClass("contents-version-period");
+    const bodyPeriodNodes = detailsNodesWithClass("version-period");
+    const versionEntryNodes = detailsNodesWithClass("version-entry");
+    assert.equal(contentsPeriodNodes.length, 2);
+    assert.equal(bodyPeriodNodes.length, 2);
+    assert.equal(versionEntryNodes.length, 4);
+    assert.deepEqual(periodRanges(contentsPeriodNodes), expectedPeriodRanges);
+    assert.deepEqual(periodRanges(bodyPeriodNodes), expectedPeriodRanges);
+    assert.equal(contentsPeriodNodes.every(node => /\bdata-collapsible\b/u.test(node.tag)), true);
+    assert.equal(bodyPeriodNodes.every(node => /\bdata-collapsible\b/u.test(node.tag)), true);
+    assert.equal(versionEntryNodes.every(node => /\bdata-collapsible\b/u.test(node.tag)), true);
+    assert.deepEqual(
+      versionEntryNodes.map(node => node.tag.match(/\bid="([^"]+)"/u)?.[1]),
+      [
+        "project-notes-version-1",
+        "project-notes-version-2",
+        "project-notes-version-3",
+        "project-notes-version-4"
+      ]
+    );
+    assert.equal(
+      versionEntryNodes.every(node => /^<summary\b/u.test(groupedSummaryHtml.slice(node.openingEnd).trimStart())),
+      true
+    );
+    assert.equal(
+      versionEntryNodes.every(node => !/\bopen(?:\s|>)/u.test(node.tag)),
+      true,
+      "opening a period should reveal individually closed version dropdowns"
+    );
+    assert.deepEqual(
+      bodyPeriodNodes.map(period => period.children
+        .filter(node => detailsClassNames(node.tag).includes("version-entry"))
+        .map(node => node.tag.match(/\bid="([^"]+)"/u)?.[1])),
+      [
+        ["project-notes-version-1", "project-notes-version-2"],
+        ["project-notes-version-3", "project-notes-version-4"]
+      ]
+    );
 
-    const firstContentsPeriodStart = groupedSummaryHtml.indexOf(contentsPeriodTags[0]);
-    const secondContentsPeriodStart = groupedSummaryHtml.indexOf(contentsPeriodTags[1], firstContentsPeriodStart + 1);
-    const firstBodyPeriodStart = groupedSummaryHtml.indexOf(bodyPeriodTags[0], secondContentsPeriodStart + 1);
-    const secondBodyPeriodStart = groupedSummaryHtml.indexOf(bodyPeriodTags[1], firstBodyPeriodStart + 1);
+    const firstContentsPeriodStart = groupedSummaryHtml.indexOf(contentsPeriodNodes[0].tag);
+    const secondContentsPeriodStart = groupedSummaryHtml.indexOf(contentsPeriodNodes[1].tag, firstContentsPeriodStart + 1);
+    const firstBodyPeriodStart = groupedSummaryHtml.indexOf(bodyPeriodNodes[0].tag, secondContentsPeriodStart + 1);
+    const secondBodyPeriodStart = groupedSummaryHtml.indexOf(bodyPeriodNodes[1].tag, firstBodyPeriodStart + 1);
     const firstContentsPeriodHtml = groupedSummaryHtml.slice(firstContentsPeriodStart, secondContentsPeriodStart);
     const secondContentsPeriodHtml = groupedSummaryHtml.slice(secondContentsPeriodStart, firstBodyPeriodStart);
     const firstBodyPeriodHtml = groupedSummaryHtml.slice(firstBodyPeriodStart, secondBodyPeriodStart);
@@ -579,22 +784,50 @@ async function run() {
     assert.doesNotMatch(firstContentsPeriodHtml, /href="#project-notes-version-3"/u);
     assert.match(secondContentsPeriodHtml, /href="#project-notes-version-3"/u);
     assert.match(secondContentsPeriodHtml, /href="#project-notes-version-4"/u);
-    assert.match(firstBodyPeriodHtml, /<article id="project-notes-version-1" class="version-entry">/u);
-    assert.match(firstBodyPeriodHtml, /<article id="project-notes-version-2" class="version-entry">/u);
-    assert.doesNotMatch(firstBodyPeriodHtml, /<article id="project-notes-version-3" class="version-entry">/u);
-    assert.match(secondBodyPeriodHtml, /<article id="project-notes-version-3" class="version-entry">/u);
-    assert.match(secondBodyPeriodHtml, /<article id="project-notes-version-4" class="version-entry">/u);
-    assert.match(firstBodyPeriodHtml, /class="version-period-title">[^<]+ to [^<]+<\/span>/u);
-    assert.match(secondBodyPeriodHtml, /class="version-period-title">[^<]+ to [^<]+<\/span>/u);
+    assert.match(firstBodyPeriodHtml, /class="version-period-title">Versions 1 - 2<\/span>/u);
+    assert.match(secondBodyPeriodHtml, /class="version-period-title">Versions 3 - 4<\/span>/u);
+    assert.match(firstBodyPeriodHtml, /class="version-period-dates">[^<]+ to [^<]+<\/span>/u);
+    assert.match(secondBodyPeriodHtml, /class="version-period-dates">[^<]+ to [^<]+<\/span>/u);
+    assert.match(
+      visibleText(detailsSummaryHtml(groupedSummaryHtml, contentsPeriodNodes[0])),
+      /^Versions 1 - 2\b.*\bto\b/u
+    );
+    assert.match(
+      visibleText(detailsSummaryHtml(groupedSummaryHtml, contentsPeriodNodes[1])),
+      /^Versions 3 - 4\b.*\bto\b/u
+    );
+    assert.match(
+      visibleText(detailsSummaryHtml(groupedSummaryHtml, bodyPeriodNodes[0])),
+      /^Versions 1 - 2\b.*\bto\b/u
+    );
+    assert.match(
+      visibleText(detailsSummaryHtml(groupedSummaryHtml, bodyPeriodNodes[1])),
+      /^Versions 3 - 4\b.*\bto\b/u
+    );
+
+    const groupedHistoryPage = detailsNodesWithClass("history-page-section")[0];
+    assert.ok(groupedHistoryPage, "grouped history should have a page dropdown");
+    assertNestedActions(groupedSummaryHtml, groupedHistoryPage, "history page with multiple periods");
+    const contentsGroups = detailsNodesWithClass("contents-group");
+    const contentsVersionHistory = contentsGroups.find(node => (
+      /^Version history\b/u.test(visibleText(detailsSummaryHtml(groupedSummaryHtml, node)))
+    ));
+    const contentsProjectNotes = contentsGroups.find(node => (
+      /^Project notes\b/u.test(visibleText(detailsSummaryHtml(groupedSummaryHtml, node)))
+    ));
+    assert.ok(contentsVersionHistory, "Contents should contain a Version history dropdown");
+    assert.ok(contentsProjectNotes, "Contents should contain a Project notes dropdown");
+    assertNestedActions(groupedSummaryHtml, contentsVersionHistory, "Contents Version history");
+    assertNestedActions(groupedSummaryHtml, contentsProjectNotes, "Contents page with multiple periods");
+    bodyPeriodNodes.forEach((period, index) => {
+      assertNestedActions(groupedSummaryHtml, period, `version period ${index + 1} with multiple versions`);
+    });
 
     const summaryResult = await writeFullVersionHistorySummaryReport(afterNotesHistory, {
       fileName: "server-page-unit-test.txt",
       filePath: path.join(dataDir, "server-page-unit-test.txt")
     });
     const summaryHtml = fs.readFileSync(summaryResult.reportPath, "utf8");
-    const htmlAttribute = (tag, name) => tag.match(new RegExp(`\\b${name}="([^"]*)"`, "u"))?.[1] || "";
-    const htmlClassNames = tag => htmlAttribute(tag, "class").split(/\s+/u).filter(Boolean);
-    const visibleText = html => html.replace(/<[^>]*>/gu, "").replace(/\s+/gu, " ").trim();
 
     const viewportMeta = [...summaryHtml.matchAll(/<meta\b[^>]*>/gu)]
       .map(match => match[0])
@@ -660,8 +893,71 @@ async function run() {
     assert.match(summaryHtml, /href="#draft-change-1-2"[^>]*>Draft 1 to Draft 2/u);
     assert.match(summaryHtml, /href="#draft-change-1-baseline"[^>]*>[^<]+ baseline/u);
     assert.match(summaryHtml, /First draft baseline; no earlier draft to compare\./u);
-    assert.match(summaryHtml, /<details id="draft-changes" class="report-section" data-collapsible>/u);
-    assert.match(summaryHtml, /<details id="draft-1-draft-a-title-only" class="history-page-section" data-collapsible>/u);
+    assert.match(
+      summaryHtml,
+      /<details\b(?=[^>]*\bid="draft-changes")(?=[^>]*\bclass="report-section")(?=[^>]*\bdata-collapsible)(?=[^>]*\bdata-nested-container)[^>]*>/u
+    );
+    assert.match(
+      summaryHtml,
+      /<details\b(?=[^>]*\bid="draft-1-draft-a-title-only")(?=[^>]*\bclass="history-page-section")(?=[^>]*\bdata-collapsible)(?=[^>]*\bdata-nested-container)[^>]*>/u
+    );
+
+    const summaryDetailsNodes = parseDetailsNodes(summaryHtml);
+    const draftChangesNode = summaryDetailsNodes.find(node => htmlAttribute(node.tag, "id") === "draft-changes");
+    assert.ok(draftChangesNode, "Draft changes should be a dropdown");
+    const draftChangeNodes = draftChangesNode.children.filter(node => htmlClassNames(node.tag).includes("draft-change"));
+    assert.deepEqual(
+      draftChangeNodes.map(node => htmlAttribute(node.tag, "id")),
+      ["draft-change-1-baseline", "draft-change-1-2"],
+      "Draft changes should reveal one selectable dropdown per comparison"
+    );
+    assert.equal(
+      draftChangeNodes.every(node => /\bdata-collapsible\b/u.test(node.tag) && !/\bopen(?:\s|>)/u.test(node.tag)),
+      true
+    );
+    assertNestedActions(summaryHtml, draftChangesNode, "Draft changes with multiple comparisons");
+
+    const pageMetadataExpectations = [
+      {
+        id: "draft-1-draft-a-title-only",
+        createdAt: afterNotesHistory.drafts[0].createdAt
+      },
+      {
+        id: "draft-1-draft-a-title-only-notes",
+        createdAt: afterNotesHistory.drafts[0].notes.createdAt
+      }
+    ];
+    pageMetadataExpectations.forEach(expected => {
+      const pageNode = summaryDetailsNodes.find(node => htmlAttribute(node.tag, "id") === expected.id);
+      assert.ok(pageNode, `${expected.id} should have a version-history panel`);
+      const pageSummary = detailsSummaryHtml(summaryHtml, pageNode);
+      const pageSummaryText = visibleText(pageSummary);
+      const summaryDates = [...pageSummary.matchAll(/<time\b[^>]*\bdatetime="([^"]+)"[^>]*>/gu)]
+        .map(match => match[1]);
+      const versionDates = summaryDetailsNodes
+        .filter(node => htmlClassNames(node.tag).includes("version-entry"))
+        .filter(node => {
+          for (let parent = node.parent; parent; parent = parent.parent) {
+            if (parent === pageNode) return true;
+          }
+          return false;
+        })
+        .map(node => detailsSummaryHtml(summaryHtml, node).match(/<time\b[^>]*\bdatetime="([^"]+)"/u)?.[1])
+        .filter(Boolean);
+      assert.ok(versionDates.length, `${expected.id} should contain dated versions`);
+      assert.match(pageSummaryText, /\bCreated\b/u);
+      assert.match(pageSummaryText, /\bVersion dates\b[\s\S]*\bto\b/u);
+      assert.deepEqual(
+        summaryDates.slice(0, 3),
+        [expected.createdAt, versionDates[0], versionDates[versionDates.length - 1]],
+        `${expected.id} should show its creation date and first-to-last version dates`
+      );
+    });
+    assert.match(
+      summaryHtml,
+      /\.closest\((?:"|')\[data-nested-container\](?:"|')\)/u,
+      "nested actions should resolve their nearest parent dropdown"
+    );
 
     await api(baseUrl, "/api/page", {
       method: "PATCH",

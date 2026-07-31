@@ -1,0 +1,5 @@
+{
+  "name": "draft-diff-manual-deletion-ui-test",
+  "private": true,
+  "main": "../test-manual-deletion-ui.js"
+}

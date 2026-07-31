@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer, webFrame } = require("electron");
+const { contextBridge, ipcRenderer, webFrame, webUtils } = require("electron");
 
 function installSpellCheckProvider() {
   try {
@@ -32,6 +32,13 @@ contextBridge.exposeInMainWorld("draftDiffDesktop", {
   openGeneratedReport: reportPath => ipcRenderer.invoke("draft-diff:open-generated-report", String(reportPath || "")),
   showGeneratedReportInFolder: reportPath => ipcRenderer.invoke("draft-diff:show-generated-report-in-folder", String(reportPath || "")),
   openTextFile: () => ipcRenderer.invoke("draft-diff:open-text-file"),
+  openFallbackTextFile: file => {
+    const filePath = webUtils.getPathForFile(file);
+    return filePath
+      ? ipcRenderer.invoke("draft-diff:read-text-file-path", filePath)
+      : null;
+  },
+  activateTextFileLink: body => ipcRenderer.invoke("draft-diff:activate-text-file-link", String(body || "")),
   recentTextFiles: () => ipcRenderer.invoke("draft-diff:recent-text-files"),
   openRecentTextFile: body => ipcRenderer.invoke("draft-diff:open-recent-text-file", String(body || "")),
   persistClose: body => ipcRenderer.invoke("draft-diff:persist-close", String(body || "")),

@@ -654,6 +654,16 @@ app.whenReady()
     ipcMain.handle("draft-diff:open-generated-report", (_event, reportPath) => openGeneratedReport(reportPath));
     ipcMain.handle("draft-diff:show-generated-report-in-folder", (_event, reportPath) => showGeneratedReportInFolder(reportPath));
     ipcMain.handle("draft-diff:open-text-file", () => openTextFileWithDesktopDialog());
+    ipcMain.handle("draft-diff:read-text-file-path", (_event, filePath) => {
+      const api = loadServerApi();
+      const selectedPath = String(filePath || "");
+      if (!selectedPath) throw new Error("Missing selected text file path.");
+      return api.openedTextFilePayload(selectedPath);
+    });
+    ipcMain.handle("draft-diff:activate-text-file-link", (_event, body) => {
+      const api = loadServerApi();
+      return api.activateTextFileLinkFromRequestBody(String(body || ""));
+    });
     ipcMain.handle("draft-diff:save-as-text-file", (_event, body) => saveTextFileWithDesktopDialog(String(body || "")));
     ipcMain.handle("draft-diff:recent-text-files", () => {
       const api = loadServerApi();

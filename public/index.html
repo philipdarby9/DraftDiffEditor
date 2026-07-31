@@ -36,6 +36,7 @@
               <button id="file-save-as" type="button"><span class="menu-check">✓</span><span>Save as</span><span class="menu-shortcut" data-shortcut="saveAs">Ctrl+Shift+S</span></button>
               <button id="file-activate-backup" type="button" aria-pressed="false"><span class="menu-check" aria-hidden="true"></span><span>Activate backup</span><span class="menu-shortcut" aria-hidden="true"></span></button>
               <button id="file-version-history-folder" type="button"><span class="menu-check" aria-hidden="true"></span><span>Backup folder</span><span class="menu-shortcut" aria-hidden="true"></span></button>
+              <button id="file-manage-backup-storage" type="button"><span class="menu-check" aria-hidden="true"></span><span>Manage backup storage...</span><span class="menu-shortcut" aria-hidden="true"></span></button>
               <button id="file-generate-history-summary" type="button"><span class="menu-check" aria-hidden="true"></span><span>Generate version history summary</span><span class="menu-shortcut" aria-hidden="true"></span></button>
               <span class="menu-divider" aria-hidden="true"></span>
               <button id="file-usb-export" type="button"><span class="menu-check" aria-hidden="true"></span><span>Export to USB</span><span class="menu-shortcut" aria-hidden="true"></span></button>
@@ -223,6 +224,170 @@
         </div>
         <p id="app-progress-meta" class="app-progress-meta">0 of 0</p>
         <p id="app-progress-detail" class="app-progress-detail"></p>
+      </div>
+    </section>
+
+    <section id="backup-storage-overlay" class="backup-storage-overlay" hidden>
+      <div
+        id="backup-storage-panel"
+        class="backup-storage-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="backup-storage-title"
+        aria-describedby="backup-storage-status"
+      >
+        <header class="backup-storage-header">
+          <div>
+            <p class="backup-storage-kicker">BACKUP STORAGE</p>
+            <h2 id="backup-storage-title">Manage version history backups</h2>
+          </div>
+          <button id="backup-storage-close" class="backup-storage-close" type="button">Close</button>
+        </header>
+
+        <div class="backup-storage-content">
+          <p id="backup-storage-status" class="backup-storage-status" aria-live="polite">
+            Scan the active backup folder to review its retention plan.
+          </p>
+
+          <section id="backup-storage-progress" class="backup-storage-progress" aria-label="Backup storage progress" hidden>
+            <div id="backup-storage-progress-track" class="backup-storage-progress-track" role="progressbar" aria-label="Backup storage progress">
+              <div id="backup-storage-progress-bar" class="backup-storage-progress-bar"></div>
+            </div>
+            <p id="backup-storage-progress-meta" class="backup-storage-progress-meta">Preparing...</p>
+          </section>
+
+          <div id="backup-storage-preview" class="backup-storage-preview" hidden>
+            <section class="backup-storage-totals" aria-label="Retention summary">
+              <div>
+                <span>Active backups</span>
+                <strong id="backup-storage-active-files">0 files</strong>
+                <small id="backup-storage-active-bytes">0 B</small>
+              </div>
+              <div class="is-archive">
+                <span>Can archive</span>
+                <strong id="backup-storage-archive-files">0 files</strong>
+                <small id="backup-storage-archive-bytes">0 B</small>
+              </div>
+              <div>
+                <span>Will remain active</span>
+                <strong id="backup-storage-retained-files">0 files</strong>
+                <small id="backup-storage-retained-bytes">0 B</small>
+              </div>
+            </section>
+
+            <p class="backup-storage-diagnostics">
+              <span>Same-size candidates <strong id="backup-storage-candidate-files">0</strong></span>
+              <span>Exact duplicates <strong id="backup-storage-exact-files">0</strong></span>
+              <span>Metadata-only duplicates <strong id="backup-storage-stable-files">0</strong></span>
+            </p>
+
+            <section id="backup-storage-stories-section" class="backup-storage-section" hidden>
+              <h3>By story</h3>
+              <ul id="backup-storage-stories" class="backup-storage-stories"></ul>
+            </section>
+
+            <section id="backup-storage-warnings-section" class="backup-storage-section backup-storage-warnings" hidden>
+              <h3>Needs attention</h3>
+              <ul id="backup-storage-warnings"></ul>
+            </section>
+
+            <section id="backup-storage-path-section" class="backup-storage-section backup-storage-path" hidden>
+              <h3>Archive location</h3>
+              <p id="backup-storage-path"></p>
+            </section>
+          </div>
+
+          <section
+            id="backup-storage-expiry-section"
+            class="backup-storage-expiry"
+            aria-labelledby="backup-storage-expiry-title"
+          >
+            <header class="backup-storage-expiry-header">
+              <div>
+                <h3 id="backup-storage-expiry-title">Managed archive retention</h3>
+                <p id="backup-storage-expiry-policy">The first archive is kept for 90 days; later archives are kept for 30 days. Only archives still in the managed folder are included.</p>
+              </div>
+              <button id="backup-storage-expiry-refresh" type="button">Refresh</button>
+            </header>
+
+            <p id="backup-storage-expiry-status" class="backup-storage-expiry-status" aria-live="polite">
+              Archive expiry will be checked after the active backup scan.
+            </p>
+
+            <div id="backup-storage-expiry-preview" class="backup-storage-expiry-preview" hidden>
+              <div class="backup-storage-expiry-totals" aria-label="Managed archive expiry summary">
+                <span>
+                  <small>Managed archive runs</small>
+                  <strong id="backup-storage-expiry-managed">0</strong>
+                </span>
+                <span class="is-expired">
+                  <small>Expired</small>
+                  <strong id="backup-storage-expiry-expired">0 runs</strong>
+                  <small id="backup-storage-expiry-bytes">0 B</small>
+                </span>
+                <span>
+                  <small>Still retained</small>
+                  <strong id="backup-storage-expiry-retained">0</strong>
+                </span>
+              </div>
+
+              <p class="backup-storage-expiry-diagnostics">
+                <span>Pinned <strong id="backup-storage-expiry-pinned">0</strong></span>
+                <span>Protected <strong id="backup-storage-expiry-protected">0</strong></span>
+              </p>
+
+              <ul id="backup-storage-expiry-runs" class="backup-storage-expiry-runs" aria-label="Managed archive runs"></ul>
+
+              <section id="backup-storage-expiry-warnings-section" class="backup-storage-expiry-warnings" hidden>
+                <h4>Needs attention</h4>
+                <ul id="backup-storage-expiry-warnings"></ul>
+              </section>
+
+              <section id="backup-storage-manual-deletion" class="backup-storage-manual-deletion" hidden>
+                <div>
+                  <h4>Ready for manual deletion</h4>
+                  <p id="backup-storage-manual-deletion-summary"></p>
+                  <p id="backup-storage-manual-deletion-path" class="backup-storage-manual-deletion-path"></p>
+                </div>
+                <button id="backup-storage-manual-deletion-open" type="button">Open folder</button>
+              </section>
+
+              <div class="backup-storage-expiry-actions">
+                <button id="backup-storage-expiry-prepare" class="backup-storage-prepare" type="button" disabled>
+                  Prepare for manual deletion
+                </button>
+              </div>
+            </div>
+          </section>
+        </div>
+
+        <footer class="backup-storage-actions">
+          <button id="backup-storage-rescan" type="button">Rescan</button>
+          <button id="backup-storage-archive" class="backup-storage-primary" type="button" disabled>Archive files</button>
+        </footer>
+      </div>
+    </section>
+
+    <section id="manual-deletion-reminder" class="summary-progress-overlay manual-deletion-reminder-overlay" hidden>
+      <div
+        id="manual-deletion-reminder-panel"
+        class="summary-progress-panel manual-deletion-reminder-panel"
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="manual-deletion-reminder-title"
+        aria-describedby="manual-deletion-reminder-summary manual-deletion-reminder-path"
+      >
+        <h2 id="manual-deletion-reminder-title">Archived backups need your attention</h2>
+        <p id="manual-deletion-reminder-summary" class="manual-deletion-reminder-summary" aria-live="polite"></p>
+        <p id="manual-deletion-reminder-path" class="manual-deletion-reminder-path"></p>
+        <div class="summary-progress-actions">
+          <button id="manual-deletion-reminder-open" class="summary-progress-action summary-progress-primary" type="button">
+            Open folder
+          </button>
+          <button id="manual-deletion-reminder-later" class="summary-progress-action" type="button">
+            Remind me later
+          </button>
+        </div>
       </div>
     </section>
 

@@ -162,8 +162,11 @@ assert.match(
 );
 
 const openedTextPayloadSource = sourceBetween("async function applyOpenedTextFilePayload", "async function requestOpenTextFilePayload");
-assert.match(openedTextPayloadSource, /const identityState = storedState \|\| sameFilePreviousState \|\| options\.preserveFormatsFrom \|\| null;/, "reopened or moved text files should keep the cached project identity");
+assert.match(openedTextPayloadSource, /const identityState = options\.preserveFormatsFrom \|\| sameFilePreviousState \|\| storedState \|\| null;/, "reopened linked or moved text files should prefer the current project identity over stale cache data");
 assert.match(openedTextPayloadSource, /preserveIdentity: Boolean\(identityState\)/, "reopened text files should preserve draft IDs and view state");
+assert.match(openedTextPayloadSource, /preserveHistory: Boolean\(identityState\)/, "reopened text files should merge the current in-memory history");
+assert.match(openedTextPayloadSource, /activateLinkedTextFile: Boolean\(openedTextPath\)/, "opened text files should be linked only after parsing begins");
+assert.match(openedTextPayloadSource, /skipLinkedTextFileWrite: true/, "opening a text file should not rewrite the selected file");
 assert.match(openedTextPayloadSource, /showProgress: Boolean\(options\.showProgress\)/, "opened text payloads should pass progress through to project import");
 
 const importProgressSource = sourceBetween("async function applyTextProject", "async function clearLinkedTextFile");
@@ -171,7 +174,8 @@ assert.match(importProgressSource, /reportProgress\(0, "Parsing text file\.\.\."
 assert.match(importProgressSource, /reportProgress\(1, "Loading saved versions\.\.\."/u, "text import should report version-history progress");
 assert.match(importProgressSource, /reportProgress\(2, "Rendering drafts\.\.\."/u, "text import should report render progress");
 assert.match(importProgressSource, /reportProgress\(3, "Saving imported project\.\.\."/u, "text import should report save progress");
-assert.match(importProgressSource, /saveNow\(\{ skipInputSync: true \}\)/u, "text import should not rescan every rendered editor before saving");
+assert.match(importProgressSource, /saveNow\(\{\s*skipInputSync: true,/u, "text import should not rescan every rendered editor before saving");
+assert.match(importProgressSource, /skipLinkedTextFileWrite: Boolean\(options\.skipLinkedTextFileWrite\)/u, "text import should support persisting history without rewriting the selected file");
 
 const saveNowSource = sourceBetween("async function saveNow", "async function loadState");
 assert.match(saveNowSource, /const skipInputSync = Boolean\(options\.skipInputSync\);/u, "saveNow should support an explicit import fast path");
@@ -188,6 +192,18 @@ assert.match(saveNowSource, /saveCurrentViewState\(\{ syncDom: false \}\)/u, "im
   assert.match(snippet, /hideAppProgress\(\)/, `${label} should hide import progress after loading`);
 });
 
+[
+  ["open file", "async function openTextProject()", "async function recentOpenErrorFromResponse", "requestOpenTextFilePayload()"],
+  ["open recent", "async function openRecentTextProject(filePath)", "async function openFileLocation", 'fetch("/api/open-recent-text-file"']
+].forEach(([label, start, end, readCall]) => {
+  const snippet = sourceBetween(start, end);
+  assert.equal(
+    snippet.indexOf(readCall) < snippet.indexOf("prepareCurrentProjectForOpen("),
+    true,
+    `${label} should read the selected file before preserving the current linked project`
+  );
+});
+
 const allowedSyncFromInputsRanges = [
   ["syncFromInputs definition", "function syncFromInputs()", "function syncPageFromDom"],
   ["undo compact draft structure", "  if (isDraftStructureHistoryEntry(previousEntry))", "  if (isProjectFormatHistoryEntry(previousEntry))"],
@@ -199,6 +215,7 @@ const allowedSyncFromInputsRanges = [
   ["global search", "function openSearch(options = {})", "function closeSearch"],
   ["scheduleSave full save helper", "function scheduleSave(options = {})", "function schedulePageSave"],
   ["save as text", "async function saveAsTextProject", "async function newTextProject"],
+  ["begin text project open", "async function beginTextProjectOpen", "function finishTextProjectOpen"],
   ["prepare project open", "async function prepareCurrentProjectForOpen", "async function applyOpenedTextFilePayload"],
   ["select version-history folder", "async function selectVersionHistoryFolder", "async function toggleBackup"],
   ["close payload", "function prepareClosePayload", "async function writeProjectBackupNow"],

@@ -198,7 +198,8 @@ try {
   const historyBackupsDir = path.join(historyDir, "version history JSON backups");
   const backupsBefore = fs.existsSync(historyBackupsDir) ? fs.readdirSync(historyBackupsDir).length : 0;
   t.writeTextFileLink(linkedPath);
-  t.writeAll(fixtureState("Epsilon"), {
+  const epsilonState = fixtureState("Epsilon");
+  t.writeAll(epsilonState, {
     filePath: linkedPath,
     fileName: "linked.txt"
   });
@@ -212,6 +213,157 @@ try {
     backupFiles.some(fileName => readText(path.join(historyBackupsDir, fileName)).includes("Gamma")),
     true,
     "version-history backup should contain the previous JSON contents"
+  );
+
+  const timestampOnlyPayload = JSON.parse(readText(sidecarPath));
+  epsilonState.storyId = timestampOnlyPayload.storyId;
+  epsilonState.initialNotes.id = timestampOnlyPayload.story.id;
+  epsilonState.initialNotes.versionHistory = JSON.parse(JSON.stringify(timestampOnlyPayload.story.history));
+  epsilonState.drafts[0].versionHistory = JSON.parse(JSON.stringify(timestampOnlyPayload.drafts[0].history));
+  epsilonState.drafts[0].notes.id = timestampOnlyPayload.drafts[0].notes.id;
+  epsilonState.drafts[0].notes.versionHistory = JSON.parse(JSON.stringify(timestampOnlyPayload.drafts[0].notes.history));
+  timestampOnlyPayload.updatedAt = "2000-01-01T00:00:00.000Z";
+  timestampOnlyPayload.projectUpdatedAt = "2000-01-01T00:00:00.000Z";
+  fs.writeFileSync(sidecarPath, `${JSON.stringify(timestampOnlyPayload, null, 2)}\n`, "utf8");
+  const backupsBeforeTimestampOnlySave = fs.readdirSync(historyBackupsDir).length;
+  t.writeAll(epsilonState, {
+    filePath: linkedPath,
+    fileName: "linked.txt"
+  });
+  assert.equal(
+    fs.readdirSync(historyBackupsDir).length,
+    backupsBeforeTimestampOnlySave,
+    "volatile sidecar metadata changes should not create another permanent backup"
+  );
+
+  const idOnlyPayload = JSON.parse(readText(sidecarPath));
+  idOnlyPayload.drafts[0].history[0].id = "previous-id-only";
+  fs.writeFileSync(sidecarPath, `${JSON.stringify(idOnlyPayload, null, 2)}\n`, "utf8");
+  const backupsBeforeIdChange = new Set(fs.readdirSync(historyBackupsDir));
+  t.writeAll(epsilonState, {
+    filePath: linkedPath,
+    fileName: "linked.txt"
+  });
+  const backupsAfterIdChange = fs.readdirSync(historyBackupsDir);
+  assert.equal(
+    backupsAfterIdChange.length,
+    backupsBeforeIdChange.size + 1,
+    "non-identical history IDs should still preserve the previous sidecar"
+  );
+  assert.equal(
+    backupsAfterIdChange
+      .filter(fileName => !backupsBeforeIdChange.has(fileName))
+      .some(fileName => readText(path.join(historyBackupsDir, fileName)).includes("previous-id-only")),
+    true,
+    "the ID-only backup should retain the overwritten identifier"
+  );
+
+  const backupsBeforeFailedHistoryChange = fs.readdirSync(historyBackupsDir).length;
+  const failedHistoryChange = () => t.writeAll(fixtureState("Zpsilon"), {
+    filePath: linkedPath,
+    fileName: "linked.txt",
+    testFailWritePath: sidecarPath
+  });
+  assert.throws(failedHistoryChange, /Injected transaction write failure/);
+  const backupsAfterFirstFailedHistoryChange = fs.readdirSync(historyBackupsDir).length;
+  assert.equal(
+    backupsAfterFirstFailedHistoryChange,
+    backupsBeforeFailedHistoryChange + 1,
+    "a meaningful history change should preserve the previous sidecar"
+  );
+  assert.throws(failedHistoryChange, /Injected transaction write failure/);
+  assert.equal(
+    fs.readdirSync(historyBackupsDir).length,
+    backupsAfterFirstFailedHistoryChange,
+    "retrying the same failed save should reuse its identical permanent backup"
+  );
+
+  const directBackupRoot = path.join(dataDir, "direct-backup-dedupe");
+  const directBackupFolder = path.join(directBackupRoot, "version history JSON backups");
+  const directSourcePath = path.join(directBackupRoot, "direct.version-history.json");
+  const legacyDirectBackupPath = path.join(directBackupFolder, "renamed-story.legacy.version-history.json");
+  fs.mkdirSync(directBackupFolder, { recursive: true });
+  fs.writeFileSync(directSourcePath, '{"value":"A"}\n', "utf8");
+  fs.copyFileSync(directSourcePath, legacyDirectBackupPath);
+  fs.writeFileSync(path.join(directBackupFolder, "direct.zzz-malformed.version-history.json"), '{"value":\n', "utf8");
+  fs.mkdirSync(path.join(directBackupFolder, "direct.zzzz-directory.version-history.json"));
+  fs.writeFileSync(path.join(directBackupFolder, "unrelated.txt"), "ignore", "utf8");
+  const directEntriesBeforeReuse = fs.readdirSync(directBackupFolder).sort();
+  assert.equal(
+    t.backupExistingVersionHistoryJson(
+      directBackupRoot,
+      { fileName: "direct.txt" },
+      directSourcePath
+    ),
+    legacyDirectBackupPath,
+    "an identical legacy backup should be reused"
+  );
+  assert.deepEqual(
+    fs.readdirSync(directBackupFolder).sort(),
+    directEntriesBeforeReuse,
+    "reusing an identical backup should not add another file"
+  );
+
+  fs.writeFileSync(directSourcePath, '{"value":"B"}\n', "utf8");
+  const changedDirectBackupPath = t.backupExistingVersionHistoryJson(
+    directBackupRoot,
+    { fileName: "direct.txt" },
+    directSourcePath
+  );
+  assert.notEqual(changedDirectBackupPath, legacyDirectBackupPath);
+  assert.equal(readText(changedDirectBackupPath), '{"value":"B"}\n');
+  const directEntriesAfterChange = fs.readdirSync(directBackupFolder).sort();
+  assert.equal(
+    t.backupExistingVersionHistoryJson(
+      directBackupRoot,
+      { fileName: "direct.txt" },
+      directSourcePath
+    ),
+    changedDirectBackupPath,
+    "content-addressed backups should return their existing path"
+  );
+  assert.deepEqual(
+    fs.readdirSync(directBackupFolder).sort(),
+    directEntriesAfterChange,
+    "saving identical content twice should create only one backup file"
+  );
+
+  const malformedSource = Buffer.from([0xff, 0x00, 0xfe, 0x7b]);
+  const malformedLegacyBackupPath = path.join(
+    directBackupFolder,
+    "corrupt-story.legacy.version-history.json"
+  );
+  fs.writeFileSync(directSourcePath, malformedSource);
+  fs.writeFileSync(malformedLegacyBackupPath, malformedSource);
+  const directEntriesBeforeMalformedReuse = fs.readdirSync(directBackupFolder).sort();
+  assert.equal(
+    t.backupExistingVersionHistoryJson(
+      directBackupRoot,
+      { fileName: "direct.txt" },
+      directSourcePath
+    ),
+    malformedLegacyBackupPath,
+    "raw-byte deduplication should also preserve and reuse malformed JSON"
+  );
+  assert.deepEqual(
+    fs.readdirSync(directBackupFolder).sort(),
+    directEntriesBeforeMalformedReuse
+  );
+
+  const detachedSource = Buffer.from('{"value":"captured before rename"}\n', "utf8");
+  fs.writeFileSync(directSourcePath, detachedSource);
+  fs.rmSync(directSourcePath);
+  const detachedBackupPath = t.backupExistingVersionHistoryJson(
+    directBackupRoot,
+    { fileName: "detached.txt" },
+    directSourcePath,
+    detachedSource
+  );
+  assert.equal(fs.existsSync(detachedBackupPath), true);
+  assert.deepEqual(
+    fs.readFileSync(detachedBackupPath),
+    detachedSource,
+    "captured sidecar bytes should still be backed up if the live file is renamed"
   );
 
   assert.throws(

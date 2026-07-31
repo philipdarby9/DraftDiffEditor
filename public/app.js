@@ -23,6 +23,7 @@ const els = {
   fileSaveAs: document.querySelector("#file-save-as"),
   fileVersionHistoryFolder: document.querySelector("#file-version-history-folder"),
   fileActivateBackup: document.querySelector("#file-activate-backup"),
+  fileManageBackupStorage: document.querySelector("#file-manage-backup-storage"),
   fileGenerateHistorySummary: document.querySelector("#file-generate-history-summary"),
   fileUsbExport: document.querySelector("#file-usb-export"),
   fileUsbReview: document.querySelector("#file-usb-review"),
@@ -81,6 +82,57 @@ const els = {
   appProgressBar: document.querySelector("#app-progress-bar"),
   appProgressMeta: document.querySelector("#app-progress-meta"),
   appProgressDetail: document.querySelector("#app-progress-detail"),
+  backupStorageOverlay: document.querySelector("#backup-storage-overlay"),
+  backupStoragePanel: document.querySelector("#backup-storage-panel"),
+  backupStorageClose: document.querySelector("#backup-storage-close"),
+  backupStorageStatus: document.querySelector("#backup-storage-status"),
+  backupStorageProgress: document.querySelector("#backup-storage-progress"),
+  backupStorageProgressTrack: document.querySelector("#backup-storage-progress-track"),
+  backupStorageProgressBar: document.querySelector("#backup-storage-progress-bar"),
+  backupStorageProgressMeta: document.querySelector("#backup-storage-progress-meta"),
+  backupStoragePreview: document.querySelector("#backup-storage-preview"),
+  backupStorageActiveFiles: document.querySelector("#backup-storage-active-files"),
+  backupStorageActiveBytes: document.querySelector("#backup-storage-active-bytes"),
+  backupStorageArchiveFiles: document.querySelector("#backup-storage-archive-files"),
+  backupStorageArchiveBytes: document.querySelector("#backup-storage-archive-bytes"),
+  backupStorageRetainedFiles: document.querySelector("#backup-storage-retained-files"),
+  backupStorageRetainedBytes: document.querySelector("#backup-storage-retained-bytes"),
+  backupStorageCandidateFiles: document.querySelector("#backup-storage-candidate-files"),
+  backupStorageExactFiles: document.querySelector("#backup-storage-exact-files"),
+  backupStorageStableFiles: document.querySelector("#backup-storage-stable-files"),
+  backupStorageStoriesSection: document.querySelector("#backup-storage-stories-section"),
+  backupStorageStories: document.querySelector("#backup-storage-stories"),
+  backupStorageWarningsSection: document.querySelector("#backup-storage-warnings-section"),
+  backupStorageWarnings: document.querySelector("#backup-storage-warnings"),
+  backupStoragePathSection: document.querySelector("#backup-storage-path-section"),
+  backupStoragePath: document.querySelector("#backup-storage-path"),
+  backupStorageRescan: document.querySelector("#backup-storage-rescan"),
+  backupStorageArchive: document.querySelector("#backup-storage-archive"),
+  backupStorageExpirySection: document.querySelector("#backup-storage-expiry-section"),
+  backupStorageExpiryPolicy: document.querySelector("#backup-storage-expiry-policy"),
+  backupStorageExpiryRefresh: document.querySelector("#backup-storage-expiry-refresh"),
+  backupStorageExpiryStatus: document.querySelector("#backup-storage-expiry-status"),
+  backupStorageExpiryPreview: document.querySelector("#backup-storage-expiry-preview"),
+  backupStorageExpiryManaged: document.querySelector("#backup-storage-expiry-managed"),
+  backupStorageExpiryExpired: document.querySelector("#backup-storage-expiry-expired"),
+  backupStorageExpiryBytes: document.querySelector("#backup-storage-expiry-bytes"),
+  backupStorageExpiryRetained: document.querySelector("#backup-storage-expiry-retained"),
+  backupStorageExpiryPinned: document.querySelector("#backup-storage-expiry-pinned"),
+  backupStorageExpiryProtected: document.querySelector("#backup-storage-expiry-protected"),
+  backupStorageExpiryRuns: document.querySelector("#backup-storage-expiry-runs"),
+  backupStorageExpiryWarningsSection: document.querySelector("#backup-storage-expiry-warnings-section"),
+  backupStorageExpiryWarnings: document.querySelector("#backup-storage-expiry-warnings"),
+  backupStorageExpiryPrepare: document.querySelector("#backup-storage-expiry-prepare"),
+  backupStorageManualDeletion: document.querySelector("#backup-storage-manual-deletion"),
+  backupStorageManualDeletionSummary: document.querySelector("#backup-storage-manual-deletion-summary"),
+  backupStorageManualDeletionPath: document.querySelector("#backup-storage-manual-deletion-path"),
+  backupStorageManualDeletionOpen: document.querySelector("#backup-storage-manual-deletion-open"),
+  manualDeletionReminder: document.querySelector("#manual-deletion-reminder"),
+  manualDeletionReminderPanel: document.querySelector("#manual-deletion-reminder-panel"),
+  manualDeletionReminderSummary: document.querySelector("#manual-deletion-reminder-summary"),
+  manualDeletionReminderPath: document.querySelector("#manual-deletion-reminder-path"),
+  manualDeletionReminderOpen: document.querySelector("#manual-deletion-reminder-open"),
+  manualDeletionReminderLater: document.querySelector("#manual-deletion-reminder-later"),
   transferReviewOverlay: document.querySelector("#transfer-review-overlay"),
   transferReviewTitle: document.querySelector("#transfer-review-title"),
   transferReviewContent: document.querySelector("#transfer-review-content"),
@@ -142,6 +194,8 @@ let isPromptingForBackupFolder = false;
 let linkedTextFileMissing = false;
 let linkedTextMissingPath = "";
 let isPromptingForLinkedTextFile = false;
+let isOpeningTextProject = false;
+let browserFileOpenSession = null;
 let stateRevision = 0;
 let saveQueued = false;
 let pendingPageSaveKeys = new Set();
@@ -150,6 +204,18 @@ let saveRetryCount = 0;
 let isClosingApp = false;
 let summaryProgressTimer = null;
 let latestSummaryReportPath = "";
+let backupStorageJobToken = 0;
+let backupStoragePlanId = "";
+let backupStoragePreview = null;
+let backupStorageBusy = false;
+let backupStorageReturnFocus = null;
+let backupStorageExpiryPlanId = "";
+let backupStorageExpiryPreview = null;
+let backupStorageExpiryNotice = "";
+let backupStorageExpiryOperationWarnings = [];
+let backupStorageManualDeletion = null;
+let manualDeletionReminderDismissed = false;
+let manualDeletionReminderReturnFocus = null;
 let latestTransferReview = null;
 let transferTimelineZoomPages = [];
 let selectionMenuZoomPages = new Map();
@@ -801,15 +867,23 @@ function updateProjectTitle() {
 }
 
 function syncBackupMenu() {
-  if (!els.fileActivateBackup) return;
-
   const active = Boolean(backupFolderPath);
-  els.fileActivateBackup.setAttribute("aria-pressed", String(active));
-  els.fileActivateBackup.title = backupFolderMissing && active
-    ? `Backup folder missing: ${backupFolderPath}`
-    : active
-    ? `Backups active: ${backupFolderPath}\\original txt; summaries: ${backupFolderPath}\\version history summaries; JSON: ${backupFolderPath}\\json`
-    : "Choose a backup and version history folder";
+  if (els.fileActivateBackup) {
+    els.fileActivateBackup.setAttribute("aria-pressed", String(active));
+    els.fileActivateBackup.title = backupFolderMissing && active
+      ? `Backup folder missing: ${backupFolderPath}`
+      : active
+      ? `Backups active: ${backupFolderPath}\\original txt; summaries: ${backupFolderPath}\\version history summaries; JSON: ${backupFolderPath}\\json`
+      : "Choose a backup and version history folder";
+  }
+  if (els.fileManageBackupStorage) {
+    els.fileManageBackupStorage.disabled = !active || backupFolderMissing;
+    els.fileManageBackupStorage.title = backupFolderMissing && active
+      ? `Backup folder missing: ${backupFolderPath}`
+      : active
+      ? "Review and archive version history JSON backups"
+      : "Choose a backup folder before managing storage";
+  }
 }
 
 function closeFileMenu() {
@@ -1054,6 +1128,10 @@ function markStateChanged() {
 }
 
 function queueSave(delay = AUTOSAVE_DELAY_MS) {
+  if (isOpeningTextProject) {
+    saveQueued = true;
+    return;
+  }
   clearPendingPageSaves();
   window.clearTimeout(saveTimer);
   saveTimer = window.setTimeout(saveNow, delay);
@@ -1068,6 +1146,7 @@ function clearPendingPageSaves() {
 
 function queuePendingPageSaves(delay = 0) {
   if (!pendingPageSaveKeys.size) return;
+  if (isOpeningTextProject) return;
   window.clearTimeout(pageSaveTimer);
   pageSaveTimer = window.setTimeout(savePendingPagesNow, delay);
 }
@@ -5209,6 +5288,7 @@ function pageFromImportedBlock(block, fallbackTitle, previousPage = null, option
 function stateFromExportText(text, previousState = null, options = {}) {
   const preserveIdentity = options.preserveIdentity !== false;
   const preserveHistory = options.preserveHistory !== false;
+  const promoteHistoryPages = options.promoteHistoryPages !== false;
   const blocks = String(text || "")
     .replace(/\r\n/g, "\n")
     .replace(/\r/g, "\n")
@@ -5260,10 +5340,14 @@ function stateFromExportText(text, previousState = null, options = {}) {
       notes
     };
     ensureDraftVersionHistory(importedDraft);
-    promotePageToNewestHistoryVersion(importedDraft, importedDraft.title || `Draft ${draftNumber}`);
+    if (promoteHistoryPages) {
+      promotePageToNewestHistoryVersion(importedDraft, importedDraft.title || `Draft ${draftNumber}`);
+    }
     appendDraftVersionIfChanged(importedDraft);
     ensurePageVersionHistory(importedDraft.notes, importedDraft.notes.title);
-    promotePageToNewestHistoryVersion(importedDraft.notes, importedDraft.notes.title);
+    if (promoteHistoryPages) {
+      promotePageToNewestHistoryVersion(importedDraft.notes, importedDraft.notes.title);
+    }
     appendPageVersionIfChanged(importedDraft.notes, importedDraft.notes.title);
     drafts.push(importedDraft);
   }
@@ -5279,7 +5363,9 @@ function stateFromExportText(text, previousState = null, options = {}) {
     initialNotes.versionHistory = previousState.initialNotes.versionHistory;
   }
   ensurePageVersionHistory(initialNotes, PROJECT_NOTES_TITLE);
-  promotePageToNewestHistoryVersion(initialNotes, PROJECT_NOTES_TITLE);
+  if (promoteHistoryPages) {
+    promotePageToNewestHistoryVersion(initialNotes, PROJECT_NOTES_TITLE);
+  }
   appendPageVersionIfChanged(initialNotes, PROJECT_NOTES_TITLE);
 
   return {
@@ -8446,7 +8532,8 @@ async function applyExternalVersionHistory(projectState, options = {}) {
       body: JSON.stringify({
         state: projectState,
         filePath: options.filePath || linkedTextPath || "",
-        fileName: options.fileName || projectFileName || "draft-history.txt"
+        fileName: options.fileName || projectFileName || "draft-history.txt",
+        keepCurrentPages: Boolean(options.keepCurrentPages)
       })
     });
     if (!response.ok) throw new Error(await response.text());
@@ -8461,6 +8548,32 @@ async function applyExternalVersionHistory(projectState, options = {}) {
     console.error(error);
     return { state: projectState, loaded: false };
   }
+}
+
+async function activateLinkedTextFile(filePath) {
+  const body = JSON.stringify({ filePath });
+  let payload = null;
+
+  try {
+    const response = await fetch("/api/text-file-link/activate", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body
+    });
+    if (!response.ok) throw new Error(await response.text());
+    payload = await response.json();
+  } catch (error) {
+    if (!window.draftDiffDesktop?.activateTextFileLink) throw error;
+    payload = await window.draftDiffDesktop.activateTextFileLink(body);
+  }
+
+  if (!payload || payload.ok === false) {
+    throw new Error(payload?.error || "Could not link the selected text file.");
+  }
+
+  updateStoragePathsFromPayload(payload);
+  linkedTextPath = payload.linkedTextPath || payload.filePath || filePath;
+  return payload;
 }
 
 async function promptForMissingBackupFolder() {
@@ -8533,8 +8646,11 @@ async function promptForMissingLinkedTextFile(options = {}) {
       }
       if (payload.ok === false) throw new Error(payload.error || "Open failed");
 
-      await applyOpenedTextFilePayload(payload, previousLinkedTextPath, preserveState, {
-        preserveFormatsFrom: preserveState,
+      const stateBeforeMove = await prepareCurrentProjectForOpen({
+        skipLinkedTextFileWrite: true
+      });
+      await applyOpenedTextFilePayload(payload, previousLinkedTextPath, stateBeforeMove, {
+        preserveFormatsFrom: stateBeforeMove || preserveState,
         showProgress: true,
         progressTitle: "Opening moved file",
         progressOffset: 1,
@@ -8566,14 +8682,23 @@ async function applyTextProject(text, fileName, options = {}) {
   };
 
   await reportProgress(0, "Parsing text file...", fileName || "");
-  state = stateFromExportText(text, options.preserveFormatsFrom || null, {
+  const keepImportedPagesCurrent = options.keepImportedPagesCurrent !== false;
+  const importedState = stateFromExportText(text, options.preserveFormatsFrom || null, {
     preserveIdentity: Boolean(options.preserveIdentity),
-    preserveHistory: Boolean(options.preserveHistory)
+    preserveHistory: Boolean(options.preserveHistory),
+    promoteHistoryPages: !keepImportedPagesCurrent
   });
+  if (options.activateLinkedTextFile && options.filePath) {
+    await activateLinkedTextFile(options.filePath);
+  } else if (options.clearLinkedTextFile) {
+    await clearLinkedTextFile();
+  }
+  state = importedState;
   await reportProgress(1, "Loading saved versions...", fileName || "");
   const historyResult = await applyExternalVersionHistory(state, {
     filePath: options.filePath || "",
-    fileName
+    fileName,
+    keepCurrentPages: keepImportedPagesCurrent
   });
   state = historyResult.state;
   await reportProgress(2, "Rendering drafts...", `${state.drafts.length.toLocaleString("en-GB")} draft${state.drafts.length === 1 ? "" : "s"}`);
@@ -8585,7 +8710,13 @@ async function applyTextProject(text, fileName, options = {}) {
   restoreViewStateForProject();
   render();
   await reportProgress(3, "Saving imported project...", projectFileName);
-  const savedToLinkedFile = await saveNow({ skipInputSync: true });
+  const savedToLinkedFile = await saveNow({
+    skipInputSync: true,
+    skipLinkedTextFileWrite: Boolean(options.skipLinkedTextFileWrite)
+  });
+  if (options.requireSaveSuccess && !savedToLinkedFile) {
+    throw new Error("The imported project could not be saved.");
+  }
   resetHistory();
   const historyText = historyResult.loaded ? "; version history loaded" : "";
   setStatus(savedToLinkedFile ? `Opened ${projectFileName}${historyText}; autosave linked` : `Opened${historyText}; saved companion`);
@@ -8754,7 +8885,66 @@ async function openRecentFilesSubmenu() {
   else els.fileOpenRecentButton?.focus();
 }
 
-async function prepareCurrentProjectForOpen() {
+async function beginTextProjectOpen() {
+  if (isOpeningTextProject) return null;
+
+  const session = {
+    hadFullSave: Boolean(saveTimer) || saveQueued,
+    hadPageSave: Boolean(pageSaveTimer) || pendingPageSaveKeys.size > 0,
+    capturedVersion: false
+  };
+  isOpeningTextProject = true;
+  window.clearTimeout(saveTimer);
+  saveTimer = null;
+  window.clearTimeout(pageSaveTimer);
+  pageSaveTimer = null;
+
+  const startedAt = Date.now();
+  while (isSaving && Date.now() - startedAt < 30_000) {
+    await new Promise(resolve => window.setTimeout(resolve, 25));
+  }
+  if (isSaving) {
+    finishTextProjectOpen(session, { resume: true });
+    throw new Error("The current save did not finish before opening the file.");
+  }
+
+  window.clearTimeout(saveTimer);
+  saveTimer = null;
+  window.clearTimeout(pageSaveTimer);
+  pageSaveTimer = null;
+  saveQueued = false;
+  syncFromInputs();
+  saveCurrentViewState();
+  session.capturedVersion = flushDraftVersionCaptures().length > 0;
+  rememberLinkedProjectState();
+  return session;
+}
+
+function finishTextProjectOpen(session, options = {}) {
+  if (!session) return;
+
+  const queuedDuringOpen = saveQueued;
+  saveQueued = false;
+  window.clearTimeout(saveTimer);
+  saveTimer = null;
+  window.clearTimeout(pageSaveTimer);
+  pageSaveTimer = null;
+  isOpeningTextProject = false;
+
+  if (options.completed) {
+    clearPendingPageSaves();
+    return;
+  }
+  if (options.resume === false) return;
+
+  if (session.hadFullSave || session.capturedVersion || queuedDuringOpen) {
+    queueSave(0);
+  } else if (session.hadPageSave || pendingPageSaveKeys.size) {
+    queuePendingPageSaves(0);
+  }
+}
+
+async function prepareCurrentProjectForOpen(options = {}) {
   if (!state) return null;
 
   syncFromInputs();
@@ -8762,22 +8952,36 @@ async function prepareCurrentProjectForOpen() {
   rememberLinkedProjectState();
   await cacheLinkedProjectStateOnServer();
   window.clearTimeout(saveTimer);
-  await saveNow({ promptForMissingLinkedTextFile: false });
+  saveTimer = null;
+  window.clearTimeout(pageSaveTimer);
+  pageSaveTimer = null;
+  await saveNow({
+    promptForMissingLinkedTextFile: false,
+    skipLinkedTextFileWrite: Boolean(options.skipLinkedTextFileWrite)
+  });
   setStatus("Saving backup...");
-  await writeProjectBackupNow({ allowLinkedTextFileFailure: true });
+  await writeProjectBackupNow({
+    allowLinkedTextFileFailure: true,
+    skipLinkedTextFileWrite: Boolean(options.skipLinkedTextFileWrite)
+  });
   return projectStateFromSnapshot(serializeProjectState());
 }
 
 async function applyOpenedTextFilePayload(payload, previousLinkedTextPath = "", previousState = null, options = {}) {
-  linkedTextPath = payload.filePath || "";
-  const storedState = cachedProjectStateForPath(linkedTextPath) || payload.storedState;
-  const sameFilePreviousState = filePathsMatch(previousLinkedTextPath, linkedTextPath) ? previousState : null;
-  const identityState = storedState || sameFilePreviousState || options.preserveFormatsFrom || null;
-  updateStoragePathsFromPayload(payload);
+  const openedTextPath = payload.filePath || "";
+  const storedState = cachedProjectStateForPath(openedTextPath) || payload.storedState;
+  const sameFile = payload.matchesLinkedTextFile === true
+    || filePathsMatch(previousLinkedTextPath, openedTextPath);
+  const sameFilePreviousState = sameFile ? previousState : null;
+  const identityState = options.preserveFormatsFrom || sameFilePreviousState || storedState || null;
   await applyTextProject(payload.text || "", payload.fileName || "draft-history.txt", {
     preserveFormatsFrom: identityState,
     preserveIdentity: Boolean(identityState),
-    filePath: linkedTextPath,
+    preserveHistory: Boolean(identityState),
+    filePath: openedTextPath,
+    activateLinkedTextFile: Boolean(openedTextPath),
+    skipLinkedTextFileWrite: true,
+    requireSaveSuccess: Boolean(openedTextPath),
     showProgress: Boolean(options.showProgress),
     progressTitle: options.progressTitle,
     progressTotal: options.progressTotal,
@@ -8816,19 +9020,17 @@ async function requestOpenTextFilePayload() {
 async function openTextProject() {
   closeFileMenu();
 
+  let openSession = null;
+  let selectedFileRead = false;
+  let completed = false;
   try {
+    openSession = await beginTextProjectOpen();
+    if (!openSession) return;
     const previousLinkedTextPath = linkedTextPath;
     await showAppProgress({
       title: "Opening file",
-      step: "Saving current project...",
-      completed: 0,
-      total: 6
-    });
-    const previousState = await prepareCurrentProjectForOpen();
-    await showAppProgress({
-      title: "Opening file",
       step: "Choose a text file...",
-      completed: 1,
+      completed: 0,
       total: 6
     });
     const payload = await requestOpenTextFilePayload();
@@ -8836,13 +9038,19 @@ async function openTextProject() {
     if (payload) {
       if (payload.cancelled) return;
       if (payload.ok === false) throw new Error(payload.error || "Open failed");
+      selectedFileRead = true;
 
       await showAppProgress({
         title: "Opening file",
-        step: "Reading text file...",
+        step: "Preserving current project...",
         detail: payload.fileName || "",
-        completed: 2,
+        completed: 1,
         total: 6
+      });
+      const selectedFileIsLinked = payload.matchesLinkedTextFile === true
+        || filePathsMatch(previousLinkedTextPath, payload.filePath);
+      const previousState = await prepareCurrentProjectForOpen({
+        skipLinkedTextFileWrite: selectedFileIsLinked
       });
       await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState, {
         showProgress: true,
@@ -8850,13 +9058,20 @@ async function openTextProject() {
         progressOffset: 2,
         progressTotal: 6
       });
+      completed = true;
       return;
     }
+    browserFileOpenSession = openSession;
+    openSession = null;
   } catch (error) {
     if (isAbortError(error)) return;
     console.error(error);
     setStatus(`Open failed: ${error?.message || "Unknown error"}`);
   } finally {
+    finishTextProjectOpen(openSession, {
+      completed,
+      resume: !selectedFileRead
+    });
     hideAppProgress();
   }
 }
@@ -8878,7 +9093,7 @@ function isMissingRecentFileError(error) {
     || /recent file no longer exists|recent file not found/i.test(String(error?.message || ""));
 }
 
-async function promptForMovedRecentTextFile(missingPath, previousLinkedTextPath, previousState) {
+async function promptForMovedRecentTextFile(missingPath, previousLinkedTextPath, previousState, options = {}) {
   const chooseNow = window.confirm(
     `Recent file not found:\n\n${missingPath}\n\nChoose the moved story file now?`
   );
@@ -8912,10 +9127,14 @@ async function promptForMovedRecentTextFile(missingPath, previousLinkedTextPath,
       return false;
     }
     if (payload.ok === false) throw new Error(payload.error || "Open failed");
+    options.onSelected?.();
 
+    const stateBeforeMove = previousState || await prepareCurrentProjectForOpen({
+      skipLinkedTextFileWrite: filePathsMatch(previousLinkedTextPath, missingPath)
+    });
     const cachedState = cachedProjectStateForPath(missingPath);
-    await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState, {
-      preserveFormatsFrom: cachedState || previousState,
+    await applyOpenedTextFilePayload(payload, previousLinkedTextPath, stateBeforeMove, {
+      preserveFormatsFrom: cachedState || stateBeforeMove,
       showProgress: true,
       progressTitle: "Opening moved file",
       progressOffset: 1,
@@ -8930,22 +9149,20 @@ async function promptForMovedRecentTextFile(missingPath, previousLinkedTextPath,
 async function openRecentTextProject(filePath) {
   closeFileMenu();
 
+  let openSession = null;
+  let selectedFileRead = false;
+  let completed = false;
   let previousLinkedTextPath = linkedTextPath;
   let previousState = null;
   try {
+    openSession = await beginTextProjectOpen();
+    if (!openSession) return;
     previousLinkedTextPath = linkedTextPath;
-    await showAppProgress({
-      title: "Opening recent file",
-      step: "Saving current project...",
-      completed: 0,
-      total: 6
-    });
-    previousState = await prepareCurrentProjectForOpen();
     await showAppProgress({
       title: "Opening recent file",
       step: "Reading recent file...",
       detail: recentFileLabel(filePath),
-      completed: 1,
+      completed: 0,
       total: 6
     });
     const body = JSON.stringify({ filePath });
@@ -8968,13 +9185,19 @@ async function openRecentTextProject(filePath) {
         throw failure;
       }
     }
+    selectedFileRead = true;
 
     await showAppProgress({
       title: "Opening recent file",
-      step: "Recent file loaded...",
+      step: "Preserving current project...",
       detail: payload.fileName || recentFileLabel(filePath),
-      completed: 2,
+      completed: 1,
       total: 6
+    });
+    const selectedFileIsLinked = payload.matchesLinkedTextFile === true
+      || filePathsMatch(previousLinkedTextPath, payload.filePath);
+    previousState = await prepareCurrentProjectForOpen({
+      skipLinkedTextFileWrite: selectedFileIsLinked
     });
     await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState, {
       showProgress: true,
@@ -8982,12 +9205,22 @@ async function openRecentTextProject(filePath) {
       progressOffset: 2,
       progressTotal: 6
     });
+    completed = true;
   } catch (error) {
     if (isAbortError(error)) return;
     if (isMissingRecentFileError(error)) {
       hideAppProgress();
       try {
-        await promptForMovedRecentTextFile(error.filePath || filePath, previousLinkedTextPath, previousState);
+        completed = await promptForMovedRecentTextFile(
+          error.filePath || filePath,
+          previousLinkedTextPath,
+          previousState,
+          {
+            onSelected: () => {
+              selectedFileRead = true;
+            }
+          }
+        );
       } catch (promptError) {
         if (isAbortError(promptError)) return;
         console.error(promptError);
@@ -8998,6 +9231,10 @@ async function openRecentTextProject(filePath) {
     console.error(error);
     setStatus("Open recent failed");
   } finally {
+    finishTextProjectOpen(openSession, {
+      completed,
+      resume: !selectedFileRead
+    });
     hideAppProgress();
   }
 }
@@ -9149,7 +9386,8 @@ function prepareClosePayload(options = {}) {
     waitForSummary: Boolean(options.waitForSummary),
     skipSummary: Boolean(options.skipSummary),
     allowLinkedTextFileFailure: Boolean(options.allowLinkedTextFileFailure),
-    allowMissingVersionHistoryFolder: Boolean(options.allowMissingVersionHistoryFolder)
+    allowMissingVersionHistoryFolder: Boolean(options.allowMissingVersionHistoryFolder),
+    skipLinkedTextFileWrite: Boolean(options.skipLinkedTextFileWrite)
   });
 }
 
@@ -9159,7 +9397,8 @@ async function writeProjectBackupNow(options = {}) {
   const body = prepareClosePayload({
     skipSummary: options.skipSummary !== false,
     allowLinkedTextFileFailure: Boolean(options.allowLinkedTextFileFailure),
-    allowMissingVersionHistoryFolder: Boolean(options.allowMissingVersionHistoryFolder)
+    allowMissingVersionHistoryFolder: Boolean(options.allowMissingVersionHistoryFolder),
+    skipLinkedTextFileWrite: Boolean(options.skipLinkedTextFileWrite)
   });
   try {
     const response = await fetch("/api/backup/project", {
@@ -9364,6 +9603,1609 @@ async function generateVersionHistorySummary() {
       elapsedMs: 0
     });
     setStatus("Version history summary failed");
+  }
+}
+
+function backupStorageObject(value) {
+  return value && typeof value === "object" && !Array.isArray(value) ? value : null;
+}
+
+function backupStorageValue(source, paths = []) {
+  for (const pathText of paths) {
+    let value = source;
+    for (const part of String(pathText).split(".")) {
+      value = backupStorageObject(value)?.[part];
+      if (value === undefined || value === null) break;
+    }
+    if (value !== undefined && value !== null && value !== "") return value;
+  }
+  return undefined;
+}
+
+function backupStorageNumber(source, paths = []) {
+  const value = backupStorageValue(source, paths);
+  if (value === undefined) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= 0 ? number : null;
+}
+
+function backupStoragePayloadObjects(payload) {
+  const envelope = backupStorageObject(payload) || {};
+  const progress = backupStorageObject(envelope.progress);
+  const job = backupStorageObject(envelope.job);
+  const progressResult = backupStorageObject(progress?.result);
+  const result = backupStorageObject(envelope.result);
+  return [
+    backupStorageObject(envelope.preview),
+    backupStorageObject(progress?.preview),
+    backupStorageObject(progressResult?.preview),
+    backupStorageObject(result?.preview),
+    progressResult,
+    result,
+    progress,
+    job,
+    envelope
+  ].filter(Boolean);
+}
+
+function backupStoragePayloadValue(payload, paths = []) {
+  for (const source of backupStoragePayloadObjects(payload)) {
+    const value = backupStorageValue(source, paths);
+    if (value !== undefined) return value;
+  }
+  return undefined;
+}
+
+function backupStoragePreviewFromPayload(payload) {
+  const previewKeys = [
+    "activeFiles",
+    "activeBytes",
+    "archiveFiles",
+    "archiveBytes",
+    "retainedFiles",
+    "retainedBytes",
+    "sameSizeCandidateFiles",
+    "sameSizeCandidateFileCount",
+    "exactDuplicateFiles",
+    "exactDuplicateFileCount",
+    "stableDuplicateFiles",
+    "metadataOnlyDuplicateFileCount",
+    "scannedFileCount",
+    "stories",
+    "totals",
+    "summary"
+  ];
+  return backupStoragePayloadObjects(payload).find(candidate => (
+    previewKeys.some(key => candidate[key] !== undefined)
+    || backupStorageObject(candidate.active)
+    || backupStorageObject(candidate.archive)
+    || backupStorageObject(candidate.retained)
+  )) || null;
+}
+
+function backupStorageExpiryPreviewFromPayload(payload) {
+  const previewKeys = [
+    "managedRunCount",
+    "runCount",
+    "expiredRunCount",
+    "expiredBytes",
+    "retainedRunCount",
+    "pinnedRunCount",
+    "protectedRunCount",
+    "firstRunRetentionDays",
+    "standardRetentionDays",
+    "runs"
+  ];
+  return backupStoragePayloadObjects(payload).find(candidate => (
+    previewKeys.some(key => candidate[key] !== undefined)
+    || previewKeys.some(key => backupStorageObject(candidate.summary)?.[key] !== undefined)
+  )) || null;
+}
+
+function backupStorageExpiryPlanIdFromPayload(payload) {
+  const value = backupStoragePayloadValue(payload, [
+    "archiveExpiryPlanId",
+    "expiryPlanId",
+    "planId",
+    "plan.id"
+  ]);
+  return value === undefined ? "" : String(value);
+}
+
+function backupStorageBoolean(source, paths = []) {
+  const value = backupStorageValue(source, paths);
+  if (value === undefined) return null;
+  if (typeof value === "string") {
+    if (value.toLowerCase() === "true") return true;
+    if (value.toLowerCase() === "false") return false;
+  }
+  return Boolean(value);
+}
+
+function normalizeReadyForManualDeletion(value = {}) {
+  const source = backupStorageObject(value) || {};
+  const runs = Array.isArray(source.runs) ? source.runs : [];
+  return {
+    ready: backupStorageBoolean(source, ["ready"]) === true,
+    unsafe: backupStorageBoolean(source, ["unsafe"]) === true,
+    itemCount: backupStorageNumber(source, ["itemCount"]) ?? 0,
+    runCount: backupStorageNumber(source, ["runCount"]) ?? runs.length,
+    bytes: backupStorageNumber(source, ["bytes"]) ?? 0,
+    folderPath: String(backupStorageValue(source, ["folderPath"]) || ""),
+    runs,
+    unrecognizedItemCount: backupStorageNumber(source, ["unrecognizedItemCount"]) ?? 0,
+    warning: String(backupStorageValue(source, ["warning", "message"]) || "")
+  };
+}
+
+function readyForManualDeletionFromPayload(payload) {
+  for (const source of backupStoragePayloadObjects(payload)) {
+    const value = backupStorageValue(source, ["readyForManualDeletion"]);
+    if (backupStorageObject(value)) return normalizeReadyForManualDeletion(value);
+  }
+  return null;
+}
+
+function backupStorageExpiryRunEntries(preview) {
+  const value = backupStorageValue(preview, [
+    "runs",
+    "managedRuns",
+    "archiveRuns",
+    "summary.runs"
+  ]);
+  return Array.isArray(value) ? value : [];
+}
+
+function formatBackupStorageRunDate(value) {
+  if (!value) return "";
+  const date = new Date(value);
+  if (!Number.isFinite(date.getTime())) return "";
+  return date.toLocaleString("en-GB", {
+    dateStyle: "medium",
+    timeStyle: "short"
+  });
+}
+
+function backupStorageExpiryProtectedReasonText(value) {
+  const reason = String(value || "");
+  const labels = {
+    "malformed-policy-state": "Retention policy metadata needs review",
+    "changed-retention-metadata": "Retention metadata changed",
+    "future-completion-time": "Archive completion time is in the future",
+    "failed-or-partial": "Archive did not complete successfully",
+    incomplete: "Archive is still incomplete",
+    unreadable: "Archive folder could not be read",
+    "outside-managed-archive-root": "Archive is outside the managed folder",
+    "linked-or-outside-managed-archive-root": "Archive folder is linked or outside the managed folder",
+    "unknown-or-linked-contents": "Archive contains unsupported linked content",
+    "malformed-or-unreadable": "Archive metadata could not be read",
+    "unsupported-or-malformed-manifest": "Archive manifest is unsupported or malformed",
+    "changed-or-outside-root": "Archive metadata does not match the managed folder",
+    "incomplete-manifest": "Archive manifest is incomplete",
+    "malformed-plan-files": "Archive plan is malformed",
+    "malformed-manifest-files": "Archive manifest file list is malformed",
+    "reserved-file-name": "Archive contains a reserved file name",
+    "unknown-contents": "Archive contains unrecognised files",
+    "changed-or-unreadable-contents": "Archive contents changed or could not be read"
+  };
+  return labels[reason] || reason.replace(/-/g, " ");
+}
+
+function normalizeBackupStorageExpiryRun(run, index) {
+  const status = String(backupStorageValue(run, ["status", "state"]) || "").toLowerCase();
+  const protectedReason = String(backupStorageValue(run, [
+    "protectedReason",
+    "protectionReason",
+    "reason"
+  ]) || "");
+  const pinned = backupStorageBoolean(run, ["pinned", "isPinned"]) === true;
+  const protectedRun = backupStorageBoolean(run, ["protected", "isProtected"]) === true
+    || Boolean(protectedReason);
+  const explicitMovable = backupStorageBoolean(run, [
+    "movableToManualDeletion",
+    "movable",
+    "deletable",
+    "canDelete"
+  ]);
+  const expired = backupStorageBoolean(run, ["expired", "isExpired"]) === true
+    || status === "expired"
+    || explicitMovable === true;
+  const movable = explicitMovable === true && !pinned && !protectedRun;
+  const completedAt = String(backupStorageValue(run, [
+    "completedAt",
+    "archivedAt",
+    "createdAt"
+  ]) || "");
+  const expiresAt = String(backupStorageValue(run, ["expiresAt", "expiryAt"]) || "");
+  const folderName = String(backupStorageValue(run, [
+    "folderName",
+    "archiveName",
+    "runName",
+    "name",
+    "runId",
+    "id"
+  ]) || `Archive run ${index + 1}`);
+  const archiveFolderPath = String(backupStorageValue(run, [
+    "archiveFolderPath",
+    "folderPath",
+    "path"
+  ]) || "");
+  const fileCount = backupStorageNumber(run, [
+    "fileCount",
+    "archivedFileCount",
+    "files"
+  ]) ?? 0;
+  const bytes = backupStorageNumber(run, [
+    "bytes",
+    "archivedBytes",
+    "size"
+  ]) ?? 0;
+  let stateLabel = "Retained";
+  if (movable) stateLabel = "Expired";
+  else if (pinned) stateLabel = "Pinned";
+  else if (protectedRun || expired) stateLabel = "Protected";
+  else if (status && !["complete", "completed", "success", "succeeded"].includes(status)) {
+    stateLabel = status.replace(/(^|-)\w/g, match => match.toUpperCase());
+  }
+
+  return {
+    folderName,
+    archiveFolderPath,
+    completedAt,
+    expiresAt,
+    retentionDays: backupStorageNumber(run, ["retentionDays"]),
+    fileCount,
+    bytes,
+    expired,
+    pinned,
+    protected: protectedRun,
+    protectedReason: pinned ? "" : backupStorageExpiryProtectedReasonText(protectedReason),
+    movable,
+    stateLabel
+  };
+}
+
+function normalizeBackupStorageExpiryPreview(preview, payload = {}) {
+  const runs = backupStorageExpiryRunEntries(preview)
+    .map(normalizeBackupStorageExpiryRun);
+  const managedRunCount = backupStorageNumber(preview, [
+    "managedRunCount",
+    "runCount",
+    "summary.managedRunCount",
+    "summary.runCount"
+  ]) ?? runs.length;
+  const expiredRunCount = backupStorageNumber(preview, [
+    "expiredRunCount",
+    "summary.expiredRunCount"
+  ]) ?? runs.filter(run => run.expired).length;
+  const protectedRunCount = backupStorageNumber(preview, [
+    "protectedRunCount",
+    "summary.protectedRunCount"
+  ]) ?? runs.filter(run => run.protected).length;
+  const pinnedRunCount = backupStorageNumber(preview, [
+    "pinnedRunCount",
+    "summary.pinnedRunCount"
+  ]) ?? runs.filter(run => run.pinned).length;
+  const retainedRunCount = backupStorageNumber(preview, [
+    "retainedRunCount",
+    "summary.retainedRunCount"
+  ]) ?? Math.max(0, managedRunCount - expiredRunCount);
+  const warningsValue = backupStorageValue(preview, [
+    "warnings",
+    "warningMessages",
+    "summary.warnings"
+  ]) ?? backupStoragePayloadValue(payload, ["warnings", "warningMessages"]);
+  const warnings = (Array.isArray(warningsValue) ? warningsValue : warningsValue ? [warningsValue] : [])
+    .map(backupStorageWarningText)
+    .filter(Boolean);
+
+  return {
+    managedRunCount,
+    expiredRunCount,
+    expiredBytes: backupStorageNumber(preview, [
+      "expiredBytes",
+      "summary.expiredBytes"
+    ]) ?? runs.filter(run => run.movable).reduce((sum, run) => sum + run.bytes, 0),
+    retainedRunCount,
+    pinnedRunCount,
+    protectedRunCount,
+    firstRunRetentionDays: backupStorageNumber(preview, [
+      "firstRunRetentionDays",
+      "summary.firstRunRetentionDays"
+    ]) ?? 90,
+    standardRetentionDays: backupStorageNumber(preview, [
+      "standardRetentionDays",
+      "summary.standardRetentionDays"
+    ]) ?? 30,
+    movableRunCount: backupStorageNumber(preview, [
+      "movableRunCount",
+      "summary.movableRunCount"
+    ]) ?? (runs.length ? runs.filter(run => run.movable).length : expiredRunCount),
+    runs,
+    warnings: [...new Set([...warnings, ...backupStorageExpiryOperationWarnings])]
+  };
+}
+
+function backupStorageStoryEntries(preview) {
+  const value = backupStorageValue(preview, [
+    "stories",
+    "storySummaries",
+    "storyPlans",
+    "byStory"
+  ]);
+  if (Array.isArray(value)) return value;
+  if (!backupStorageObject(value)) return [];
+  return Object.entries(value).map(([key, story]) => ({
+    ...(backupStorageObject(story) || {}),
+    storyKey: backupStorageObject(story)?.storyKey || key
+  }));
+}
+
+function backupStorageWarningText(entry) {
+  if (typeof entry === "string") return entry;
+  const warning = backupStorageObject(entry);
+  if (!warning) return "";
+  const directMessage = backupStorageValue(warning, ["message", "warning", "detail", "error"]);
+  if (directMessage) return String(directMessage);
+
+  const type = String(warning.type || "");
+  const activeBytes = backupStorageNumber(warning, ["activeBytes"]);
+  const limitBytes = backupStorageNumber(warning, ["limitBytes"]);
+  const sizeText = activeBytes !== null && limitBytes !== null
+    ? ` (${formatBackupStorageBytes(activeBytes)} active; ${formatBackupStorageBytes(limitBytes)} limit)`
+    : "";
+  if (type === "story-byte-limit") {
+    const story = String(backupStorageValue(warning, ["label", "storyName", "storyKey"]) || "A story");
+    return `${story} remains above its storage limit because protected backups must stay active${sizeText}.`;
+  }
+  if (type === "total-byte-limit") {
+    return `Active backups remain above the total storage limit because protected backups must stay active${sizeText}.`;
+  }
+  return type ? `Retention warning: ${type}` : "";
+}
+
+function backupStorageWarnings(preview, payload) {
+  const value = backupStorageValue(preview, ["warnings", "warningMessages"])
+    ?? backupStoragePayloadValue(payload, ["warnings", "warningMessages"]);
+  const entries = Array.isArray(value) ? value : value ? [value] : [];
+  const warnings = entries.map(backupStorageWarningText).filter(Boolean);
+  const protectedCounts = [
+    {
+      count: backupStorageNumber(preview, ["malformedFileCount", "summary.malformedFileCount"]),
+      message: count => `${backupStorageFileLabel(count)} with malformed JSON were kept active for manual review.`
+    },
+    {
+      count: backupStorageNumber(preview, ["futureSchemaFileCount", "summary.futureSchemaFileCount"]),
+      message: count => `${backupStorageFileLabel(count)} from a newer data format were kept active.`
+    },
+    {
+      count: backupStorageNumber(preview, ["pinnedFileCount", "summary.pinnedFileCount"]),
+      message: count => `${backupStorageFileLabel(count)} marked as pinned were kept active.`
+    },
+    {
+      count: backupStorageNumber(preview, ["sourceChangedFileCount", "summary.sourceChangedFileCount"]),
+      message: count => `${backupStorageFileLabel(count)} that changed during the scan were kept active.`
+    }
+  ];
+  protectedCounts.forEach(entry => {
+    if (entry.count > 0) warnings.push(entry.message(entry.count));
+  });
+  return [...new Set(warnings)];
+}
+
+function normalizeBackupStorageStory(story, index) {
+  const activeFiles = backupStorageNumber(story, [
+    "activeFiles",
+    "totalFiles",
+    "scannedFileCount",
+    "active.files",
+    "active.fileCount",
+    "active.count"
+  ]) ?? 0;
+  const activeBytes = backupStorageNumber(story, [
+    "activeBytes",
+    "totalBytes",
+    "scannedBytes",
+    "active.bytes",
+    "active.byteCount",
+    "active.size"
+  ]) ?? 0;
+  const archiveFiles = backupStorageNumber(story, [
+    "archiveFiles",
+    "archiveFileCount",
+    "filesToArchive",
+    "archive.files",
+    "archive.fileCount",
+    "archive.count"
+  ]) ?? 0;
+  const archiveBytes = backupStorageNumber(story, [
+    "archiveBytes",
+    "bytesToArchive",
+    "archive.bytes",
+    "archive.byteCount",
+    "archive.size"
+  ]) ?? 0;
+  const retainedFiles = backupStorageNumber(story, [
+    "retainedFiles",
+    "keepFileCount",
+    "filesRetained",
+    "retained.files",
+    "retained.fileCount",
+    "retained.count"
+  ]) ?? Math.max(0, activeFiles - archiveFiles);
+  const retainedBytes = backupStorageNumber(story, [
+    "retainedBytes",
+    "keepBytes",
+    "bytesRetained",
+    "retained.bytes",
+    "retained.byteCount",
+    "retained.size"
+  ]) ?? Math.max(0, activeBytes - archiveBytes);
+  return {
+    name: String(backupStorageValue(story, [
+      "storyName",
+      "displayName",
+      "label",
+      "fileName",
+      "title",
+      "name",
+      "storyKey",
+      "id"
+    ]) || `Story ${index + 1}`),
+    sourceFilePath: String(backupStorageValue(story, [
+      "sourceFilePath",
+      "filePath",
+      "path"
+    ]) || ""),
+    archiveFiles,
+    archiveBytes,
+    retainedFiles,
+    retainedBytes
+  };
+}
+
+function normalizeBackupStoragePreview(preview, payload = {}) {
+  const activeFiles = backupStorageNumber(preview, [
+    "activeFiles",
+    "totalFiles",
+    "scannedFileCount",
+    "totals.activeFiles",
+    "summary.activeFiles",
+    "summary.scannedFileCount",
+    "counts.activeFiles",
+    "active.files",
+    "active.fileCount",
+    "active.count"
+  ]) ?? 0;
+  const activeBytes = backupStorageNumber(preview, [
+    "activeBytes",
+    "totalBytes",
+    "scannedBytes",
+    "totals.activeBytes",
+    "summary.scannedBytes",
+    "summary.activeBytes",
+    "counts.activeBytes",
+    "active.bytes",
+    "active.byteCount",
+    "active.size"
+  ]) ?? 0;
+  const archiveFiles = backupStorageNumber(preview, [
+    "archiveFiles",
+    "archiveFileCount",
+    "filesToArchive",
+    "totals.archiveFiles",
+    "summary.archiveFiles",
+    "summary.archiveFileCount",
+    "counts.archiveFiles",
+    "archive.files",
+    "archive.fileCount",
+    "archive.count"
+  ]) ?? 0;
+  const archiveBytes = backupStorageNumber(preview, [
+    "archiveBytes",
+    "bytesToArchive",
+    "totals.archiveBytes",
+    "summary.archiveBytes",
+    "counts.archiveBytes",
+    "archive.bytes",
+    "archive.byteCount",
+    "archive.size"
+  ]) ?? 0;
+  const retainedFiles = backupStorageNumber(preview, [
+    "retainedFiles",
+    "keepFileCount",
+    "filesRetained",
+    "totals.retainedFiles",
+    "summary.retainedFiles",
+    "summary.keepFileCount",
+    "counts.retainedFiles",
+    "retained.files",
+    "retained.fileCount",
+    "retained.count"
+  ]) ?? Math.max(0, activeFiles - archiveFiles);
+  const retainedBytes = backupStorageNumber(preview, [
+    "retainedBytes",
+    "keepBytes",
+    "bytesRetained",
+    "totals.retainedBytes",
+    "summary.retainedBytes",
+    "summary.keepBytes",
+    "counts.retainedBytes",
+    "retained.bytes",
+    "retained.byteCount",
+    "retained.size"
+  ]) ?? Math.max(0, activeBytes - archiveBytes);
+
+  return {
+    activeFiles,
+    activeBytes,
+    archiveFiles,
+    archiveBytes,
+    retainedFiles,
+    retainedBytes,
+    sameSizeCandidateFiles: backupStorageNumber(preview, [
+      "sameSizeCandidateFiles",
+      "sameSizeCandidateFileCount",
+      "candidateFiles",
+      "sameSizeFiles",
+      "totals.sameSizeCandidateFiles",
+      "counts.sameSizeCandidateFiles",
+      "summary.sameSizeCandidateFileCount"
+    ]) ?? 0,
+    exactDuplicateFiles: backupStorageNumber(preview, [
+      "exactDuplicateFiles",
+      "exactDuplicateFileCount",
+      "exactDuplicates",
+      "totals.exactDuplicateFiles",
+      "counts.exactDuplicateFiles",
+      "exact.files",
+      "summary.exactDuplicateFileCount"
+    ]) ?? 0,
+    stableDuplicateFiles: backupStorageNumber(preview, [
+      "stableDuplicateFiles",
+      "stableContentDuplicateFileCount",
+      "metadataOnlyDuplicateFileCount",
+      "semanticDuplicateFiles",
+      "metadataOnlyDuplicateFiles",
+      "totals.stableDuplicateFiles",
+      "counts.stableDuplicateFiles",
+      "stable.files",
+      "summary.stableContentDuplicateFileCount",
+      "summary.metadataOnlyDuplicateFileCount"
+    ]) ?? 0,
+    stories: backupStorageStoryEntries(preview).map(normalizeBackupStorageStory),
+    warnings: backupStorageWarnings(preview, payload),
+    archiveRootPath: String(
+      backupStorageValue(preview, [
+        "archiveRootPath",
+        "archiveFolderPath",
+        "archivePath",
+        "destinationPath"
+      ])
+      ?? backupStoragePayloadValue(payload, [
+        "archiveRootPath",
+        "archiveFolderPath",
+        "archivePath",
+        "destinationPath"
+      ])
+      ?? ""
+    )
+  };
+}
+
+function formatBackupStorageBytes(value) {
+  const bytes = Math.max(0, Number(value) || 0);
+  if (bytes < 1024) return `${Math.round(bytes).toLocaleString("en-GB")} B`;
+  const units = ["KiB", "MiB", "GiB", "TiB"];
+  const unitIndex = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)) - 1, units.length - 1);
+  const amount = bytes / (1024 ** (unitIndex + 1));
+  const maximumFractionDigits = amount >= 100 ? 0 : amount >= 10 ? 1 : 2;
+  return `${amount.toLocaleString("en-GB", { maximumFractionDigits })} ${units[unitIndex]}`;
+}
+
+function backupStorageFileLabel(value) {
+  const count = Math.max(0, Math.round(Number(value) || 0));
+  return `${count.toLocaleString("en-GB")} ${count === 1 ? "file" : "files"}`;
+}
+
+function backupStoragePlanIdFromPayload(payload) {
+  const value = backupStoragePayloadValue(payload, [
+    "planId",
+    "retentionPlanId",
+    "plan.id"
+  ]);
+  return value === undefined ? "" : String(value);
+}
+
+function backupStorageJobIdFromPayload(payload) {
+  const envelope = backupStorageObject(payload) || {};
+  const progress = backupStorageObject(envelope.progress) || {};
+  const job = backupStorageObject(envelope.job) || {};
+  return String(
+    envelope.jobId
+    || progress.jobId
+    || progress.id
+    || job.jobId
+    || job.id
+    || envelope.id
+    || ""
+  );
+}
+
+function backupStorageProgressFromPayload(payload) {
+  const envelope = backupStorageObject(payload) || {};
+  const progress = backupStorageObject(envelope.progress)
+    || backupStorageObject(envelope.job)
+    || envelope;
+  const result = backupStorageObject(progress.result)
+    || backupStorageObject(envelope.result)
+    || {};
+  const status = String(
+    progress.status
+    || progress.state
+    || envelope.status
+    || envelope.state
+    || "running"
+  ).toLowerCase();
+  const completed = backupStorageNumber(progress, [
+    "completed",
+    "processed",
+    "processedFiles",
+    "current",
+    "done"
+  ]);
+  const total = backupStorageNumber(progress, [
+    "total",
+    "totalFiles",
+    "fileCount",
+    "items"
+  ]);
+  const explicitPercent = backupStorageNumber(progress, [
+    "percent",
+    "percentage",
+    "progressPercent"
+  ]);
+  const percent = explicitPercent !== null
+    ? Math.min(100, explicitPercent)
+    : total !== null && total > 0 && completed !== null
+      ? Math.min(100, (completed / total) * 100)
+      : null;
+  const errorValue = progress.error || envelope.error;
+  const error = typeof errorValue === "string"
+    ? errorValue
+    : String(backupStorageValue(errorValue, ["message", "detail"]) || "");
+  const partial = result.ok === false
+    || envelope.ok === false
+    || String(result.status || "").toLowerCase() === "partial"
+    || ["partial", "completed-with-errors"].includes(status);
+  const failures = Array.isArray(result.failures)
+    ? result.failures
+    : Array.isArray(progress.failures)
+      ? progress.failures
+      : Array.isArray(envelope.failures)
+        ? envelope.failures
+        : [];
+
+  return {
+    status,
+    completed,
+    total,
+    percent,
+    step: String(
+      progress.step
+      || progress.message
+      || progress.label
+      || progress.phaseLabel
+      || ""
+    ),
+    error,
+    partial,
+    failedFileCount: backupStorageNumber(result, ["failedFileCount", "failedFiles"])
+      ?? backupStorageNumber(progress, ["failedFileCount", "failedFiles"])
+      ?? backupStorageNumber(envelope, ["failedFileCount", "failedFiles"])
+      ?? 0,
+    failures,
+    pollAfterMs: backupStorageNumber(progress, ["pollAfterMs", "retryAfterMs"])
+  };
+}
+
+function backupStorageTerminalState(status) {
+  const value = String(status || "").toLowerCase();
+  if (["complete", "completed", "done", "success", "succeeded"].includes(value)) return "complete";
+  if (["failed", "error", "cancelled", "canceled", "partial", "completed-with-errors"].includes(value)) {
+    return "failed";
+  }
+  return "";
+}
+
+function backupStorageRunLabel(value) {
+  const count = Math.max(0, Math.round(Number(value) || 0));
+  return `${count.toLocaleString("en-GB")} ${count === 1 ? "run" : "runs"}`;
+}
+
+function manualDeletionQueueIsVisible(queue) {
+  return Boolean(queue?.ready && (queue.itemCount > 0 || queue.unsafe));
+}
+
+function manualDeletionQueueSummary(value) {
+  const queue = normalizeReadyForManualDeletion(value);
+  const details = [
+    countLabel(queue.itemCount, "item"),
+    backupStorageRunLabel(queue.runCount),
+    formatBackupStorageBytes(queue.bytes)
+  ].join(", ");
+  if (queue.unsafe) {
+    return `${queue.warning || "The manual deletion folder could not be verified."} ${details}.`;
+  }
+  const unrecognized = queue.unrecognizedItemCount > 0
+    ? ` ${countLabel(queue.unrecognizedItemCount, "unrecognised item")} also needs review.`
+    : "";
+  return `${details} waiting for your review.${unrecognized}`;
+}
+
+function renderBackupStorageManualDeletion(value) {
+  const queue = normalizeReadyForManualDeletion(value);
+  backupStorageManualDeletion = queue;
+  const visible = manualDeletionQueueIsVisible(queue);
+
+  if (els.backupStorageManualDeletion) {
+    els.backupStorageManualDeletion.hidden = !visible;
+    els.backupStorageManualDeletion.classList.toggle("is-unsafe", queue.unsafe);
+  }
+  if (els.backupStorageManualDeletionSummary) {
+    els.backupStorageManualDeletionSummary.textContent = visible
+      ? manualDeletionQueueSummary(queue)
+      : "";
+  }
+  if (els.backupStorageManualDeletionPath) {
+    els.backupStorageManualDeletionPath.textContent = visible
+      ? queue.folderPath || "Folder path unavailable"
+      : "";
+    els.backupStorageManualDeletionPath.title = queue.folderPath;
+  }
+  if (els.backupStorageManualDeletionOpen) {
+    els.backupStorageManualDeletionOpen.disabled = !visible;
+  }
+}
+
+function syncBackupStorageActions() {
+  const archiveFiles = backupStoragePreview?.archiveFiles || 0;
+  if (els.backupStorageRescan) els.backupStorageRescan.disabled = backupStorageBusy;
+  if (els.backupStorageArchive) {
+    els.backupStorageArchive.textContent = archiveFiles > 0
+      ? `Archive ${backupStorageFileLabel(archiveFiles)}`
+      : "Archive files";
+    els.backupStorageArchive.disabled = backupStorageBusy
+      || archiveFiles < 1
+      || !backupStoragePlanId;
+  }
+  if (els.backupStorageExpiryRefresh) {
+    els.backupStorageExpiryRefresh.disabled = backupStorageBusy;
+  }
+  if (els.backupStorageExpiryPrepare) {
+    const expiredRuns = backupStorageExpiryPreview?.movableRunCount || 0;
+    els.backupStorageExpiryPrepare.textContent = "Prepare for manual deletion";
+    els.backupStorageExpiryPrepare.disabled = backupStorageBusy
+      || expiredRuns < 1
+      || !backupStorageExpiryPlanId;
+  }
+  if (els.backupStoragePanel) {
+    els.backupStoragePanel.setAttribute("aria-busy", String(backupStorageBusy));
+  }
+}
+
+function setBackupStorageBusy(busy) {
+  backupStorageBusy = Boolean(busy);
+  syncBackupStorageActions();
+}
+
+function renderBackupStoragePreview(preview, payload = {}, options = {}) {
+  if (!preview || !els.backupStoragePreview) return false;
+  const normalized = normalizeBackupStoragePreview(preview, payload);
+  backupStoragePreview = normalized;
+
+  if (els.backupStorageActiveFiles) {
+    els.backupStorageActiveFiles.textContent = backupStorageFileLabel(normalized.activeFiles);
+  }
+  if (els.backupStorageActiveBytes) {
+    els.backupStorageActiveBytes.textContent = formatBackupStorageBytes(normalized.activeBytes);
+  }
+  if (els.backupStorageArchiveFiles) {
+    els.backupStorageArchiveFiles.textContent = backupStorageFileLabel(normalized.archiveFiles);
+  }
+  if (els.backupStorageArchiveBytes) {
+    els.backupStorageArchiveBytes.textContent = formatBackupStorageBytes(normalized.archiveBytes);
+  }
+  if (els.backupStorageRetainedFiles) {
+    els.backupStorageRetainedFiles.textContent = backupStorageFileLabel(normalized.retainedFiles);
+  }
+  if (els.backupStorageRetainedBytes) {
+    els.backupStorageRetainedBytes.textContent = formatBackupStorageBytes(normalized.retainedBytes);
+  }
+  if (els.backupStorageCandidateFiles) {
+    els.backupStorageCandidateFiles.textContent = normalized.sameSizeCandidateFiles.toLocaleString("en-GB");
+  }
+  if (els.backupStorageExactFiles) {
+    els.backupStorageExactFiles.textContent = normalized.exactDuplicateFiles.toLocaleString("en-GB");
+  }
+  if (els.backupStorageStableFiles) {
+    els.backupStorageStableFiles.textContent = normalized.stableDuplicateFiles.toLocaleString("en-GB");
+  }
+
+  if (els.backupStorageStories && els.backupStorageStoriesSection) {
+    els.backupStorageStories.innerHTML = normalized.stories.map(story => `
+      <li>
+        <span
+          class="backup-storage-story-name"
+          title="${escapeHtml([story.name, story.sourceFilePath].filter(Boolean).join("\n"))}"
+        >${escapeHtml(story.name)}</span>
+        <span class="backup-storage-story-value">
+          <strong>${story.archiveFiles.toLocaleString("en-GB")}</strong>
+          <small>${formatBackupStorageBytes(story.archiveBytes)} to archive</small>
+        </span>
+        <span class="backup-storage-story-value">
+          <strong>${story.retainedFiles.toLocaleString("en-GB")}</strong>
+          <small>${formatBackupStorageBytes(story.retainedBytes)} remain</small>
+        </span>
+      </li>
+    `).join("");
+    els.backupStorageStoriesSection.hidden = normalized.stories.length === 0;
+  }
+
+  if (els.backupStorageWarnings && els.backupStorageWarningsSection) {
+    els.backupStorageWarnings.innerHTML = normalized.warnings
+      .map(warning => `<li>${escapeHtml(warning)}</li>`)
+      .join("");
+    els.backupStorageWarningsSection.hidden = normalized.warnings.length === 0;
+  }
+
+  if (els.backupStoragePath && els.backupStoragePathSection) {
+    els.backupStoragePath.textContent = normalized.archiveRootPath;
+    els.backupStoragePath.title = normalized.archiveRootPath;
+    els.backupStoragePathSection.hidden = !normalized.archiveRootPath;
+  }
+
+  backupStoragePlanId = options.acceptPlan === false
+    ? ""
+    : backupStoragePlanIdFromPayload(payload);
+  els.backupStoragePreview.hidden = false;
+  syncBackupStorageActions();
+  return true;
+}
+
+function renderBackupStorageExpiryPreview(preview, payload = {}) {
+  if (!preview || !els.backupStorageExpiryPreview) return false;
+  const normalized = normalizeBackupStorageExpiryPreview(preview, payload);
+  backupStorageExpiryPreview = normalized;
+
+  if (els.backupStorageExpiryManaged) {
+    els.backupStorageExpiryManaged.textContent = normalized.managedRunCount.toLocaleString("en-GB");
+  }
+  if (els.backupStorageExpiryExpired) {
+    els.backupStorageExpiryExpired.textContent = backupStorageRunLabel(normalized.expiredRunCount);
+  }
+  if (els.backupStorageExpiryBytes) {
+    els.backupStorageExpiryBytes.textContent = formatBackupStorageBytes(normalized.expiredBytes);
+  }
+  if (els.backupStorageExpiryRetained) {
+    els.backupStorageExpiryRetained.textContent = normalized.retainedRunCount.toLocaleString("en-GB");
+  }
+  if (els.backupStorageExpiryPinned) {
+    els.backupStorageExpiryPinned.textContent = normalized.pinnedRunCount.toLocaleString("en-GB");
+  }
+  if (els.backupStorageExpiryProtected) {
+    els.backupStorageExpiryProtected.textContent = normalized.protectedRunCount.toLocaleString("en-GB");
+  }
+  if (els.backupStorageExpiryPolicy) {
+    els.backupStorageExpiryPolicy.textContent =
+      `The first archive is kept for ${normalized.firstRunRetentionDays} days; later archives are kept for ${normalized.standardRetentionDays} days. Only archives still in the managed folder are included.`;
+  }
+
+  if (els.backupStorageExpiryRuns) {
+    els.backupStorageExpiryRuns.innerHTML = normalized.runs.map(run => {
+      const completedText = formatBackupStorageRunDate(run.completedAt);
+      const expiresText = formatBackupStorageRunDate(run.expiresAt);
+      const timing = [];
+      if (completedText) timing.push(`Archived ${completedText}`);
+      if (expiresText) timing.push(`${run.movable || run.expired ? "Expired" : "Expires"} ${expiresText}`);
+      if (run.retentionDays !== null) timing.push(`${run.retentionDays}-day retention`);
+      if (run.protectedReason) timing.push(run.protectedReason);
+      const tooltip = [run.folderName, run.archiveFolderPath].filter(Boolean).join("\n");
+      const stateClass = run.movable
+        ? "is-expired"
+        : run.pinned || run.protected || run.expired
+          ? "is-protected"
+          : "";
+      return `
+        <li class="${stateClass}">
+          <span class="backup-storage-expiry-run-name" title="${escapeHtml(tooltip)}">
+            <strong>${escapeHtml(run.folderName)}</strong>
+            <small>${escapeHtml(timing.join(" | ") || "Managed archive run")}</small>
+          </span>
+          <span class="backup-storage-expiry-run-size">
+            <strong>${backupStorageFileLabel(run.fileCount)}</strong>
+            <small>${formatBackupStorageBytes(run.bytes)}</small>
+          </span>
+          <span class="backup-storage-expiry-run-state">${escapeHtml(run.stateLabel)}</span>
+        </li>
+      `;
+    }).join("");
+    els.backupStorageExpiryRuns.hidden = normalized.runs.length === 0;
+  }
+
+  if (els.backupStorageExpiryWarnings && els.backupStorageExpiryWarningsSection) {
+    els.backupStorageExpiryWarnings.innerHTML = normalized.warnings
+      .map(warning => `<li>${escapeHtml(warning)}</li>`)
+      .join("");
+    els.backupStorageExpiryWarningsSection.hidden = normalized.warnings.length === 0;
+  }
+
+  const manualDeletion = readyForManualDeletionFromPayload(payload)
+    || (backupStorageObject(preview.readyForManualDeletion)
+      ? normalizeReadyForManualDeletion(preview.readyForManualDeletion)
+      : backupStorageManualDeletion);
+  if (manualDeletion) renderBackupStorageManualDeletion(manualDeletion);
+
+  backupStorageExpiryPlanId = backupStorageExpiryPlanIdFromPayload(payload);
+  backupStorageExpiryOperationWarnings = [];
+  els.backupStorageExpiryPreview.hidden = false;
+  if (els.backupStorageExpiryStatus) {
+    if (normalized.movableRunCount > 0) {
+      els.backupStorageExpiryStatus.textContent =
+        `${backupStorageRunLabel(normalized.movableRunCount)} can be prepared for manual deletion. Only completed runs still inside the managed archive folder are included.`;
+    } else if (normalized.managedRunCount > 0) {
+      els.backupStorageExpiryStatus.textContent =
+        "No managed archive runs have reached the end of retention. Archives stored elsewhere are not included.";
+    } else {
+      els.backupStorageExpiryStatus.textContent =
+        "No managed archive runs were found. Archives stored elsewhere are not included.";
+    }
+  }
+  syncBackupStorageActions();
+  return true;
+}
+
+function showBackupStorageOperationWarnings(warnings = []) {
+  if (!els.backupStorageWarnings || !els.backupStorageWarningsSection) return;
+  const messages = warnings.map(entry => {
+    if (typeof entry === "string") return entry;
+    const fileName = String(backupStorageValue(entry, ["fileName", "name", "path"]) || "");
+    const error = String(backupStorageValue(entry, ["error", "message", "detail"]) || "");
+    return [fileName, error].filter(Boolean).join(": ");
+  }).filter(Boolean);
+  if (!messages.length) return;
+  els.backupStorageWarnings.innerHTML = messages
+    .map(message => `<li>${escapeHtml(message)}</li>`)
+    .join("");
+  els.backupStorageWarningsSection.hidden = false;
+}
+
+function showBackupStorageArchivePath(value) {
+  const archivePath = String(value || "");
+  if (!archivePath || !els.backupStoragePath || !els.backupStoragePathSection) return;
+  els.backupStoragePath.textContent = archivePath;
+  els.backupStoragePath.title = archivePath;
+  els.backupStoragePathSection.hidden = false;
+}
+
+function resetBackupStoragePreview() {
+  backupStoragePlanId = "";
+  backupStoragePreview = null;
+  backupStorageExpiryNotice = "";
+  if (els.backupStoragePreview) {
+    els.backupStoragePreview.hidden = true;
+    els.backupStoragePreview.classList.remove("is-archived");
+  }
+  if (els.backupStorageStories) els.backupStorageStories.innerHTML = "";
+  if (els.backupStorageWarnings) els.backupStorageWarnings.innerHTML = "";
+  if (els.backupStorageStoriesSection) els.backupStorageStoriesSection.hidden = true;
+  if (els.backupStorageWarningsSection) els.backupStorageWarningsSection.hidden = true;
+  if (els.backupStoragePathSection) els.backupStoragePathSection.hidden = true;
+  resetBackupStorageExpiryPreview();
+  syncBackupStorageActions();
+}
+
+function resetBackupStorageExpiryPreview(options = {}) {
+  backupStorageExpiryPlanId = "";
+  backupStorageExpiryPreview = null;
+  if (!options.preserveOperationWarnings) backupStorageExpiryOperationWarnings = [];
+  if (els.backupStorageExpiryPreview) els.backupStorageExpiryPreview.hidden = true;
+  if (els.backupStorageExpiryRuns) {
+    els.backupStorageExpiryRuns.innerHTML = "";
+    els.backupStorageExpiryRuns.hidden = true;
+  }
+  if (els.backupStorageExpiryWarnings) els.backupStorageExpiryWarnings.innerHTML = "";
+  if (els.backupStorageExpiryWarningsSection) els.backupStorageExpiryWarningsSection.hidden = true;
+  if (els.backupStorageManualDeletion) els.backupStorageManualDeletion.hidden = true;
+  if (els.backupStorageExpiryStatus) {
+    els.backupStorageExpiryStatus.textContent =
+      "Archive expiry will be checked after the active backup scan.";
+  }
+  syncBackupStorageActions();
+}
+
+function updateBackupStorageProgress(progress = {}, action = "scan") {
+  if (!els.backupStorageProgress) return;
+  const terminal = backupStorageTerminalState(progress.status);
+  const failed = terminal === "failed";
+  const hasPercent = Number.isFinite(progress.percent);
+  const percent = terminal === "complete" ? 100 : hasPercent ? progress.percent : 0;
+  const isExpiryAction = action === "expiry-scan" || action === "expiry-prepare";
+  const defaultStep = action === "archive"
+    ? "Moving selected backups into the archive..."
+    : action === "expiry-prepare"
+      ? "Moving expired archive runs into the manual deletion folder..."
+      : action === "expiry-scan"
+        ? "Checking managed archive expiry..."
+        : "Scanning version history backups...";
+  const step = failed
+    ? `Could not ${action === "archive"
+      ? "archive backups"
+      : action === "expiry-prepare"
+        ? "prepare expired archives"
+        : action === "expiry-scan"
+          ? "review managed archives"
+          : "complete the scan"}`
+    : progress.step || defaultStep;
+
+  els.backupStorageProgress.hidden = false;
+  els.backupStorageProgress.classList.toggle("is-failed", failed);
+  if (els.backupStorageProgressTrack) {
+    els.backupStorageProgressTrack.classList.toggle("is-indeterminate", !hasPercent && !terminal);
+    if (hasPercent || terminal === "complete") {
+      els.backupStorageProgressTrack.setAttribute("aria-valuenow", String(Math.round(percent)));
+      els.backupStorageProgressTrack.setAttribute("aria-valuemin", "0");
+      els.backupStorageProgressTrack.setAttribute("aria-valuemax", "100");
+    } else {
+      els.backupStorageProgressTrack.removeAttribute("aria-valuenow");
+      els.backupStorageProgressTrack.removeAttribute("aria-valuemin");
+      els.backupStorageProgressTrack.removeAttribute("aria-valuemax");
+    }
+  }
+  if (els.backupStorageProgressBar) {
+    els.backupStorageProgressBar.style.width = hasPercent || terminal === "complete"
+      ? `${Math.max(0, Math.min(100, percent))}%`
+      : "";
+  }
+  if (els.backupStorageStatus) els.backupStorageStatus.textContent = step;
+  if (isExpiryAction && els.backupStorageExpiryStatus) {
+    els.backupStorageExpiryStatus.textContent = step;
+  }
+  if (els.backupStorageProgressMeta) {
+    if (failed) {
+      els.backupStorageProgressMeta.textContent = progress.error || "The operation did not complete.";
+    } else if (progress.total !== null && progress.total > 0) {
+      const completed = Math.min(progress.total, progress.completed ?? 0);
+      els.backupStorageProgressMeta.textContent =
+        `${Math.round(completed).toLocaleString("en-GB")} of ${Math.round(progress.total).toLocaleString("en-GB")} ${isExpiryAction ? "archive runs" : "files"}`;
+    } else {
+      els.backupStorageProgressMeta.textContent = "Working...";
+    }
+  }
+}
+
+async function backupStorageRequest(url, options = {}) {
+  const { allowPartial = false, ...requestOptions } = options;
+  const response = await fetch(url, {
+    cache: "no-store",
+    ...requestOptions
+  });
+  const responseText = await response.text();
+  let payload = {};
+  if (responseText) {
+    try {
+      payload = JSON.parse(responseText);
+    } catch {
+      payload = { error: responseText };
+    }
+  }
+  const allowedPartial = allowPartial
+    && String(payload?.status || "").toLowerCase() === "partial";
+  if (!response.ok || (payload?.ok === false && !allowedPartial)) {
+    throw new Error(payload?.error || payload?.message || responseText || "Backup storage request failed");
+  }
+  return payload;
+}
+
+function backupStorageDelay(ms) {
+  return new Promise(resolve => window.setTimeout(resolve, ms));
+}
+
+function finishBackupStorageJob(action, payload, progress, archivedFileCount = 0) {
+  const terminal = backupStorageTerminalState(progress.status);
+  if (terminal === "failed" && !progress.partial) {
+    backupStoragePlanId = "";
+    setBackupStorageBusy(false);
+    updateBackupStorageProgress(progress, action);
+    setStatus(action === "archive" ? "Backup archive failed" : "Backup storage scan failed");
+    return;
+  }
+
+  const preview = backupStoragePreviewFromPayload(payload);
+  if (action === "scan" && !preview) {
+    throw new Error("The backup storage scan completed without a retention preview");
+  }
+
+  if (preview) {
+    renderBackupStoragePreview(preview, payload, { acceptPlan: action === "scan" });
+  } else if (action === "archive") {
+    backupStoragePlanId = "";
+  }
+
+  setBackupStorageBusy(false);
+  if (els.backupStorageProgress) els.backupStorageProgress.hidden = true;
+
+  if (action === "archive") {
+    backupStoragePlanId = "";
+    els.backupStoragePreview?.classList.add("is-archived");
+    showBackupStorageArchivePath(backupStoragePayloadValue(payload, [
+      "archiveRootPath",
+      "archiveFolderPath",
+      "archivePath",
+      "destinationPath"
+    ]));
+    const archiveWarnings = backupStoragePayloadValue(payload, ["warnings"]);
+    if (Array.isArray(archiveWarnings) && archiveWarnings.length) {
+      showBackupStorageOperationWarnings(archiveWarnings);
+    }
+    const reportedCount = Number(backupStoragePayloadValue(payload, [
+      "archivedFiles",
+      "archivedFileCount",
+      "result.archivedFiles",
+      "result.archivedFileCount"
+    ]));
+    const count = Number.isFinite(reportedCount) ? reportedCount : archivedFileCount;
+    const failedCount = progress.failedFileCount
+      || progress.failures.length
+      || Number(backupStoragePayloadValue(payload, ["failedFileCount", "result.failedFileCount"]))
+      || 0;
+    if (progress.partial) {
+      showBackupStorageOperationWarnings(progress.failures.length
+        ? progress.failures
+        : [`${backupStorageFileLabel(failedCount)} could not be archived. The active copies were retained.`]);
+      if (els.backupStorageStatus) {
+        els.backupStorageStatus.textContent =
+          `${backupStorageFileLabel(count)} archived; ${backupStorageFileLabel(failedCount)} retained after errors.`;
+      }
+      setStatus("Backup archive completed with errors");
+      syncBackupStorageActions();
+      runBackupStorageExpiryJob("expiry-scan");
+      return;
+    }
+    if (els.backupStorageStatus) {
+      els.backupStorageStatus.textContent = count > 0
+        ? `${backupStorageFileLabel(count)} moved into the archive. Rescan to review active storage.`
+        : "Archive complete. Rescan to review active storage.";
+    }
+    setStatus(count > 0
+      ? `Archived ${backupStorageFileLabel(count)}`
+      : "Version history backup archive complete");
+  } else {
+    const archiveFiles = backupStoragePreview?.archiveFiles || 0;
+    if (els.backupStorageStatus) {
+      els.backupStorageStatus.textContent = archiveFiles > 0
+        ? "Scan complete. Review the files selected by the retention policy."
+        : "Scan complete. No files need archiving.";
+    }
+    setStatus(archiveFiles > 0
+      ? `${backupStorageFileLabel(archiveFiles)} can be archived`
+      : "Backup storage scan complete");
+  }
+  syncBackupStorageActions();
+  runBackupStorageExpiryJob("expiry-scan");
+}
+
+async function runBackupStorageJob(action) {
+  const isArchive = action === "archive";
+  const planId = backupStoragePlanId;
+  if (isArchive && !planId) return;
+
+  const archivedFileCount = backupStoragePreview?.archiveFiles || 0;
+  const token = ++backupStorageJobToken;
+  if (!isArchive) resetBackupStoragePreview();
+  backupStoragePlanId = "";
+  setBackupStorageBusy(true);
+  updateBackupStorageProgress({
+    status: "running",
+    completed: null,
+    total: null,
+    percent: null,
+    step: isArchive
+      ? "Starting backup archive..."
+      : "Starting backup storage scan..."
+  }, action);
+
+  try {
+    const started = await backupStorageRequest(
+      isArchive
+        ? "/api/version-history-backups/retention/archive"
+        : "/api/version-history-backups/retention/start",
+      isArchive
+        ? {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ planId })
+          }
+        : { method: "POST" }
+    );
+    if (token !== backupStorageJobToken || els.backupStorageOverlay?.hidden) return;
+
+    let payload = started;
+    let progress = backupStorageProgressFromPayload(payload);
+    updateBackupStorageProgress(progress, action);
+    let terminal = backupStorageTerminalState(progress.status);
+    const directPreview = backupStoragePreviewFromPayload(payload);
+    const jobId = backupStorageJobIdFromPayload(payload);
+    if (!terminal && !jobId && directPreview) terminal = "complete";
+    if (terminal) {
+      finishBackupStorageJob(action, payload, { ...progress, status: terminal }, archivedFileCount);
+      return;
+    }
+    if (!jobId) throw new Error("The backup storage job did not return an ID");
+
+    while (token === backupStorageJobToken && !els.backupStorageOverlay?.hidden) {
+      const pollDelay = Math.min(1500, Math.max(250, progress.pollAfterMs || 400));
+      await backupStorageDelay(pollDelay);
+      if (token !== backupStorageJobToken || els.backupStorageOverlay?.hidden) return;
+      payload = await backupStorageRequest(
+        `/api/version-history-backups/retention/progress?id=${encodeURIComponent(jobId)}`
+      );
+      if (token !== backupStorageJobToken || els.backupStorageOverlay?.hidden) return;
+      progress = backupStorageProgressFromPayload(payload);
+      updateBackupStorageProgress(progress, action);
+      terminal = backupStorageTerminalState(progress.status);
+      if (!terminal) continue;
+      finishBackupStorageJob(action, payload, progress, archivedFileCount);
+      return;
+    }
+  } catch (error) {
+    if (token !== backupStorageJobToken || els.backupStorageOverlay?.hidden) return;
+    console.error(error);
+    finishBackupStorageJob(action, {
+      error: error?.message || "Backup storage operation failed"
+    }, {
+      status: "failed",
+      error: error?.message || "Backup storage operation failed"
+    }, archivedFileCount);
+  }
+}
+
+function backupStorageExpiryFailureMessages(failures = []) {
+  return failures.map(entry => {
+    if (typeof entry === "string") return entry;
+    const folderName = String(backupStorageValue(entry, [
+      "folderName",
+      "archiveFolderPath",
+      "name",
+      "path"
+    ]) || "");
+    const error = String(backupStorageValue(entry, ["error", "message", "detail"]) || "");
+    return [folderName, error].filter(Boolean).join(": ");
+  }).filter(Boolean);
+}
+
+function isBackupStorageExpiryStaleError(value) {
+  return /stale|changed|expired plan|plan.+expired|plan.+not found|no longer (?:current|valid)/i
+    .test(String(value || ""));
+}
+
+function finishBackupStorageExpiryJob(action, payload, progress) {
+  const isPrepare = action === "expiry-prepare";
+  const terminal = backupStorageTerminalState(progress.status);
+  if (terminal === "failed" && !progress.partial) {
+    backupStorageExpiryPlanId = "";
+    if (isPrepare && isBackupStorageExpiryStaleError(progress.error)) {
+      backupStorageExpiryOperationWarnings = [
+        "The managed archive folder changed after the preview. Nothing was moved; the review has been refreshed."
+      ];
+      backupStorageExpiryNotice = "The previous archive expiry plan was no longer current.";
+      setBackupStorageBusy(false);
+      runBackupStorageExpiryJob("expiry-scan", { preserveOperationWarnings: true });
+      return;
+    }
+    setBackupStorageBusy(false);
+    updateBackupStorageProgress(progress, action);
+    if (els.backupStorageExpiryStatus) {
+      els.backupStorageExpiryStatus.textContent = progress.error
+        || (isPrepare ? "Expired archives could not be prepared." : "Managed archives could not be reviewed.");
+    }
+    setStatus(isPrepare ? "Archive preparation failed" : "Archive expiry review failed");
+    return;
+  }
+
+  if (isPrepare) {
+    backupStorageExpiryPlanId = "";
+    const movedRunCount = Number(backupStoragePayloadValue(payload, [
+      "movedRunCount",
+      "movedRuns"
+    ])) || 0;
+    const movedBytes = Number(backupStoragePayloadValue(payload, [
+      "movedBytes"
+    ])) || 0;
+    const failureMessages = backupStorageExpiryFailureMessages(progress.failures);
+    const partial = progress.partial || failureMessages.length > 0;
+    backupStorageExpiryOperationWarnings = partial
+      ? failureMessages.length
+        ? failureMessages
+        : ["Some expired archive runs could not be prepared. They remain in the managed archive folder."]
+      : [];
+    backupStorageExpiryNotice = partial
+      ? `${backupStorageRunLabel(movedRunCount)} prepared; some managed archive runs remained after errors.`
+      : `${backupStorageRunLabel(movedRunCount)} prepared for manual deletion${movedBytes > 0 ? ` (${formatBackupStorageBytes(movedBytes)})` : ""}.`;
+    const manualDeletion = readyForManualDeletionFromPayload(payload);
+    if (manualDeletion) renderBackupStorageManualDeletion(manualDeletion);
+    setBackupStorageBusy(false);
+    if (els.backupStorageProgress) els.backupStorageProgress.hidden = true;
+    runBackupStorageExpiryJob("expiry-scan", {
+      preserveOperationWarnings: true,
+      preservePreview: true
+    });
+    return;
+  }
+
+  const preview = backupStorageExpiryPreviewFromPayload(payload);
+  if (!preview) {
+    throw new Error("The archive expiry scan completed without a preview");
+  }
+  renderBackupStorageExpiryPreview(preview, payload);
+  setBackupStorageBusy(false);
+  if (els.backupStorageProgress) els.backupStorageProgress.hidden = true;
+
+  const notice = backupStorageExpiryNotice;
+  backupStorageExpiryNotice = "";
+  if (els.backupStorageStatus) {
+    if (notice) {
+      els.backupStorageStatus.textContent = `${notice} Archive expiry has been refreshed.`;
+    } else {
+      const activeCandidates = backupStoragePreview?.archiveFiles || 0;
+      const expiredRuns = backupStorageExpiryPreview?.movableRunCount || 0;
+      els.backupStorageStatus.textContent =
+        `Storage review complete. ${backupStorageFileLabel(activeCandidates)} can be archived; ${backupStorageRunLabel(expiredRuns)} can be prepared for manual deletion.`;
+    }
+  }
+  setStatus(notice || "Backup storage review complete");
+  syncBackupStorageActions();
+}
+
+async function runBackupStorageExpiryJob(action = "expiry-scan", options = {}) {
+  if (!els.backupStorageOverlay || els.backupStorageOverlay.hidden) return;
+  const isPrepare = action === "expiry-prepare";
+  const planId = backupStorageExpiryPlanId;
+  if (isPrepare && !planId) return;
+
+  const token = ++backupStorageJobToken;
+  if (!isPrepare && !options.preservePreview) {
+    resetBackupStorageExpiryPreview({
+      preserveOperationWarnings: options.preserveOperationWarnings === true
+    });
+  }
+  backupStorageExpiryPlanId = "";
+  setBackupStorageBusy(true);
+  updateBackupStorageProgress({
+    status: "running",
+    completed: null,
+    total: null,
+    percent: null,
+    step: isPrepare
+      ? "Preparing expired archive runs for manual deletion..."
+      : "Checking managed archive expiry..."
+  }, action);
+
+  try {
+    const started = await backupStorageRequest(
+      isPrepare
+        ? "/api/version-history-backups/archive-expiry/move-to-manual-deletion"
+        : "/api/version-history-backups/archive-expiry/start",
+      isPrepare
+        ? {
+            allowPartial: true,
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ planId })
+          }
+        : { method: "POST" }
+    );
+    if (token !== backupStorageJobToken || els.backupStorageOverlay.hidden) return;
+
+    let payload = started;
+    let progress = backupStorageProgressFromPayload(payload);
+    updateBackupStorageProgress(progress, action);
+    let terminal = backupStorageTerminalState(progress.status);
+    const directPreview = backupStorageExpiryPreviewFromPayload(payload);
+    const jobId = backupStorageJobIdFromPayload(payload);
+    if (!terminal && !jobId && (directPreview || isPrepare)) terminal = "complete";
+    if (terminal) {
+      finishBackupStorageExpiryJob(action, payload, { ...progress, status: terminal });
+      return;
+    }
+    if (!jobId) throw new Error("The archive expiry job did not return an ID");
+
+    while (token === backupStorageJobToken && !els.backupStorageOverlay.hidden) {
+      const pollDelay = Math.min(1500, Math.max(250, progress.pollAfterMs || 400));
+      await backupStorageDelay(pollDelay);
+      if (token !== backupStorageJobToken || els.backupStorageOverlay.hidden) return;
+      payload = await backupStorageRequest(
+        `/api/version-history-backups/retention/progress?id=${encodeURIComponent(jobId)}`
+      );
+      if (token !== backupStorageJobToken || els.backupStorageOverlay.hidden) return;
+      progress = backupStorageProgressFromPayload(payload);
+      updateBackupStorageProgress(progress, action);
+      terminal = backupStorageTerminalState(progress.status);
+      if (!terminal) continue;
+      finishBackupStorageExpiryJob(action, payload, progress);
+      return;
+    }
+  } catch (error) {
+    if (token !== backupStorageJobToken || els.backupStorageOverlay.hidden) return;
+    console.error(error);
+    const message = error?.message || "Archive expiry operation failed";
+    if (isPrepare && isBackupStorageExpiryStaleError(message)) {
+      backupStorageExpiryOperationWarnings = [
+        "The managed archive folder changed after the preview. Nothing was moved; the review has been refreshed."
+      ];
+      backupStorageExpiryNotice = "The previous archive expiry plan was no longer current.";
+      setBackupStorageBusy(false);
+      runBackupStorageExpiryJob("expiry-scan", { preserveOperationWarnings: true });
+      return;
+    }
+    finishBackupStorageExpiryJob(action, { error: message }, {
+      status: "failed",
+      error: message
+    });
+  }
+}
+
+function prepareExpiredBackupArchives() {
+  const expiredRuns = backupStorageExpiryPreview?.movableRunCount || 0;
+  if (!backupStorageExpiryPlanId || expiredRuns < 1 || backupStorageBusy) return;
+  runBackupStorageExpiryJob("expiry-prepare");
+}
+
+async function openManualDeletionFolder(options = {}) {
+  try {
+    await backupStorageRequest("/api/version-history-backups/manual-deletion/open", {
+      method: "POST"
+    });
+    if (els.backupStorageStatus && !els.backupStorageOverlay?.hidden) {
+      els.backupStorageStatus.textContent = "Opened the manual deletion folder.";
+    }
+    setStatus("Opened manual deletion folder");
+    if (options.closeReminder) hideManualDeletionReminder();
+    return true;
+  } catch (error) {
+    console.error(error);
+    const message = error?.message || "The manual deletion folder could not be opened.";
+    if (els.backupStorageStatus && !els.backupStorageOverlay?.hidden) {
+      els.backupStorageStatus.textContent = message;
+    }
+    if (els.manualDeletionReminderSummary && !els.manualDeletionReminder?.hidden) {
+      els.manualDeletionReminderSummary.textContent =
+        `${manualDeletionQueueSummary(backupStorageManualDeletion)} ${message}`;
+    }
+    setStatus("Manual-deletion folder could not be opened");
+    return false;
+  }
+}
+
+function showManualDeletionReminder(value) {
+  const queue = normalizeReadyForManualDeletion(value);
+  backupStorageManualDeletion = queue;
+  if (
+    manualDeletionReminderDismissed
+    || !manualDeletionQueueIsVisible(queue)
+    || !els.manualDeletionReminder
+  ) {
+    return;
+  }
+
+  manualDeletionReminderReturnFocus = document.activeElement instanceof HTMLElement
+    ? document.activeElement
+    : null;
+  if (els.manualDeletionReminderSummary) {
+    els.manualDeletionReminderSummary.textContent = manualDeletionQueueSummary(queue);
+  }
+  if (els.manualDeletionReminderPath) {
+    els.manualDeletionReminderPath.textContent = queue.folderPath || "Folder path unavailable";
+    els.manualDeletionReminderPath.title = queue.folderPath;
+  }
+  els.manualDeletionReminder.hidden = false;
+  nextUiFrame().then(() => els.manualDeletionReminderOpen?.focus());
+}
+
+function hideManualDeletionReminder() {
+  if (!els.manualDeletionReminder || els.manualDeletionReminder.hidden) return;
+  manualDeletionReminderDismissed = true;
+  els.manualDeletionReminder.hidden = true;
+  const returnFocus = manualDeletionReminderReturnFocus;
+  manualDeletionReminderReturnFocus = null;
+  window.requestAnimationFrame(() => {
+    if (returnFocus?.isConnected) returnFocus.focus();
+  });
+}
+
+function handleManualDeletionReminderKeydown(event) {
+  if (!els.manualDeletionReminder || els.manualDeletionReminder.hidden) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    hideManualDeletionReminder();
+    return;
+  }
+  if (event.key !== "Tab") return;
+
+  const focusable = Array.from(
+    els.manualDeletionReminderPanel?.querySelectorAll(
+      "button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex='-1'])"
+    ) || []
+  ).filter(element => !element.hidden && element.getClientRects().length > 0);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function openBackupStorageManager() {
+  const menuSummary = els.fileMenu?.querySelector(":scope > summary");
+  const returnFocus = menuSummary instanceof HTMLElement
+    ? menuSummary
+    : document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : els.fileManageBackupStorage;
+  closeFileMenu();
+  if (!els.backupStorageOverlay) return;
+  backupStorageReturnFocus = returnFocus;
+  els.backupStorageOverlay.hidden = false;
+  resetBackupStoragePreview();
+  if (els.backupStorageProgress) els.backupStorageProgress.hidden = true;
+  if (els.backupStorageStatus) {
+    els.backupStorageStatus.textContent = "Scanning the active backup folder for retention candidates.";
+  }
+  nextUiFrame().then(() => els.backupStorageClose?.focus());
+  runBackupStorageJob("scan");
+}
+
+function closeBackupStorageManager() {
+  if (!els.backupStorageOverlay || els.backupStorageOverlay.hidden) return;
+  backupStorageJobToken += 1;
+  backupStorageBusy = false;
+  els.backupStorageOverlay.hidden = true;
+  if (els.backupStoragePanel) els.backupStoragePanel.removeAttribute("aria-busy");
+  const returnFocus = backupStorageReturnFocus;
+  backupStorageReturnFocus = null;
+  window.requestAnimationFrame(() => {
+    if (returnFocus?.isConnected) returnFocus.focus();
+  });
+}
+
+function handleBackupStorageKeydown(event) {
+  if (!els.backupStorageOverlay || els.backupStorageOverlay.hidden) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    closeBackupStorageManager();
+    return;
+  }
+  if (event.key !== "Tab") return;
+
+  const focusable = Array.from(
+    els.backupStoragePanel?.querySelectorAll("button:not([disabled]), [href], input:not([disabled]), [tabindex]:not([tabindex='-1'])")
+    || []
+  ).filter(element => !element.hidden && element.getClientRects().length > 0);
+  if (!focusable.length) return;
+  const first = focusable[0];
+  const last = focusable[focusable.length - 1];
+  if (event.shiftKey && document.activeElement === first) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && document.activeElement === last) {
+    event.preventDefault();
+    first.focus();
   }
 }
 
@@ -10255,7 +12097,8 @@ async function saveNow(options = {}) {
   const requestBody = {
     state,
     filePath: linkedTextPath,
-    fileName: projectFileName
+    fileName: projectFileName,
+    skipLinkedTextFileWrite: Boolean(options.skipLinkedTextFileWrite)
   };
 
   try {
@@ -10332,6 +12175,8 @@ async function loadState() {
   backupFolderMissing = Boolean(payload.backupFolderMissing || payload.versionHistoryFolderMissing);
   linkedTextFileMissing = Boolean(payload.linkedTextFileMissing);
   linkedTextMissingPath = payload.linkedTextMissingPath || "";
+  backupStorageManualDeletion = readyForManualDeletionFromPayload(payload)
+    || normalizeReadyForManualDeletion();
   projectFileName = payload.linkedTextFileName || fileNameFromPath(exportPath) || projectFileName;
   updateProjectTitle();
   syncBackupMenu();
@@ -10342,13 +12187,19 @@ async function loadState() {
   render();
   resetHistory();
   focusPageEditor(activeEditorKey);
-  if (linkedTextFileMissing) {
-    window.setTimeout(promptForMissingLinkedTextFile, 0);
-  }
   if (backupFolderMissing) {
     setStatus("Backup folder missing; choose the moved folder");
-    window.setTimeout(promptForMissingBackupFolder, linkedTextFileMissing ? 250 : 0);
   }
+  window.setTimeout(async () => {
+    try {
+      if (linkedTextFileMissing) await promptForMissingLinkedTextFile();
+      if (backupFolderMissing) await promptForMissingBackupFolder();
+    } catch (error) {
+      console.error(error);
+    } finally {
+      showManualDeletionReminder(backupStorageManualDeletion);
+    }
+  }, 0);
   showProjectRecoveryNotice(payload.projectRecovery);
 }
 
@@ -10857,6 +12708,7 @@ els.fileOpenLocation.addEventListener("click", openFileLocation);
 els.fileSaveAs.addEventListener("click", () => saveAsTextProject());
 els.fileVersionHistoryFolder?.addEventListener("click", selectVersionHistoryFolder);
 els.fileActivateBackup?.addEventListener("click", toggleBackup);
+els.fileManageBackupStorage?.addEventListener("click", openBackupStorageManager);
 els.fileGenerateHistorySummary?.addEventListener("click", generateVersionHistorySummary);
 els.fileUsbExport?.addEventListener("click", exportUsbTransfer);
 els.fileUsbReview?.addEventListener("click", reviewUsbTransfer);
@@ -10864,6 +12716,27 @@ els.fileClose.addEventListener("click", closeApp);
 els.summaryProgressOpen?.addEventListener("click", openGeneratedSummaryReport);
 els.summaryProgressReveal?.addEventListener("click", revealGeneratedSummaryReport);
 els.summaryProgressClose?.addEventListener("click", hideSummaryProgressOverlay);
+els.backupStorageClose?.addEventListener("click", closeBackupStorageManager);
+els.backupStorageRescan?.addEventListener("click", () => runBackupStorageJob("scan"));
+els.backupStorageArchive?.addEventListener("click", () => runBackupStorageJob("archive"));
+els.backupStorageExpiryRefresh?.addEventListener("click", () => {
+  backupStorageExpiryNotice = "";
+  runBackupStorageExpiryJob("expiry-scan");
+});
+els.backupStorageExpiryPrepare?.addEventListener("click", prepareExpiredBackupArchives);
+els.backupStorageManualDeletionOpen?.addEventListener("click", () => openManualDeletionFolder());
+els.backupStorageOverlay?.addEventListener("keydown", handleBackupStorageKeydown);
+els.backupStorageOverlay?.addEventListener("click", event => {
+  if (event.target === els.backupStorageOverlay) closeBackupStorageManager();
+});
+els.manualDeletionReminderOpen?.addEventListener("click", () => {
+  openManualDeletionFolder({ closeReminder: true });
+});
+els.manualDeletionReminderLater?.addEventListener("click", hideManualDeletionReminder);
+els.manualDeletionReminder?.addEventListener("keydown", handleManualDeletionReminderKeydown);
+els.manualDeletionReminder?.addEventListener("click", event => {
+  if (event.target === els.manualDeletionReminder) hideManualDeletionReminder();
+});
 els.transferReviewClose?.addEventListener("click", hideTransferReview);
 els.transferImportCancel?.addEventListener("click", cancelTransferImport);
 els.transferImportProceed?.addEventListener("click", proceedTransferImport);
@@ -10902,9 +12775,17 @@ els.editGlobalFontSize.addEventListener("change", event => {
 els.fileOpenInput.addEventListener("change", async event => {
   const [file] = event.target.files || [];
   event.target.value = "";
-  if (!file) return;
+  const openSession = browserFileOpenSession || await beginTextProjectOpen();
+  browserFileOpenSession = null;
+  if (!file) {
+    finishTextProjectOpen(openSession, { resume: true });
+    return;
+  }
 
+  let selectedFileRead = false;
+  let completed = false;
   try {
+    const previousLinkedTextPath = linkedTextPath;
     await showAppProgress({
       title: "Opening file",
       step: "Reading selected file...",
@@ -10912,27 +12793,60 @@ els.fileOpenInput.addEventListener("change", async event => {
       completed: 0,
       total: 6
     });
-    const text = await file.text();
+    let payload = null;
+    if (window.draftDiffDesktop?.openFallbackTextFile) {
+      payload = await window.draftDiffDesktop.openFallbackTextFile(file);
+      if (payload?.ok === false) throw new Error(payload.error || "Open failed");
+    }
+    const text = payload?.text ?? await file.text();
+    selectedFileRead = true;
     await showAppProgress({
       title: "Opening file",
-      step: "Selected file loaded...",
+      step: "Preserving current project...",
       detail: file.name,
-      completed: 2,
+      completed: 1,
       total: 6
     });
-    await clearLinkedTextFile();
-    await applyTextProject(text, file.name, {
-      showProgress: true,
-      progressTitle: "Opening file",
-      progressOffset: 2,
-      progressTotal: 6
+    const selectedFileIsLinked = payload?.matchesLinkedTextFile === true
+      || filePathsMatch(previousLinkedTextPath, payload?.filePath);
+    const previousState = await prepareCurrentProjectForOpen({
+      skipLinkedTextFileWrite: payload ? selectedFileIsLinked : true
     });
+    if (payload?.filePath) {
+      await applyOpenedTextFilePayload(payload, previousLinkedTextPath, previousState, {
+        showProgress: true,
+        progressTitle: "Opening file",
+        progressOffset: 2,
+        progressTotal: 6
+      });
+    } else {
+      await applyTextProject(text, file.name, {
+        clearLinkedTextFile: true,
+        skipLinkedTextFileWrite: true,
+        showProgress: true,
+        progressTitle: "Opening file",
+        progressOffset: 2,
+        progressTotal: 6
+      });
+    }
+    completed = true;
   } catch (error) {
     console.error(error);
     setStatus(`Open failed: ${error?.message || "Unknown error"}`);
   } finally {
+    finishTextProjectOpen(openSession, {
+      completed,
+      resume: !selectedFileRead
+    });
     hideAppProgress();
   }
+});
+
+els.fileOpenInput.addEventListener("cancel", () => {
+  const openSession = browserFileOpenSession;
+  browserFileOpenSession = null;
+  finishTextProjectOpen(openSession, { resume: true });
+  hideAppProgress();
 });
 
 els.storyTab.addEventListener("click", event => {
@@ -11716,6 +13630,10 @@ document.addEventListener("keydown", event => {
   if (handleGlobalShortcut(event)) return;
 
   if (event.key === "Escape") {
+    if (els.backupStorageOverlay && !els.backupStorageOverlay.hidden) {
+      closeBackupStorageManager();
+      return;
+    }
     if (els.transferPageZoom && !els.transferPageZoom.hidden) {
       hideTransferPageZoom();
       return;

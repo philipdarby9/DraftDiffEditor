@@ -28,6 +28,27 @@ const CUT_HISTORY_REPORT_SUFFIX = ".per-draft-cut-history.html";
 const FULL_VERSION_HISTORY_REPORT_SUFFIX = ".version-history-summary.html";
 const USB_TRANSFER_MANIFEST_FILE = "draftdiff-transfer-manifest.json";
 const USB_TRANSFER_FILES_DIR = "draftdiff-transfer-files";
+const VERSION_HISTORY_SCHEMA_VERSION = 1;
+const VERSION_HISTORY_RETENTION_POLICY = Object.freeze({
+  newestCount: 5,
+  dailyDays: 7,
+  weeklyWeeks: 8,
+  monthlyMonths: 12,
+  safetyNewestCount: 2,
+  storyByteLimit: 512 * 1024 * 1024,
+  totalByteLimit: 2 * 1024 * 1024 * 1024
+});
+const VERSION_HISTORY_ARCHIVE_EXPIRY_POLICY = Object.freeze({
+  firstRunDays: 90,
+  standardRetentionDays: 30
+});
+const VERSION_HISTORY_ARCHIVE_POLICY_FILE = "retention-archive-policy.json";
+const VERSION_HISTORY_ARCHIVE_MANIFEST_FILE = "retention-manifest.json";
+const VERSION_HISTORY_ARCHIVE_PLAN_FILE = "retention-plan.json";
+const VERSION_HISTORY_ARCHIVE_JOURNAL_FILE = "retention-journal.ndjson";
+const VERSION_HISTORY_ARCHIVE_PIN_FILE = ".pinned";
+const VERSION_HISTORY_ARCHIVE_READY_FOLDER = "Ready for manual deletion";
+const VERSION_HISTORY_ARCHIVE_READY_JOURNAL_FILE = "retention-archive-manual-deletion-journal.ndjson";
 const PORT = Number(process.env.PORT || 4173);
 const HOST = process.env.DRAFT_DIFF_HOST || process.env.HOST || "127.0.0.1";
 const ALLOW_REMOTE_API = process.env.DRAFT_DIFF_ALLOW_REMOTE === "1";
@@ -64,6 +85,10 @@ const cutHistoryJobs = new Map();
 const cutHistoryIdleWaiters = new Set();
 const versionSummaryJobs = new Map();
 const versionHistoryPathCache = new Map();
+const versionHistoryRetentionJobs = new Map();
+const versionHistoryRetentionPlans = new Map();
+const versionHistoryArchiveExpiryPlans = new Map();
+const versionHistoryRetentionMutationRoots = new Map();
 
 const mimeTypes = {
   ".html": "text/html; charset=utf-8",
@@ -292,6 +317,7 @@ function requireVersionHistoryFolderPath() {
 }
 
 function writeVersionHistoryFolderPath(folderPath) {
+  assertVersionHistoryRetentionRootChangeAllowed(folderPath);
   ensureDataDir();
 
   if (!folderPath) {
@@ -344,6 +370,17 @@ function sameHistoryPath(left, right) {
   return process.platform === "win32"
     ? leftPath.toLowerCase() === rightPath.toLowerCase()
     : leftPath === rightPath;
+}
+
+function pathsReferToSameFile(left, right) {
+  if (!left || !right) return false;
+
+  try {
+    const realpath = fs.realpathSync.native || fs.realpathSync;
+    return sameHistoryPath(realpath(left), realpath(right));
+  } catch {
+    return sameHistoryPath(left, right);
+  }
 }
 
 function pathIsInsideFolder(filePath, folderPath) {
@@ -609,10 +646,18 @@ function expectedVersionHistoryFilePath(options = {}) {
   return path.join(folderPath, `${safeHistoryBaseName(source.fileName)}${VERSION_HISTORY_FILE_SUFFIX}`);
 }
 
+function parseVersionHistoryJson(content) {
+  try {
+    const parsed = JSON.parse(asText(content).replace(/^\uFEFF/, ""));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 function parseVersionHistoryFile(filePath) {
   try {
-    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/, ""));
-    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : null;
+    return parseVersionHistoryJson(fs.readFileSync(filePath, "utf8"));
   } catch {
     return null;
   }
@@ -958,7 +1003,9 @@ function applyExternalVersionHistory(state, options = {}) {
 
   const payload = parseVersionHistoryFile(filePath);
   const mergedState = normalizeState(stateWithoutVersionHistory(normalized));
-  const loaded = applyVersionHistoryPayloadToState(mergedState, payload);
+  const loaded = applyVersionHistoryPayloadToState(mergedState, payload, {
+    promotePages: options.promotePages !== false
+  });
   return { state: mergedState, loaded, filePath };
 }
 
@@ -1735,23 +1782,2602 @@ function versionHistoryJsonBackupFolderPath(rootFolderPath) {
   return rootFolderPath ? path.join(rootFolderPath, "version history JSON backups") : null;
 }
 
-function versionHistoryBackupTimestamp() {
-  return nowIso().replace(/[:.]/g, "-");
+function canonicalJsonText(value) {
+  if (value === null) return "null";
+  if (Array.isArray(value)) {
+    return `[${value.map(entry => canonicalJsonText(entry) ?? "null").join(",")}]`;
+  }
+  if (typeof value === "object") {
+    const entries = Object.keys(value)
+      .sort()
+      .map(key => {
+        const encodedValue = canonicalJsonText(value[key]);
+        return encodedValue === undefined ? null : `${JSON.stringify(key)}:${encodedValue}`;
+      })
+      .filter(Boolean);
+    return `{${entries.join(",")}}`;
+  }
+  return JSON.stringify(value);
 }
 
-function backupExistingVersionHistoryJson(rootFolderPath, source, filePath) {
-  if (!rootFolderPath || !fileExists(filePath)) return null;
+function versionHistoryPayloadWithoutVolatileMetadataHash(payload) {
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) return null;
+  const stablePayload = Object.fromEntries(
+    Object.entries(payload).filter(([key]) => key !== "updatedAt" && key !== "projectUpdatedAt")
+  );
+  return textHash(canonicalJsonText(stablePayload));
+}
+
+function stabilizeVersionHistoryPayloadMetadata(previousPayload, nextPayload) {
+  const previousHash = versionHistoryPayloadWithoutVolatileMetadataHash(previousPayload);
+  const nextHash = versionHistoryPayloadWithoutVolatileMetadataHash(nextPayload);
+  if (!previousHash || !nextHash || previousHash !== nextHash) return;
+
+  for (const key of ["updatedAt", "projectUpdatedAt"]) {
+    if (Object.prototype.hasOwnProperty.call(previousPayload, key)) {
+      nextPayload[key] = previousPayload[key];
+    } else {
+      delete nextPayload[key];
+    }
+  }
+}
+
+function fileContentHash(filePath) {
+  const hash = crypto.createHash("sha256");
+  const descriptor = fs.openSync(filePath, "r");
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let bytesRead = 0;
+    do {
+      bytesRead = fs.readSync(descriptor, buffer, 0, buffer.length, null);
+      if (bytesRead) hash.update(buffer.subarray(0, bytesRead));
+    } while (bytesRead);
+  } finally {
+    fs.closeSync(descriptor);
+  }
+  return hash.digest("hex");
+}
+
+function fileMatchesContentHash(filePath, expectedSize, expectedHash) {
+  try {
+    const stats = fs.statSync(filePath);
+    return stats.isFile() && stats.size === expectedSize && fileContentHash(filePath) === expectedHash;
+  } catch {
+    return false;
+  }
+}
+
+function identicalVersionHistoryBackupPath(backupFolderPath, filePath, fileSize, contentHash) {
+  let entries = [];
+  try {
+    entries = fs.readdirSync(backupFolderPath, { withFileTypes: true });
+  } catch {
+    return null;
+  }
+
+  const sourcePath = path.resolve(filePath);
+  const candidates = entries
+    .filter(entry => (
+      entry.isFile()
+      && entry.name.endsWith(VERSION_HISTORY_FILE_SUFFIX)
+    ))
+    .sort((left, right) => right.name.localeCompare(left.name));
+
+  for (const entry of candidates) {
+    const candidatePath = path.join(backupFolderPath, entry.name);
+    if (path.resolve(candidatePath) === sourcePath) continue;
+    if (fileMatchesContentHash(candidatePath, fileSize, contentHash)) return candidatePath;
+  }
+  return null;
+}
+
+function backupExistingVersionHistoryJson(rootFolderPath, source, filePath, sourceContent) {
+  if (!rootFolderPath || (sourceContent === undefined && !fileExists(filePath))) return null;
 
   const backupFolderPath = versionHistoryJsonBackupFolderPath(rootFolderPath);
   if (!backupFolderPath) return null;
   fs.mkdirSync(backupFolderPath, { recursive: true });
 
-  const backupPath = path.join(
+  const content = sourceContent === undefined
+    ? fs.readFileSync(filePath)
+    : Buffer.isBuffer(sourceContent)
+      ? sourceContent
+      : Buffer.from(String(sourceContent), "utf8");
+  const fileSize = content.length;
+  const contentHash = crypto.createHash("sha256").update(content).digest("hex");
+  const baseName = safeHistoryBaseName(source.fileName);
+  const backupPaths = [
+    path.join(backupFolderPath, `${baseName}.${contentHash.slice(0, 32)}${VERSION_HISTORY_FILE_SUFFIX}`),
+    path.join(backupFolderPath, `${baseName}.${contentHash}${VERSION_HISTORY_FILE_SUFFIX}`)
+  ];
+
+  for (const backupPath of backupPaths) {
+    if (fileMatchesContentHash(backupPath, fileSize, contentHash)) return backupPath;
+  }
+
+  const identicalBackupPath = identicalVersionHistoryBackupPath(
     backupFolderPath,
-    `${safeHistoryBaseName(source.fileName)}.${versionHistoryBackupTimestamp()}.${process.pid}${VERSION_HISTORY_FILE_SUFFIX}`
+    filePath,
+    fileSize,
+    contentHash
   );
-  fs.copyFileSync(filePath, backupPath);
-  return backupPath;
+  if (identicalBackupPath) return identicalBackupPath;
+
+  for (const backupPath of backupPaths) {
+    try {
+      fs.writeFileSync(backupPath, content, { flag: "wx" });
+      if (!fileMatchesContentHash(backupPath, fileSize, contentHash)) {
+        const error = new Error(`Version-history backup verification failed for ${backupPath}`);
+        error.code = "VERSION_HISTORY_BACKUP_VERIFICATION_FAILED";
+        error.filePath = backupPath;
+        throw error;
+      }
+      return backupPath;
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      if (fileMatchesContentHash(backupPath, fileSize, contentHash)) return backupPath;
+    }
+  }
+
+  const error = new Error(`Version-history backup hash collision for ${filePath}`);
+  error.code = "VERSION_HISTORY_BACKUP_HASH_COLLISION";
+  error.filePath = filePath;
+  throw error;
+}
+
+function versionHistoryJsonArchiveFolderPath(rootFolderPath, runName = "") {
+  if (!rootFolderPath) return null;
+  const archiveRoot = path.join(rootFolderPath, "version history JSON archive");
+  return runName ? path.join(archiveRoot, safeFolderName(runName, "retention")) : archiveRoot;
+}
+
+function normalizedRetentionSourcePath(value) {
+  const normalized = asText(value).trim().replaceAll("\\", "/").replace(/\/+/gu, "/");
+  return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+}
+
+function versionHistoryRetentionStory(payload = {}, fallback = {}) {
+  const storyId = asText(payload.storyId || fallback.storyId).trim();
+  const sourceFilePath = asText(payload.sourceFilePath || fallback.sourceFilePath).trim();
+  const sourceFileName = asText(payload.sourceFileName || fallback.sourceFileName).trim();
+  if (storyId) {
+    return {
+      key: `story:${storyId}`,
+      storyId,
+      sourceFilePath,
+      sourceFileName,
+      label: sourceFileName || storyId
+    };
+  }
+
+  const normalizedSourcePath = normalizedRetentionSourcePath(sourceFilePath);
+  if (normalizedSourcePath) {
+    return {
+      key: `path:${normalizedSourcePath}`,
+      storyId: "",
+      sourceFilePath,
+      sourceFileName,
+      label: sourceFileName || path.basename(sourceFilePath)
+    };
+  }
+
+  const normalizedSourceName = normalizedHistoryName(sourceFileName);
+  if (normalizedSourceName) {
+    return {
+      key: `name:${normalizedSourceName}`,
+      storyId: "",
+      sourceFilePath: "",
+      sourceFileName,
+      label: sourceFileName
+    };
+  }
+
+  const fallbackName = asText(fallback.fileName).trim();
+  return {
+    key: `unknown:${fallbackName || "version-history"}`,
+    storyId: "",
+    sourceFilePath: "",
+    sourceFileName: "",
+    label: fallbackName || "Unknown story"
+  };
+}
+
+function retentionPolicy(options = {}) {
+  const requested = options.policy || options;
+  const nonNegativeInteger = (value, fallback) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? Math.floor(number) : fallback;
+  };
+  const nonNegativeBytes = (value, fallback) => {
+    const number = Number(value);
+    return Number.isFinite(number) && number >= 0 ? Math.floor(number) : fallback;
+  };
+  return {
+    newestCount: nonNegativeInteger(requested.newestCount, VERSION_HISTORY_RETENTION_POLICY.newestCount),
+    dailyDays: nonNegativeInteger(requested.dailyDays, VERSION_HISTORY_RETENTION_POLICY.dailyDays),
+    weeklyWeeks: nonNegativeInteger(requested.weeklyWeeks, VERSION_HISTORY_RETENTION_POLICY.weeklyWeeks),
+    monthlyMonths: nonNegativeInteger(requested.monthlyMonths, VERSION_HISTORY_RETENTION_POLICY.monthlyMonths),
+    safetyNewestCount: nonNegativeInteger(
+      requested.safetyNewestCount,
+      VERSION_HISTORY_RETENTION_POLICY.safetyNewestCount
+    ),
+    storyByteLimit: nonNegativeBytes(
+      requested.storyByteLimit,
+      VERSION_HISTORY_RETENTION_POLICY.storyByteLimit
+    ),
+    totalByteLimit: nonNegativeBytes(
+      requested.totalByteLimit,
+      VERSION_HISTORY_RETENTION_POLICY.totalByteLimit
+    )
+  };
+}
+
+function retentionTimeMs(value, fallback = 0) {
+  if (Number.isFinite(value)) return Number(value);
+  const parsed = Date.parse(asText(value));
+  return Number.isFinite(parsed) ? parsed : fallback;
+}
+
+function utcDayStart(timeMs) {
+  const date = new Date(timeMs);
+  return Date.UTC(date.getUTCFullYear(), date.getUTCMonth(), date.getUTCDate());
+}
+
+function utcIsoWeekStart(timeMs) {
+  const dayStart = utcDayStart(timeMs);
+  const day = new Date(dayStart).getUTCDay();
+  return dayStart - (((day + 6) % 7) * 24 * 60 * 60 * 1000);
+}
+
+function utcMonthIndex(timeMs) {
+  const date = new Date(timeMs);
+  return (date.getUTCFullYear() * 12) + date.getUTCMonth();
+}
+
+function retentionRecordNewestSort(left, right) {
+  return right.capturedAtMs - left.capturedAtMs
+    || right.mtimeMs - left.mtimeMs
+    || right.fileName.localeCompare(left.fileName);
+}
+
+function retentionDuplicateStats(records, keyName) {
+  const groups = new Map();
+  records.forEach(record => {
+    const key = asText(record[keyName]);
+    if (!key) return;
+    const group = groups.get(key) || [];
+    group.push(record);
+    groups.set(key, group);
+  });
+
+  const duplicates = [...groups.values()].filter(group => group.length > 1);
+  return {
+    groups: duplicates,
+    groupCount: duplicates.length,
+    fileCount: duplicates.reduce((sum, group) => sum + group.length - 1, 0),
+    bytes: duplicates.reduce((sum, group) => {
+      const sorted = group.slice().sort(retentionRecordNewestSort);
+      return sum + sorted.slice(1).reduce((groupSum, record) => groupSum + record.size, 0);
+    }, 0)
+  };
+}
+
+function normalizedRetentionRecord(record, index) {
+  const hasPayload = Boolean(
+    record
+    && Object.prototype.hasOwnProperty.call(record, "payload")
+  );
+  const payload = record?.payload && typeof record.payload === "object" ? record.payload : {};
+  const payloadSchemaStatus = hasPayload ? versionHistoryPayloadSchemaStatus(record.payload) : "current";
+  const story = record?.storyKey
+    ? {
+        key: record.storyKey,
+        storyId: asText(record.storyId),
+        sourceFilePath: asText(record.sourceFilePath),
+        sourceFileName: asText(record.sourceFileName),
+        label: asText(record.storyLabel || record.sourceFileName || record.storyId || record.storyKey)
+      }
+    : versionHistoryRetentionStory(payload, record);
+  const capturedAtMs = retentionTimeMs(
+    record?.capturedAtMs ?? record?.capturedAt,
+    retentionTimeMs(record?.mtimeMs, 0)
+  );
+  const fileName = asText(record?.fileName || path.basename(asText(record?.filePath))).trim()
+    || `version-history-${index + 1}.json`;
+  const inferredPinned = Boolean(
+    record?.pinned
+    || (hasPayload && payloadSchemaStatus === "current" && versionHistoryPayloadPinned(payload, fileName))
+  );
+  const protectedReason = record?.protectedReason
+    || (record?.malformed ? "malformed" : "")
+    || (record?.futureSchema ? "future-schema" : "")
+    || (payloadSchemaStatus === "malformed" ? "malformed" : "")
+    || (payloadSchemaStatus === "future-schema" ? "future-schema" : "")
+    || (inferredPinned ? "pinned" : "");
+  const content = Buffer.isBuffer(record?.content)
+    ? record.content
+    : typeof record?.content === "string"
+      ? Buffer.from(record.content, "utf8")
+      : null;
+  return {
+    id: asText(record?.id) || `${fileName}\0${index}`,
+    fileName,
+    filePath: asText(record?.filePath),
+    size: Math.max(0, Number(record?.size) || content?.length || 0),
+    mtimeMs: Math.max(0, Number(record?.mtimeMs) || 0),
+    capturedAtMs,
+    capturedAt: new Date(capturedAtMs || 0).toISOString(),
+    rawHash: asText(record?.rawHash) || (content
+      ? crypto.createHash("sha256").update(content).digest("hex")
+      : ""),
+    stableHash: asText(record?.stableHash) || (
+      hasPayload && payloadSchemaStatus === "current"
+        ? versionHistoryPayloadWithoutVolatileMetadataHash(payload) || ""
+        : ""
+    ),
+    storyKey: story.key,
+    storyId: story.storyId,
+    sourceFilePath: story.sourceFilePath,
+    sourceFileName: story.sourceFileName,
+    storyLabel: story.label,
+    malformed: protectedReason === "malformed",
+    futureSchema: protectedReason === "future-schema",
+    pinned: protectedReason === "pinned",
+    protectedReason
+  };
+}
+
+function retentionKeepPriority(entry) {
+  if (entry.keepReasons.includes("newest")) return 40;
+  if (entry.keepReasons.includes("daily")) return 30;
+  if (entry.keepReasons.includes("weekly")) return 20;
+  if (entry.keepReasons.includes("monthly")) return 10;
+  return 0;
+}
+
+function retentionCapEvictionSort(left, right) {
+  return retentionKeepPriority(left) - retentionKeepPriority(right)
+    || left.capturedAtMs - right.capturedAtMs
+    || left.fileName.localeCompare(right.fileName);
+}
+
+function buildVersionHistoryBackupRetentionPlan(inputRecords, options = {}) {
+  const policy = retentionPolicy(options);
+  const nowMs = retentionTimeMs(options.now, Date.now());
+  const records = (Array.isArray(inputRecords) ? inputRecords : [])
+    .map(normalizedRetentionRecord);
+  const decisions = new Map(records.map(record => [record.id, {
+    ...record,
+    action: "keep",
+    reason: record.protectedReason || "retention",
+    keepReasons: record.protectedReason ? [record.protectedReason] : [],
+    safetyProtected: false
+  }]));
+  const storyGroups = new Map();
+  records.forEach(record => {
+    const group = storyGroups.get(record.storyKey) || [];
+    group.push(record);
+    storyGroups.set(record.storyKey, group);
+  });
+
+  const sameSizeGroups = new Map();
+  records.forEach(record => {
+    const group = sameSizeGroups.get(record.size) || [];
+    group.push(record);
+    sameSizeGroups.set(record.size, group);
+  });
+  const sameSizeCandidates = [...sameSizeGroups.values()].filter(group => group.length > 1);
+  const exactStats = retentionDuplicateStats(records, "rawHash");
+  const stableStats = retentionDuplicateStats(records, "stableHash");
+  const stableContentDuplicateIds = new Set();
+  const stableContentDuplicateGroupKeys = new Set();
+  stableStats.groups.forEach(group => {
+    const sorted = group.slice().sort(retentionRecordNewestSort);
+    sorted.slice(1).forEach((record, index) => {
+      const hasNewerExactCopy = sorted
+        .slice(0, index + 1)
+        .some(newer => newer.rawHash && newer.rawHash === record.rawHash);
+      if (!hasNewerExactCopy) {
+        stableContentDuplicateIds.add(record.id);
+        stableContentDuplicateGroupKeys.add(record.stableHash);
+      }
+    });
+  });
+
+  const currentDayStart = utcDayStart(nowMs);
+  const currentWeekStart = utcIsoWeekStart(nowMs);
+  const currentMonth = utcMonthIndex(nowMs);
+  storyGroups.forEach(group => {
+    const sorted = group.slice().sort(retentionRecordNewestSort);
+    const eligible = sorted.filter(record => !record.protectedReason);
+    const stableGroups = new Map();
+    eligible.forEach(record => {
+      if (!record.stableHash) return;
+      const stableGroup = stableGroups.get(record.stableHash) || [];
+      stableGroup.push(record);
+      stableGroups.set(record.stableHash, stableGroup);
+    });
+    stableGroups.forEach(stableGroup => {
+      const duplicateSorted = stableGroup.slice().sort(retentionRecordNewestSort);
+      duplicateSorted.slice(1).forEach((record, index) => {
+        const decision = decisions.get(record.id);
+        const hasNewerExactCopy = duplicateSorted
+          .slice(0, index + 1)
+          .some(newer => newer.rawHash && newer.rawHash === record.rawHash);
+        decision.action = "archive";
+        decision.reason = hasNewerExactCopy
+          ? "exact-duplicate"
+          : "stable-content-duplicate";
+        decision.keepReasons = [];
+      });
+    });
+
+    const retentionPool = eligible.filter(record => decisions.get(record.id).action !== "archive");
+    retentionPool.slice(0, policy.safetyNewestCount).forEach(record => {
+      const decision = decisions.get(record.id);
+      decision.safetyProtected = true;
+      decision.keepReasons.push("safety-newest");
+    });
+    retentionPool.slice(0, policy.newestCount).forEach(record => {
+      decisions.get(record.id).keepReasons.push("newest");
+    });
+
+    const dailyStart = currentDayStart - (Math.max(0, policy.dailyDays - 1) * 24 * 60 * 60 * 1000);
+    const dailyBuckets = new Set();
+    retentionPool.forEach(record => {
+      const bucket = utcDayStart(record.capturedAtMs);
+      if (
+        policy.dailyDays > 0
+        && bucket >= dailyStart
+        && bucket <= currentDayStart
+        && !dailyBuckets.has(bucket)
+      ) {
+        dailyBuckets.add(bucket);
+        decisions.get(record.id).keepReasons.push("daily");
+      }
+    });
+
+    const weeklyStart = currentWeekStart - (Math.max(0, policy.weeklyWeeks - 1) * 7 * 24 * 60 * 60 * 1000);
+    const weeklyBuckets = new Set();
+    retentionPool.forEach(record => {
+      const bucket = utcIsoWeekStart(record.capturedAtMs);
+      if (
+        policy.weeklyWeeks > 0
+        && bucket >= weeklyStart
+        && bucket <= currentWeekStart
+        && !weeklyBuckets.has(bucket)
+      ) {
+        weeklyBuckets.add(bucket);
+        decisions.get(record.id).keepReasons.push("weekly");
+      }
+    });
+
+    const monthlyStart = currentMonth - Math.max(0, policy.monthlyMonths - 1);
+    const monthlyBuckets = new Set();
+    retentionPool.forEach(record => {
+      const bucket = utcMonthIndex(record.capturedAtMs);
+      if (
+        policy.monthlyMonths > 0
+        && bucket >= monthlyStart
+        && bucket <= currentMonth
+        && !monthlyBuckets.has(bucket)
+      ) {
+        monthlyBuckets.add(bucket);
+        decisions.get(record.id).keepReasons.push("monthly");
+      }
+    });
+
+    retentionPool.forEach(record => {
+      const decision = decisions.get(record.id);
+      decision.keepReasons = [...new Set(decision.keepReasons)];
+      if (decision.protectedReason || decision.safetyProtected || decision.keepReasons.length) return;
+      decision.action = "archive";
+      decision.reason = "outside-retention-window";
+    });
+  });
+
+  const capWarnings = [];
+  storyGroups.forEach((group, storyKey) => {
+    let activeBytes = group.reduce((sum, record) => {
+      const decision = decisions.get(record.id);
+      return sum + (decision.action === "keep" ? decision.size : 0);
+    }, 0);
+    const movable = group
+      .map(record => decisions.get(record.id))
+      .filter(entry => (
+        entry.action === "keep"
+        && !entry.protectedReason
+        && !entry.safetyProtected
+      ))
+      .sort(retentionCapEvictionSort);
+    while (activeBytes > policy.storyByteLimit && movable.length) {
+      const entry = movable.shift();
+      entry.action = "archive";
+      entry.reason = "story-byte-limit";
+      entry.keepReasons = [];
+      activeBytes -= entry.size;
+    }
+    if (activeBytes > policy.storyByteLimit) {
+      const story = group.slice().sort(retentionRecordNewestSort)[0];
+      capWarnings.push({
+        type: "story-byte-limit",
+        storyKey,
+        label: story?.storyLabel || storyKey,
+        activeBytes,
+        limitBytes: policy.storyByteLimit
+      });
+    }
+  });
+
+  let totalActiveBytes = [...decisions.values()].reduce(
+    (sum, entry) => sum + (entry.action === "keep" ? entry.size : 0),
+    0
+  );
+  const globallyMovable = [...decisions.values()]
+    .filter(entry => (
+      entry.action === "keep"
+      && !entry.protectedReason
+      && !entry.safetyProtected
+    ))
+    .sort(retentionCapEvictionSort);
+  while (totalActiveBytes > policy.totalByteLimit && globallyMovable.length) {
+    const entry = globallyMovable.shift();
+    entry.action = "archive";
+    entry.reason = "total-byte-limit";
+    entry.keepReasons = [];
+    totalActiveBytes -= entry.size;
+  }
+  if (totalActiveBytes > policy.totalByteLimit) {
+    capWarnings.push({
+      type: "total-byte-limit",
+      activeBytes: totalActiveBytes,
+      limitBytes: policy.totalByteLimit
+    });
+  }
+
+  const files = [...decisions.values()]
+    .map(entry => ({
+      ...entry,
+      keepReasons: [...new Set(entry.keepReasons)]
+    }))
+    .sort((left, right) => left.storyLabel.localeCompare(right.storyLabel)
+      || retentionRecordNewestSort(left, right));
+  const kept = files.filter(file => file.action === "keep");
+  const archived = files.filter(file => file.action === "archive");
+  const protectedFiles = files.filter(file => file.protectedReason);
+  const stories = [...storyGroups.entries()]
+    .map(([storyKey, group]) => {
+      const storyFiles = group.map(record => decisions.get(record.id));
+      const first = storyFiles.slice().sort(retentionRecordNewestSort)[0];
+      return {
+        storyKey,
+        storyId: first?.storyId || "",
+        sourceFileName: first?.sourceFileName || "",
+        sourceFilePath: first?.sourceFilePath || "",
+        label: first?.storyLabel || storyKey,
+        scannedFileCount: storyFiles.length,
+        scannedBytes: storyFiles.reduce((sum, file) => sum + file.size, 0),
+        keepFileCount: storyFiles.filter(file => file.action === "keep").length,
+        keepBytes: storyFiles.reduce(
+          (sum, file) => sum + (file.action === "keep" ? file.size : 0),
+          0
+        ),
+        archiveFileCount: storyFiles.filter(file => file.action === "archive").length,
+        archiveBytes: storyFiles.reduce(
+          (sum, file) => sum + (file.action === "archive" ? file.size : 0),
+          0
+        )
+      };
+    })
+    .sort((left, right) => left.label.localeCompare(right.label));
+  const planFingerprint = textHash(JSON.stringify({
+    policy,
+    files: files.map(file => [
+      file.fileName,
+      file.size,
+      file.mtimeMs,
+      file.rawHash,
+      file.stableHash,
+      file.action,
+      file.reason
+    ])
+  }));
+
+  return {
+    planId: asText(options.planId),
+    fingerprint: planFingerprint,
+    generatedAt: new Date(nowMs).toISOString(),
+    policy,
+    summary: {
+      scannedFileCount: files.length,
+      scannedBytes: files.reduce((sum, file) => sum + file.size, 0),
+      eligibleFileCount: files.length - protectedFiles.length,
+      protectedFileCount: protectedFiles.length,
+      protectedBytes: protectedFiles.reduce((sum, file) => sum + file.size, 0),
+      malformedFileCount: files.filter(file => file.malformed).length,
+      pinnedFileCount: files.filter(file => file.pinned).length,
+      futureSchemaFileCount: files.filter(file => file.futureSchema).length,
+      sourceChangedFileCount: files.filter(
+        file => file.protectedReason === "source-changed-during-scan"
+      ).length,
+      sameSizeCandidateGroupCount: sameSizeCandidates.length,
+      sameSizeCandidateFileCount: sameSizeCandidates.reduce((sum, group) => sum + group.length, 0),
+      sameSizeCandidatePairCount: sameSizeCandidates.reduce(
+        (sum, group) => sum + ((group.length * (group.length - 1)) / 2),
+        0
+      ),
+      exactDuplicateGroupCount: exactStats.groupCount,
+      exactDuplicateFileCount: exactStats.fileCount,
+      exactDuplicateBytes: exactStats.bytes,
+      stableContentDuplicateGroupCount: stableContentDuplicateGroupKeys.size,
+      stableContentDuplicateFileCount: stableContentDuplicateIds.size,
+      stableContentDuplicateBytes: files.reduce(
+        (sum, file) => sum + (stableContentDuplicateIds.has(file.id) ? file.size : 0),
+        0
+      ),
+      metadataOnlyDuplicateFileCount: stableContentDuplicateIds.size,
+      keepFileCount: kept.length,
+      keepBytes: kept.reduce((sum, file) => sum + file.size, 0),
+      archiveFileCount: archived.length,
+      archiveBytes: archived.reduce((sum, file) => sum + file.size, 0),
+      activeFileCount: kept.length,
+      activeBytes: kept.reduce((sum, file) => sum + file.size, 0),
+      filesToArchiveCount: archived.length,
+      bytesToArchive: archived.reduce((sum, file) => sum + file.size, 0),
+      capExceededUnavoidable: capWarnings.length > 0
+    },
+    warnings: capWarnings,
+    stories,
+    files
+  };
+}
+
+function versionHistoryBackupTimestampFromFileName(fileName) {
+  const match = /\.(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z\.\d+\.version-history\.json$/u.exec(
+    asText(fileName)
+  );
+  if (!match) return null;
+  const value = `${match[1]}:${match[2]}:${match[3]}.${match[4]}Z`;
+  const time = Date.parse(value);
+  return Number.isFinite(time) ? time : null;
+}
+
+function directVersionHistoryBackupStats(backupFolderPath) {
+  if (!backupFolderPath || !directoryExists(backupFolderPath)) return [];
+  return fs.readdirSync(backupFolderPath, { withFileTypes: true })
+    .filter(entry => entry.isFile() && entry.name.endsWith(VERSION_HISTORY_FILE_SUFFIX))
+    .map(entry => {
+      const filePath = path.join(backupFolderPath, entry.name);
+      const stats = fs.statSync(filePath);
+      return {
+        fileName: entry.name,
+        filePath,
+        size: stats.size,
+        mtimeMs: stats.mtimeMs
+      };
+    })
+    .sort((left, right) => left.fileName.localeCompare(right.fileName));
+}
+
+function versionHistoryBackupDirectoryFingerprint(statsEntries) {
+  return textHash(JSON.stringify((Array.isArray(statsEntries) ? statsEntries : [])
+    .map(entry => [
+      asText(entry.fileName),
+      Math.max(0, Number(entry.size) || 0),
+      Math.trunc(Math.max(0, Number(entry.mtimeMs) || 0))
+    ])
+    .sort((left, right) => left[0].localeCompare(right[0]))));
+}
+
+function versionHistoryPayloadSchemaStatus(payload) {
+  if (!payload) return "malformed";
+  if (
+    !payload.story
+    || typeof payload.story !== "object"
+    || Array.isArray(payload.story)
+    || !Array.isArray(payload.drafts)
+  ) {
+    return "malformed";
+  }
+  if (!Object.prototype.hasOwnProperty.call(payload, "version")) return "current";
+  const schemaVersion = Number(payload.version);
+  if (!Number.isInteger(schemaVersion) || schemaVersion < 0) return "malformed";
+  return schemaVersion > VERSION_HISTORY_SCHEMA_VERSION ? "future-schema" : "current";
+}
+
+function versionHistoryPayloadPinned(payload, fileName = "") {
+  return Boolean(
+    payload?.pinned === true
+    || payload?.retentionPinned === true
+    || payload?.retention?.pinned === true
+    || /\.pinned(?:\.|$)/iu.test(asText(fileName))
+  );
+}
+
+function reconcileLegacyRetentionStoryIdentities(records) {
+  const storyIdsBySourcePath = new Map();
+  records.forEach(record => {
+    if (
+      !record.storyId
+      || record.malformed
+      || record.futureSchema
+      || record.protectedReason === "source-changed-during-scan"
+    ) {
+      return;
+    }
+    const sourcePath = normalizedRetentionSourcePath(record.sourceFilePath);
+    if (!sourcePath) return;
+    const storyIds = storyIdsBySourcePath.get(sourcePath) || new Set();
+    storyIds.add(record.storyId);
+    storyIdsBySourcePath.set(sourcePath, storyIds);
+  });
+
+  records.forEach(record => {
+    if (record.storyId || record.malformed || record.futureSchema) return;
+    const sourcePath = normalizedRetentionSourcePath(record.sourceFilePath);
+    const storyIds = sourcePath ? storyIdsBySourcePath.get(sourcePath) : null;
+    if (!storyIds || storyIds.size !== 1) return;
+    const [storyId] = storyIds;
+    record.storyId = storyId;
+    record.storyKey = `story:${storyId}`;
+  });
+  return records;
+}
+
+function scanVersionHistoryBackupRetention(options = {}, progress = () => {}) {
+  const rootFolderPath = normalizedRegistryPath(options.rootFolderPath)
+    || requireVersionHistoryFolderPath();
+  if (!rootFolderPath) {
+    throw new BackupFolderMissingError(readVersionHistoryFolderPath() || "No backup folder selected");
+  }
+  const backupFolderPath = versionHistoryJsonBackupFolderPath(rootFolderPath);
+  const initialStats = directVersionHistoryBackupStats(backupFolderPath);
+  const totalBytes = initialStats.reduce((sum, entry) => sum + entry.size, 0);
+  let completedBytes = 0;
+  const records = [];
+
+  initialStats.forEach((entry, index) => {
+    progress({
+      step: `Checking ${entry.fileName}`,
+      completed: index,
+      total: initialStats.length,
+      completedBytes,
+      totalBytes
+    });
+    let content = null;
+    let afterStats = null;
+    let readError = null;
+    try {
+      content = fs.readFileSync(entry.filePath);
+      afterStats = fs.statSync(entry.filePath);
+    } catch (error) {
+      readError = error;
+    }
+
+    const changedDuringScan = Boolean(
+      afterStats
+      && (
+        afterStats.size !== entry.size
+        || Math.trunc(afterStats.mtimeMs) !== Math.trunc(entry.mtimeMs)
+      )
+    );
+    const payload = content ? parseVersionHistoryJson(content.toString("utf8")) : null;
+    const schemaStatus = readError || changedDuringScan
+      ? "malformed"
+      : versionHistoryPayloadSchemaStatus(payload);
+    const story = versionHistoryRetentionStory(payload || {}, entry);
+    const rawHash = content
+      ? crypto.createHash("sha256").update(content).digest("hex")
+      : "";
+    const stableHash = schemaStatus === "current"
+      ? versionHistoryPayloadWithoutVolatileMetadataHash(payload)
+      : null;
+    const pinned = schemaStatus === "current" && versionHistoryPayloadPinned(payload, entry.fileName);
+    const protectedReason = readError
+      ? "malformed"
+      : changedDuringScan
+        ? "source-changed-during-scan"
+        : schemaStatus === "future-schema"
+          ? "future-schema"
+          : schemaStatus === "malformed"
+            ? "malformed"
+            : pinned
+              ? "pinned"
+              : "";
+    const capturedAtMs = versionHistoryBackupTimestampFromFileName(entry.fileName)
+      ?? entry.mtimeMs;
+    records.push({
+      id: entry.fileName,
+      ...entry,
+      capturedAtMs,
+      rawHash,
+      stableHash,
+      storyKey: story.key,
+      storyId: story.storyId,
+      sourceFilePath: story.sourceFilePath,
+      sourceFileName: story.sourceFileName,
+      storyLabel: story.label,
+      malformed: protectedReason === "malformed",
+      futureSchema: protectedReason === "future-schema",
+      pinned: protectedReason === "pinned",
+      protectedReason,
+      error: readError?.message || ""
+    });
+    completedBytes += entry.size;
+  });
+  reconcileLegacyRetentionStoryIdentities(records);
+  progress({
+    step: "Applying retention policy",
+    completed: initialStats.length,
+    total: initialStats.length,
+    completedBytes,
+    totalBytes
+  });
+
+  return {
+    rootFolderPath,
+    backupFolderPath,
+    directoryFingerprint: versionHistoryBackupDirectoryFingerprint(initialStats),
+    records
+  };
+}
+
+function retentionArchiveRunName(generatedAt, planId) {
+  const timestamp = asText(generatedAt || nowIso()).replace(/[:.]/gu, "-");
+  return `retention-${timestamp}-${safeFolderName(planId || "plan", "plan")}`;
+}
+
+function previewVersionHistoryBackupRetention(options = {}, progress = () => {}) {
+  const planId = asText(options.planId) || id("retention-plan");
+  const scan = scanVersionHistoryBackupRetention(options, progress);
+  const plan = buildVersionHistoryBackupRetentionPlan(scan.records, {
+    planId,
+    now: options.now,
+    policy: options.policy
+  });
+  const archiveFolderPath = options.archiveFolderPath
+    ? path.resolve(options.archiveFolderPath)
+    : versionHistoryJsonArchiveFolderPath(
+        scan.rootFolderPath,
+        retentionArchiveRunName(plan.generatedAt, planId)
+      );
+  return {
+    ...plan,
+    rootFolderPath: scan.rootFolderPath,
+    backupFolderPath: scan.backupFolderPath,
+    archiveFolderPath,
+    directoryFingerprint: scan.directoryFingerprint
+  };
+}
+
+function assertVersionHistoryRetentionPlanCurrent(plan) {
+  if (!plan?.backupFolderPath || !plan?.directoryFingerprint) {
+    const error = new Error("Version-history retention plan is incomplete.");
+    error.code = "VERSION_HISTORY_RETENTION_INVALID_PLAN";
+    error.statusCode = 400;
+    throw error;
+  }
+  const currentStats = directVersionHistoryBackupStats(plan.backupFolderPath);
+  const currentFingerprint = versionHistoryBackupDirectoryFingerprint(currentStats);
+  if (currentFingerprint !== plan.directoryFingerprint) {
+    const error = new Error("Version-history backups changed after the preview. Scan again before archiving.");
+    error.code = "VERSION_HISTORY_RETENTION_STALE";
+    error.statusCode = 409;
+    error.expectedFingerprint = plan.directoryFingerprint;
+    error.currentFingerprint = currentFingerprint;
+    throw error;
+  }
+}
+
+function retentionArchiveManifest(plan, entries, status, error = "", options = {}) {
+  const archiveCompletedAt = status === "in-progress"
+    ? null
+    : asText(options.archiveCompletedAt) || nowIso();
+  return {
+    version: 1,
+    status,
+    planId: plan.planId,
+    planFingerprint: plan.fingerprint,
+    directoryFingerprint: plan.directoryFingerprint,
+    generatedAt: plan.generatedAt,
+    archiveStartedAt: entries.startedAt,
+    archiveCompletedAt,
+    archiveRetention: options.archiveRetention || null,
+    rootFolderPath: plan.rootFolderPath,
+    backupFolderPath: plan.backupFolderPath,
+    archiveFolderPath: entries.archiveFolderPath || plan.archiveFolderPath,
+    archivePlanPath: entries.planPath || null,
+    archiveJournalPath: entries.journalPath || null,
+    policy: plan.policy,
+    error,
+    files: entries.files
+  };
+}
+
+function writeRetentionArchiveManifest(manifestPath, manifest, exclusive = false) {
+  const content = `${JSON.stringify(manifest, null, 2)}\n`;
+  if (exclusive) {
+    fs.writeFileSync(manifestPath, content, { encoding: "utf8", flag: "wx" });
+    return;
+  }
+  fs.writeFileSync(manifestPath, content, "utf8");
+}
+
+function appendRetentionArchiveJournal(journalPath, event) {
+  fs.appendFileSync(journalPath, `${JSON.stringify(event)}\n`, "utf8");
+}
+
+function openRetentionArchiveReadyJournal(archiveRootPath) {
+  const archiveRoot = path.resolve(archiveRootPath);
+  const journalPath = path.join(
+    archiveRoot,
+    VERSION_HISTORY_ARCHIVE_READY_JOURNAL_FILE
+  );
+  const noFollow = Number(fs.constants.O_NOFOLLOW) || 0;
+  const appendFlags = fs.constants.O_WRONLY | fs.constants.O_APPEND | noFollow;
+  let descriptor = null;
+  try {
+    try {
+      descriptor = fs.openSync(
+        journalPath,
+        appendFlags | fs.constants.O_CREAT | fs.constants.O_EXCL,
+        0o600
+      );
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+      const existing = fs.lstatSync(journalPath);
+      if (!existing.isFile() || existing.isSymbolicLink() || existing.nlink !== 1) {
+        throw new Error("The manual deletion journal is linked or is not a regular file.");
+      }
+      descriptor = fs.openSync(journalPath, appendFlags);
+    }
+
+    const pathStats = fs.lstatSync(journalPath);
+    const descriptorStats = fs.fstatSync(descriptor);
+    const archiveRootRealPath = fs.realpathSync(archiveRoot);
+    const journalRealPath = fs.realpathSync(journalPath);
+    if (
+      !pathStats.isFile()
+      || pathStats.isSymbolicLink()
+      || pathStats.nlink !== 1
+      || !descriptorStats.isFile()
+      || descriptorStats.nlink !== 1
+      || pathStats.dev !== descriptorStats.dev
+      || pathStats.ino !== descriptorStats.ino
+      || !sameHistoryPath(path.dirname(journalRealPath), archiveRootRealPath)
+    ) {
+      throw new Error("The manual deletion journal is linked or outside the managed archive root.");
+    }
+    return { descriptor, journalPath };
+  } catch (cause) {
+    if (descriptor !== null) {
+      try {
+        fs.closeSync(descriptor);
+      } catch {}
+    }
+    const error = new Error("The manual deletion journal is unsafe or cannot be opened.");
+    error.code = "VERSION_HISTORY_ARCHIVE_READY_JOURNAL_UNSAFE";
+    error.statusCode = 409;
+    error.filePath = journalPath;
+    error.cause = cause;
+    throw error;
+  }
+}
+
+function appendRetentionArchiveReadyJournal(descriptor, event) {
+  fs.writeSync(descriptor, `${JSON.stringify(event)}\n`, null, "utf8");
+}
+
+function archiveVersionHistoryBackupRetentionPlan(plan, options = {}, progress = () => {}) {
+  if (!plan || typeof plan !== "object" || !plan.planId || !plan.fingerprint) {
+    const error = new Error("Missing version-history retention plan.");
+    error.code = "VERSION_HISTORY_RETENTION_INVALID_PLAN";
+    error.statusCode = 400;
+    throw error;
+  }
+  const configuredRootFolderPath = normalizedRegistryPath(options.rootFolderPath)
+    || normalizedRegistryPath(readVersionHistoryFolderPath());
+  if (
+    !configuredRootFolderPath
+    || !sameHistoryPath(configuredRootFolderPath, plan.rootFolderPath)
+  ) {
+    const error = new Error("The configured backup folder changed after the retention preview.");
+    error.code = "VERSION_HISTORY_RETENTION_ROOT_CHANGED";
+    error.statusCode = 409;
+    error.folderPath = configuredRootFolderPath || null;
+    throw error;
+  }
+  assertVersionHistoryRetentionPlanCurrent(plan);
+  const planFiles = Array.isArray(plan.files) ? plan.files : [];
+  const archiveFiles = (plan.files || []).filter(file => file.action === "archive");
+  const verificationBytes = planFiles.reduce((sum, file) => sum + file.size, 0);
+  const archiveBytes = archiveFiles.reduce((sum, file) => sum + file.size, 0);
+  const totalWork = planFiles.length + archiveFiles.length;
+  const totalBytes = verificationBytes + archiveBytes;
+  const backupFolderPath = path.resolve(plan.backupFolderPath);
+  const archiveFolderPath = path.resolve(options.archiveFolderPath || plan.archiveFolderPath);
+  const archiveRootPath = path.dirname(archiveFolderPath);
+  if (!pathIsInsideFolder(archiveFolderPath, path.dirname(backupFolderPath))) {
+    const error = new Error("The retention archive folder is outside the configured backup root.");
+    error.code = "VERSION_HISTORY_RETENTION_ARCHIVE_OUTSIDE_ROOT";
+    error.statusCode = 400;
+    throw error;
+  }
+  if (
+    pathIsInsideFolder(archiveFolderPath, backupFolderPath)
+    || pathIsInsideFolder(backupFolderPath, archiveFolderPath)
+  ) {
+    const error = new Error("The retention archive folder overlaps the active backup folder.");
+    error.code = "VERSION_HISTORY_RETENTION_ARCHIVE_OVERLAP";
+    error.statusCode = 400;
+    throw error;
+  }
+  if (fs.existsSync(archiveFolderPath)) {
+    const error = new Error("The retention archive folder already exists.");
+    error.code = "VERSION_HISTORY_RETENTION_ARCHIVE_EXISTS";
+    error.statusCode = 409;
+    throw error;
+  }
+  assertManagedRetentionArchiveRoot(configuredRootFolderPath, archiveRootPath, {
+    allowMissing: true
+  });
+  assertRetentionArchivePolicyStateUsable(archiveRootPath);
+  if (!archiveFiles.length) {
+    progress({
+      step: "Nothing to archive",
+      completed: 0,
+      total: 0,
+      completedBytes: 0,
+      totalBytes: 0
+    });
+    return {
+      ok: true,
+      status: "no-op",
+      planId: plan.planId,
+      fingerprint: plan.fingerprint,
+      archiveFolderPath,
+      manifestPath: "",
+      archivedFileCount: 0,
+      archivedBytes: 0,
+      failedFileCount: 0,
+      failures: []
+    };
+  }
+
+  let verifiedBytes = 0;
+  planFiles.forEach((file, index) => {
+    progress({
+      step: `Verifying ${file.fileName}`,
+      completed: index,
+      total: totalWork,
+      completedBytes: verifiedBytes,
+      totalBytes
+    });
+    const sourcePath = path.resolve(file.filePath);
+    if (
+      path.dirname(sourcePath) !== backupFolderPath
+      || path.basename(sourcePath) !== file.fileName
+      || (
+        file.rawHash
+        && !fileMatchesContentHash(sourcePath, file.size, file.rawHash)
+      )
+    ) {
+      const error = new Error(`Version-history backup changed before archival: ${file.fileName}`);
+      error.code = "VERSION_HISTORY_RETENTION_STALE";
+      error.statusCode = 409;
+      error.filePath = sourcePath;
+      throw error;
+    }
+    verifiedBytes += file.size;
+  });
+
+  fs.mkdirSync(archiveRootPath, { recursive: true });
+  fs.mkdirSync(archiveFolderPath);
+  const planPath = path.join(archiveFolderPath, "retention-plan.json");
+  const journalPath = path.join(archiveFolderPath, "retention-journal.ndjson");
+  const manifestPath = path.join(archiveFolderPath, "retention-manifest.json");
+  const manifestState = {
+    startedAt: nowIso(),
+    archiveFolderPath,
+    planPath,
+    journalPath,
+    files: archiveFiles.map(file => ({
+      fileName: file.fileName,
+      sourcePath: file.filePath,
+      archivePath: path.join(archiveFolderPath, file.fileName),
+      size: file.size,
+      rawHash: file.rawHash,
+      stableHash: file.stableHash,
+      storyKey: file.storyKey,
+      capturedAt: file.capturedAt,
+      reason: file.reason,
+      status: "pending",
+      error: ""
+    }))
+  };
+  writeRetentionArchiveManifest(
+    planPath,
+    retentionArchiveManifest(plan, manifestState, "in-progress"),
+    true
+  );
+  fs.writeFileSync(journalPath, "", { encoding: "utf8", flag: "wx" });
+
+  let completedBytes = verifiedBytes;
+  for (let index = 0; index < manifestState.files.length; index += 1) {
+    const entry = manifestState.files[index];
+    let movedToArchive = false;
+    progress({
+      step: `Archiving ${entry.fileName}`,
+      completed: planFiles.length + index,
+      total: totalWork,
+      completedBytes,
+      totalBytes
+    });
+    try {
+      fs.renameSync(entry.sourcePath, entry.archivePath);
+      movedToArchive = true;
+      if (!fileMatchesContentHash(entry.archivePath, entry.size, entry.rawHash)) {
+        const error = new Error(`Archived move verification failed: ${entry.fileName}`);
+        error.code = "VERSION_HISTORY_RETENTION_MOVE_VERIFICATION_FAILED";
+        throw error;
+      }
+      appendRetentionArchiveJournal(journalPath, {
+        at: nowIso(),
+        status: "move-verified",
+        fileName: entry.fileName,
+        sourcePath: entry.sourcePath,
+        archivePath: entry.archivePath,
+        size: entry.size,
+        rawHash: entry.rawHash
+      });
+      entry.status = "archived";
+      completedBytes += entry.size;
+      try {
+        appendRetentionArchiveJournal(journalPath, {
+          at: nowIso(),
+          status: "archived",
+          fileName: entry.fileName,
+          sourcePath: entry.sourcePath,
+          archivePath: entry.archivePath,
+          size: entry.size,
+          rawHash: entry.rawHash
+        });
+      } catch {}
+    } catch (error) {
+      if (
+        movedToArchive
+        && !fileExists(entry.sourcePath)
+        && fileExists(entry.archivePath)
+      ) {
+        try {
+          fs.renameSync(entry.archivePath, entry.sourcePath);
+          movedToArchive = false;
+        } catch (rollbackError) {
+          error.message = `${error?.message || String(error)}; rollback failed: ${rollbackError?.message || String(rollbackError)}`;
+        }
+      }
+      entry.status = "failed";
+      entry.error = error?.message || String(error);
+      try {
+        appendRetentionArchiveJournal(journalPath, {
+          at: nowIso(),
+          status: "failed",
+          fileName: entry.fileName,
+          sourcePath: entry.sourcePath,
+          archivePath: entry.archivePath,
+          size: entry.size,
+          rawHash: entry.rawHash,
+          error: entry.error
+        });
+      } catch {}
+    }
+  }
+
+  const archivedFiles = manifestState.files.filter(file => file.status === "archived");
+  const failedFiles = manifestState.files.filter(file => file.status === "failed");
+  const status = failedFiles.length ? "partial" : "complete";
+  const archiveCompletedAt = nowIso();
+  let archiveRetention = null;
+  let archivePolicyWarning = "";
+  if (status === "complete") {
+    try {
+      archiveRetention = retentionPolicyForCompletedArchiveRun(
+        archiveRootPath,
+        archiveFolderPath,
+        plan.planId,
+        archiveCompletedAt
+      );
+    } catch (error) {
+      archivePolicyWarning = error?.message || String(error);
+    }
+  }
+  writeRetentionArchiveManifest(
+    manifestPath,
+    retentionArchiveManifest(plan, manifestState, status, "", {
+      archiveCompletedAt,
+      archiveRetention
+    }),
+    true
+  );
+  if (status === "complete" && archiveRetention) {
+    try {
+      persistRetentionArchivePolicyState(archiveRootPath, archiveRetention);
+    } catch (error) {
+      archivePolicyWarning = error?.message || String(error);
+    }
+  }
+  progress({
+    step: failedFiles.length ? "Archive completed with errors" : "Archive complete",
+    completed: totalWork,
+    total: totalWork,
+    completedBytes,
+    totalBytes
+  });
+  return {
+    ok: failedFiles.length === 0,
+    status,
+    planId: plan.planId,
+    fingerprint: plan.fingerprint,
+    archiveFolderPath,
+    planPath,
+    journalPath,
+    manifestPath,
+    archivedFileCount: archivedFiles.length,
+    archivedBytes: archivedFiles.reduce((sum, file) => sum + file.size, 0),
+    archiveRetention,
+    warnings: archivePolicyWarning ? [{
+      type: "archive-expiry-policy",
+      message: archivePolicyWarning
+    }] : [],
+    failedFileCount: failedFiles.length,
+    failures: failedFiles.map(file => ({
+      fileName: file.fileName,
+      sourcePath: file.sourcePath,
+      archivePath: file.archivePath,
+      error: file.error
+    }))
+  };
+}
+
+function retentionArchiveRunLooksManaged(folderName) {
+  return (
+    path.basename(asText(folderName)) === asText(folderName)
+    && /^retention-\d{4}-\d{2}-\d{2}T/iu.test(asText(folderName))
+  );
+}
+
+function retentionArchiveFileNameKey(fileName) {
+  const value = asText(fileName);
+  return process.platform === "win32" ? value.toLowerCase() : value;
+}
+
+function sameRetentionArchiveFileName(left, right) {
+  return retentionArchiveFileNameKey(left) === retentionArchiveFileNameKey(right);
+}
+
+function retentionArchivePolicyStatePath(archiveRootPath) {
+  return path.join(path.resolve(archiveRootPath), VERSION_HISTORY_ARCHIVE_POLICY_FILE);
+}
+
+function readRetentionArchivePolicyState(archiveRootPath) {
+  const filePath = retentionArchivePolicyStatePath(archiveRootPath);
+  try {
+    const stats = fs.lstatSync(filePath);
+    if (!stats.isFile() || stats.isSymbolicLink()) {
+      return { status: "malformed", filePath, state: null };
+    }
+    const parsed = JSON.parse(fs.readFileSync(filePath, "utf8").replace(/^\uFEFF/u, ""));
+    const firstCompletedAtMs = Date.parse(asText(parsed?.firstCompletedAt));
+    if (
+      parsed?.version !== 1
+      || !retentionArchiveRunLooksManaged(parsed.firstCompletedRunName)
+      || !Number.isFinite(firstCompletedAtMs)
+    ) {
+      return { status: "malformed", filePath, state: null };
+    }
+    return {
+      status: "valid",
+      filePath,
+      state: {
+        version: 1,
+        firstCompletedRunName: parsed.firstCompletedRunName,
+        firstCompletedAt: new Date(firstCompletedAtMs).toISOString(),
+        firstCompletedPlanId: asText(parsed.firstCompletedPlanId),
+        createdAt: asText(parsed.createdAt) || new Date(firstCompletedAtMs).toISOString()
+      }
+    };
+  } catch (error) {
+    if (error?.code === "ENOENT") return { status: "missing", filePath, state: null };
+    return { status: "malformed", filePath, state: null };
+  }
+}
+
+function assertManagedRetentionArchiveRoot(rootFolderPath, archiveRootPath, options = {}) {
+  const rootFolder = path.resolve(rootFolderPath);
+  const archiveRoot = path.resolve(archiveRootPath);
+  if (!sameHistoryPath(path.dirname(archiveRoot), rootFolder)) {
+    const error = new Error("The retention archive root is outside the configured backup folder.");
+    error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_OUTSIDE_ROOT";
+    error.statusCode = 409;
+    throw error;
+  }
+  try {
+    const stats = fs.lstatSync(archiveRoot);
+    if (!stats.isDirectory() || stats.isSymbolicLink()) throw new Error("linked");
+    const configuredRealPath = fs.realpathSync(rootFolder);
+    const archiveRealPath = fs.realpathSync(archiveRoot);
+    if (!sameHistoryPath(path.dirname(archiveRealPath), configuredRealPath)) throw new Error("outside");
+  } catch (error) {
+    if (error?.code === "ENOENT" && options.allowMissing) return archiveRoot;
+    const unsafe = new Error("The retention archive root is linked, unreadable, or outside the configured backup folder.");
+    unsafe.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_OUTSIDE_ROOT";
+    unsafe.statusCode = 409;
+    throw unsafe;
+  }
+  return archiveRoot;
+}
+
+function requireManagedRetentionArchiveRoot(rootFolderPath, claimedArchiveRootPath, options = {}) {
+  const expectedArchiveRootPath = path.resolve(
+    versionHistoryJsonArchiveFolderPath(rootFolderPath)
+  );
+  if (!sameHistoryPath(claimedArchiveRootPath, expectedArchiveRootPath)) {
+    const error = new Error("The retention archive path does not match the configured backup folder.");
+    error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_OUTSIDE_ROOT";
+    error.statusCode = 409;
+    throw error;
+  }
+  return assertManagedRetentionArchiveRoot(rootFolderPath, expectedArchiveRootPath, options);
+}
+
+function versionHistoryArchiveReadyFolderPath(rootFolderPath) {
+  const archiveRootPath = versionHistoryJsonArchiveFolderPath(rootFolderPath);
+  return archiveRootPath
+    ? path.join(archiveRootPath, VERSION_HISTORY_ARCHIVE_READY_FOLDER)
+    : "";
+}
+
+function requireVersionHistoryArchiveReadyFolder(
+  rootFolderPath,
+  archiveRootPath,
+  options = {}
+) {
+  const archiveRoot = requireManagedRetentionArchiveRoot(
+    rootFolderPath,
+    archiveRootPath,
+    { allowMissing: !options.create }
+  );
+  const readyFolderPath = path.join(archiveRoot, VERSION_HISTORY_ARCHIVE_READY_FOLDER);
+  if (path.dirname(readyFolderPath) !== archiveRoot) {
+    const error = new Error("The manual deletion folder is outside the managed archive folder.");
+    error.code = "VERSION_HISTORY_ARCHIVE_READY_FOLDER_UNSAFE";
+    error.statusCode = 409;
+    throw error;
+  }
+
+  let readyFolderStats;
+  if (options.create) {
+    try {
+      fs.mkdirSync(readyFolderPath);
+    } catch (error) {
+      if (error?.code !== "EEXIST") throw error;
+    }
+  }
+
+  try {
+    readyFolderStats = fs.lstatSync(readyFolderPath);
+    const archiveRootRealPath = fs.realpathSync(archiveRoot);
+    const readyFolderRealPath = fs.realpathSync(readyFolderPath);
+    if (
+      !readyFolderStats.isDirectory()
+      || readyFolderStats.isSymbolicLink()
+      || !sameHistoryPath(path.dirname(readyFolderRealPath), archiveRootRealPath)
+    ) {
+      throw new Error("linked-or-outside");
+    }
+  } catch (cause) {
+    if (cause?.code === "ENOENT" && !options.create && !readyFolderStats) {
+      return readyFolderPath;
+    }
+    const error = new Error("The manual deletion folder is linked, unreadable, or outside the archive.");
+    error.code = "VERSION_HISTORY_ARCHIVE_READY_FOLDER_UNSAFE";
+    error.statusCode = 409;
+    error.filePath = readyFolderPath;
+    error.cause = cause;
+    throw error;
+  }
+  return readyFolderPath;
+}
+
+function directVersionHistoryArchiveReadyRunStats(readyFolderPath, folderPath) {
+  const readyFolderRealPath = fs.realpathSync(readyFolderPath);
+  const folderStats = fs.lstatSync(folderPath);
+  const folderRealPath = fs.realpathSync(folderPath);
+  if (
+    !folderStats.isDirectory()
+    || folderStats.isSymbolicLink()
+    || !sameHistoryPath(path.dirname(folderRealPath), readyFolderRealPath)
+  ) {
+    throw new Error("The queued archive run is linked or outside the manual deletion folder.");
+  }
+
+  const versionHistorySuffixKey = retentionArchiveFileNameKey(VERSION_HISTORY_FILE_SUFFIX);
+  let fileCount = 0;
+  let bytes = 0;
+  let unsafeItemCount = 0;
+  for (const entry of fs.readdirSync(folderPath, { withFileTypes: true })) {
+    const filePath = path.join(folderPath, entry.name);
+    try {
+      const stats = fs.lstatSync(filePath);
+      const fileRealPath = fs.realpathSync(filePath);
+      if (
+        !entry.isFile()
+        || entry.isSymbolicLink()
+        || !stats.isFile()
+        || stats.isSymbolicLink()
+        || stats.nlink !== 1
+        || !sameHistoryPath(path.dirname(fileRealPath), folderRealPath)
+      ) {
+        unsafeItemCount += 1;
+        continue;
+      }
+      if (retentionArchiveFileNameKey(entry.name).endsWith(versionHistorySuffixKey)) {
+        fileCount += 1;
+        bytes += stats.size;
+      }
+    } catch {
+      unsafeItemCount += 1;
+    }
+  }
+  return { fileCount, bytes, unsafeItemCount };
+}
+
+function versionHistoryArchiveReadyStatus(options = {}) {
+  const rootFolderPath = normalizedRegistryPath(options.rootFolderPath)
+    || normalizedRegistryPath(readVersionHistoryFolderPath());
+  const emptyStatus = {
+    ready: false,
+    unsafe: false,
+    itemCount: 0,
+    runCount: 0,
+    bytes: 0,
+    folderPath: rootFolderPath ? versionHistoryArchiveReadyFolderPath(rootFolderPath) : "",
+    runs: [],
+    unrecognizedItemCount: 0,
+    unsafeItemCount: 0
+  };
+  if (!rootFolderPath || !directoryExists(rootFolderPath)) return emptyStatus;
+
+  const archiveRootPath = versionHistoryJsonArchiveFolderPath(rootFolderPath);
+  let readyFolderPath;
+  try {
+    readyFolderPath = requireVersionHistoryArchiveReadyFolder(
+      rootFolderPath,
+      archiveRootPath
+    );
+  } catch (error) {
+    return {
+      ...emptyStatus,
+      ready: true,
+      unsafe: true,
+      warning: error?.message || "The manual deletion folder needs review."
+    };
+  }
+  try {
+    fs.lstatSync(readyFolderPath);
+  } catch (error) {
+    if (error?.code === "ENOENT") return { ...emptyStatus, folderPath: readyFolderPath };
+    return {
+      ...emptyStatus,
+      ready: true,
+      unsafe: true,
+      folderPath: readyFolderPath,
+      warning: error?.message || "The manual deletion folder could not be checked."
+    };
+  }
+
+  let entries;
+  try {
+    entries = fs.readdirSync(readyFolderPath, { withFileTypes: true });
+  } catch (error) {
+    return {
+      ...emptyStatus,
+      ready: true,
+      unsafe: true,
+      folderPath: readyFolderPath,
+      warning: error?.message || "The manual deletion folder could not be read."
+    };
+  }
+
+  const runs = [];
+  for (const entry of entries) {
+    if (
+      !entry.isDirectory()
+      || entry.isSymbolicLink()
+      || !retentionArchiveRunLooksManaged(entry.name)
+    ) {
+      continue;
+    }
+    const folderPath = path.join(readyFolderPath, entry.name);
+    let fileCount = 0;
+    let bytes = 0;
+    let unsafeItemCount = 0;
+    try {
+      ({ fileCount, bytes, unsafeItemCount } = directVersionHistoryArchiveReadyRunStats(
+        readyFolderPath,
+        folderPath
+      ));
+    } catch {
+      unsafeItemCount += 1;
+    }
+    runs.push({
+      folderName: entry.name,
+      folderPath,
+      fileCount,
+      bytes,
+      ...(unsafeItemCount > 0 ? { unsafeItemCount } : {})
+    });
+  }
+
+  const unsafeRunItemCount = runs.reduce(
+    (sum, run) => sum + (run.unsafeItemCount || 0),
+    0
+  );
+  return {
+    ready: entries.length > 0,
+    unsafe: unsafeRunItemCount > 0,
+    itemCount: entries.length,
+    runCount: runs.length,
+    bytes: runs.reduce((sum, run) => sum + run.bytes, 0),
+    folderPath: readyFolderPath,
+    runs,
+    unrecognizedItemCount: Math.max(0, entries.length - runs.length),
+    unsafeItemCount: unsafeRunItemCount,
+    ...(unsafeRunItemCount > 0
+      ? { warning: "Some queued archive contents could not be verified safely." }
+      : {})
+  };
+}
+
+function completedRetentionArchiveIdentities(archiveRootPath) {
+  if (!directoryExists(archiveRootPath)) return [];
+  const archiveRoot = path.resolve(archiveRootPath);
+  return fs.readdirSync(archiveRoot, { withFileTypes: true })
+    .filter(entry => entry.isDirectory() && !entry.isSymbolicLink() && retentionArchiveRunLooksManaged(entry.name))
+    .map(entry => {
+      const archiveFolderPath = path.join(archiveRoot, entry.name);
+      const manifestPath = path.join(archiveFolderPath, VERSION_HISTORY_ARCHIVE_MANIFEST_FILE);
+      try {
+        const manifestStats = fs.lstatSync(manifestPath);
+        if (!manifestStats.isFile() || manifestStats.isSymbolicLink()) return null;
+        const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8").replace(/^\uFEFF/u, ""));
+        const completedAtMs = Date.parse(asText(manifest?.archiveCompletedAt));
+        if (
+          manifest?.version !== 1
+          || manifest?.status !== "complete"
+          || !Number.isFinite(completedAtMs)
+          || !sameHistoryPath(manifest.archiveFolderPath, archiveFolderPath)
+        ) {
+          return null;
+        }
+        return {
+          folderName: entry.name,
+          completedAt: new Date(completedAtMs).toISOString(),
+          completedAtMs,
+          planId: asText(manifest.planId)
+        };
+      } catch {
+        return null;
+      }
+    })
+    .filter(Boolean)
+    .sort((left, right) => left.completedAtMs - right.completedAtMs
+      || left.folderName.localeCompare(right.folderName));
+}
+
+function assertRetentionArchivePolicyStateUsable(archiveRootPath) {
+  const policyState = readRetentionArchivePolicyState(archiveRootPath);
+  if (policyState.status === "malformed") {
+    const error = new Error("The retention archive policy record is malformed. Archive storage was not changed.");
+    error.code = "VERSION_HISTORY_ARCHIVE_POLICY_MALFORMED";
+    error.statusCode = 409;
+    error.filePath = policyState.filePath;
+    throw error;
+  }
+  return policyState;
+}
+
+function retentionPolicyForCompletedArchiveRun(
+  archiveRootPath,
+  archiveFolderPath,
+  planId,
+  archiveCompletedAt
+) {
+  const policyState = assertRetentionArchivePolicyStateUsable(archiveRootPath);
+  const folderName = path.basename(path.resolve(archiveFolderPath));
+  const completedAtMs = Date.parse(asText(archiveCompletedAt));
+  const completedAt = new Date(completedAtMs).toISOString();
+  let firstCompletedRunName = policyState.state?.firstCompletedRunName || "";
+  let firstCompletedAt = policyState.state?.firstCompletedAt || "";
+  let firstCompletedPlanId = policyState.state?.firstCompletedPlanId || "";
+  if (!firstCompletedRunName) {
+    const previousRuns = completedRetentionArchiveIdentities(archiveRootPath)
+      .filter(run => run.folderName !== folderName);
+    const firstRun = previousRuns[0] || {
+      folderName,
+      completedAt,
+      planId: asText(planId)
+    };
+    firstCompletedRunName = firstRun.folderName;
+    firstCompletedAt = firstRun.completedAt;
+    firstCompletedPlanId = firstRun.planId;
+  }
+  const days = folderName === firstCompletedRunName
+    ? VERSION_HISTORY_ARCHIVE_EXPIRY_POLICY.firstRunDays
+    : VERSION_HISTORY_ARCHIVE_EXPIRY_POLICY.standardRetentionDays;
+  return {
+    version: 1,
+    days,
+    expiresAt: new Date(completedAtMs + (days * 24 * 60 * 60 * 1000)).toISOString(),
+    firstCompletedRunName,
+    firstCompletedAt,
+    firstCompletedPlanId
+  };
+}
+
+function persistRetentionArchivePolicyState(archiveRootPath, archiveRetention) {
+  const current = assertRetentionArchivePolicyStateUsable(archiveRootPath);
+  const desired = {
+    version: 1,
+    firstCompletedRunName: asText(archiveRetention?.firstCompletedRunName),
+    firstCompletedAt: asText(archiveRetention?.firstCompletedAt),
+    firstCompletedPlanId: asText(archiveRetention?.firstCompletedPlanId),
+    createdAt: current.state?.createdAt || nowIso()
+  };
+  if (
+    !retentionArchiveRunLooksManaged(desired.firstCompletedRunName)
+    || !Number.isFinite(Date.parse(desired.firstCompletedAt))
+  ) {
+    const error = new Error("Cannot persist an incomplete retention archive policy record.");
+    error.code = "VERSION_HISTORY_ARCHIVE_POLICY_INVALID";
+    error.statusCode = 500;
+    throw error;
+  }
+  if (current.status === "valid") {
+    if (
+      current.state.firstCompletedRunName !== desired.firstCompletedRunName
+      || current.state.firstCompletedAt !== desired.firstCompletedAt
+    ) {
+      const error = new Error("The retention archive policy record conflicts with this archive run.");
+      error.code = "VERSION_HISTORY_ARCHIVE_POLICY_CONFLICT";
+      error.statusCode = 409;
+      throw error;
+    }
+    return current.state;
+  }
+  const filePath = retentionArchivePolicyStatePath(archiveRootPath);
+  try {
+    fs.writeFileSync(filePath, `${JSON.stringify(desired, null, 2)}\n`, {
+      encoding: "utf8",
+      flag: "wx"
+    });
+  } catch (error) {
+    if (error?.code !== "EEXIST") throw error;
+    const raced = assertRetentionArchivePolicyStateUsable(archiveRootPath);
+    if (
+      raced.status !== "valid"
+      || raced.state.firstCompletedRunName !== desired.firstCompletedRunName
+      || raced.state.firstCompletedAt !== desired.firstCompletedAt
+    ) {
+      const conflict = new Error("The retention archive policy record changed unexpectedly.");
+      conflict.code = "VERSION_HISTORY_ARCHIVE_POLICY_CONFLICT";
+      conflict.statusCode = 409;
+      throw conflict;
+    }
+    return raced.state;
+  }
+  return desired;
+}
+
+function retentionArchiveRunFingerprint(fileEntries) {
+  return textHash(JSON.stringify(fileEntries
+    .map(entry => [entry.fileName, entry.size, entry.mtimeMs, entry.rawHash])
+    .sort((left, right) => left[0].localeCompare(right[0]))));
+}
+
+function retentionArchiveProtectedRun(folderName, archiveFolderPath, reason, details = {}) {
+  return {
+    folderName,
+    archiveFolderPath,
+    status: details.status || "protected",
+    completedAt: details.completedAt || "",
+    retentionDays: 0,
+    expiresAt: "",
+    fileCount: Math.max(0, Number(details.fileCount) || 0),
+    bytes: Math.max(0, Number(details.bytes) || 0),
+    pinned: Boolean(details.pinned),
+    protected: true,
+    expired: false,
+    movableToManualDeletion: false,
+    protectedReason: reason,
+    directoryFingerprint: details.directoryFingerprint || "",
+    expectedFiles: []
+  };
+}
+
+function inspectVersionHistoryRetentionArchiveRun(
+  archiveRootPath,
+  rootFolderPath,
+  folderName,
+  progress = () => {}
+) {
+  const archiveRoot = path.resolve(archiveRootPath);
+  const archiveFolderPath = path.join(archiveRoot, folderName);
+  if (
+    path.dirname(archiveFolderPath) !== archiveRoot
+    || !retentionArchiveRunLooksManaged(folderName)
+  ) {
+    return retentionArchiveProtectedRun(
+      folderName,
+      archiveFolderPath,
+      "outside-managed-archive-root"
+    );
+  }
+  let folderStats;
+  try {
+    folderStats = fs.lstatSync(archiveFolderPath);
+    const rootRealPath = fs.realpathSync(archiveRoot);
+    const folderRealPath = fs.realpathSync(archiveFolderPath);
+    if (
+      !folderStats.isDirectory()
+      || folderStats.isSymbolicLink()
+      || !sameHistoryPath(path.dirname(folderRealPath), rootRealPath)
+    ) {
+      return retentionArchiveProtectedRun(
+        folderName,
+        archiveFolderPath,
+        "linked-or-outside-managed-archive-root"
+      );
+    }
+  } catch {
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, "unreadable");
+  }
+
+  let entries;
+  try {
+    entries = fs.readdirSync(archiveFolderPath, { withFileTypes: true });
+  } catch {
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, "unreadable");
+  }
+  const nonFlatEntry = entries.find(entry => !entry.isFile() || entry.isSymbolicLink());
+  if (nonFlatEntry) {
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, "unknown-or-linked-contents");
+  }
+  const entryNames = new Set(entries.map(entry => retentionArchiveFileNameKey(entry.name)));
+  if (entryNames.size !== entries.length) {
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, "duplicate-file-names");
+  }
+  const pinMarkerPresent = entryNames.has(retentionArchiveFileNameKey(VERSION_HISTORY_ARCHIVE_PIN_FILE));
+  const manifestPath = path.join(archiveFolderPath, VERSION_HISTORY_ARCHIVE_MANIFEST_FILE);
+  const planPath = path.join(archiveFolderPath, VERSION_HISTORY_ARCHIVE_PLAN_FILE);
+  const journalPath = path.join(archiveFolderPath, VERSION_HISTORY_ARCHIVE_JOURNAL_FILE);
+  let manifest;
+  let archivePlan;
+  try {
+    manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8").replace(/^\uFEFF/u, ""));
+    archivePlan = JSON.parse(fs.readFileSync(planPath, "utf8").replace(/^\uFEFF/u, ""));
+    fs.accessSync(journalPath, fs.constants.R_OK);
+    if (pinMarkerPresent) fs.accessSync(path.join(archiveFolderPath, VERSION_HISTORY_ARCHIVE_PIN_FILE), fs.constants.R_OK);
+  } catch {
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, "malformed-or-unreadable", {
+      pinned: pinMarkerPresent
+    });
+  }
+  const manifestPinned = Boolean(
+    manifest?.pinned === true
+    || manifest?.retentionPinned === true
+    || manifest?.archiveRetention?.pinned === true
+  );
+  const pinned = pinMarkerPresent || manifestPinned;
+  const completedAtMs = Date.parse(asText(manifest?.archiveCompletedAt));
+  const baseDetails = {
+    status: asText(manifest?.status) || "malformed",
+    completedAt: Number.isFinite(completedAtMs) ? new Date(completedAtMs).toISOString() : "",
+    pinned
+  };
+  if (manifest?.version !== 1 || archivePlan?.version !== 1) {
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, "unsupported-or-malformed-manifest", baseDetails);
+  }
+  if (manifest.status !== "complete") {
+    const reason = manifest.status === "partial" || manifest.status === "failed"
+      ? "failed-or-partial"
+      : "incomplete";
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, reason, baseDetails);
+  }
+  if (
+    !Number.isFinite(completedAtMs)
+    || archivePlan.status !== "in-progress"
+    || !asText(manifest.planId)
+    || manifest.planId !== archivePlan.planId
+    || manifest.planFingerprint !== archivePlan.planFingerprint
+    || manifest.directoryFingerprint !== archivePlan.directoryFingerprint
+    || !sameHistoryPath(manifest.archiveFolderPath, archiveFolderPath)
+    || !sameHistoryPath(archivePlan.archiveFolderPath, archiveFolderPath)
+    || !sameHistoryPath(manifest.rootFolderPath, rootFolderPath)
+    || !sameHistoryPath(archivePlan.rootFolderPath, rootFolderPath)
+    || !sameHistoryPath(manifest.backupFolderPath, versionHistoryJsonBackupFolderPath(rootFolderPath))
+    || !sameHistoryPath(archivePlan.backupFolderPath, versionHistoryJsonBackupFolderPath(rootFolderPath))
+    || !sameHistoryPath(manifest.archivePlanPath, planPath)
+    || !sameHistoryPath(archivePlan.archivePlanPath, planPath)
+    || !sameHistoryPath(manifest.archiveJournalPath, journalPath)
+    || !sameHistoryPath(archivePlan.archiveJournalPath, journalPath)
+  ) {
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, "changed-or-outside-root", baseDetails);
+  }
+  const manifestFiles = Array.isArray(manifest.files) ? manifest.files : [];
+  const planFiles = Array.isArray(archivePlan.files) ? archivePlan.files : [];
+  if (!manifestFiles.length || manifestFiles.length !== planFiles.length) {
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, "incomplete-manifest", baseDetails);
+  }
+  const planFilesByName = new Map();
+  for (const file of planFiles) {
+    const fileName = asText(file?.fileName);
+    const fileNameKey = retentionArchiveFileNameKey(fileName);
+    if (
+      path.basename(fileName) !== fileName
+      || !fileName
+      || planFilesByName.has(fileNameKey)
+      || file.status !== "pending"
+      || !sameHistoryPath(file.archivePath, path.join(archiveFolderPath, fileName))
+      || !sameHistoryPath(
+        path.dirname(path.resolve(asText(file.sourcePath))),
+        versionHistoryJsonBackupFolderPath(rootFolderPath)
+      )
+      || !sameRetentionArchiveFileName(path.basename(path.resolve(asText(file.sourcePath))), fileName)
+      || !/^[a-f0-9]{64}$/iu.test(asText(file.rawHash))
+      || !Number.isSafeInteger(file.size)
+      || file.size < 0
+    ) {
+      return retentionArchiveProtectedRun(folderName, archiveFolderPath, "malformed-plan-files", baseDetails);
+    }
+    planFilesByName.set(fileNameKey, file);
+  }
+  const dataFileNames = new Set();
+  for (const file of manifestFiles) {
+    const fileName = asText(file?.fileName);
+    const fileNameKey = retentionArchiveFileNameKey(fileName);
+    const planned = planFilesByName.get(fileNameKey);
+    if (
+      path.basename(fileName) !== fileName
+      || !fileName
+      || dataFileNames.has(fileNameKey)
+      || file.status !== "archived"
+      || !planned
+      || !sameHistoryPath(file.archivePath, path.join(archiveFolderPath, fileName))
+      || !sameHistoryPath(
+        path.dirname(path.resolve(asText(file.sourcePath))),
+        versionHistoryJsonBackupFolderPath(rootFolderPath)
+      )
+      || !sameRetentionArchiveFileName(path.basename(path.resolve(asText(file.sourcePath))), fileName)
+      || file.rawHash !== planned.rawHash
+      || file.size !== planned.size
+      || !/^[a-f0-9]{64}$/iu.test(asText(file.rawHash))
+      || !Number.isSafeInteger(file.size)
+      || file.size < 0
+    ) {
+      return retentionArchiveProtectedRun(folderName, archiveFolderPath, "malformed-manifest-files", baseDetails);
+    }
+    dataFileNames.add(fileNameKey);
+  }
+  const reservedNames = new Set([
+    VERSION_HISTORY_ARCHIVE_MANIFEST_FILE,
+    VERSION_HISTORY_ARCHIVE_PLAN_FILE,
+    VERSION_HISTORY_ARCHIVE_JOURNAL_FILE,
+    VERSION_HISTORY_ARCHIVE_PIN_FILE
+  ].map(retentionArchiveFileNameKey));
+  if ([...dataFileNames].some(fileNameKey => reservedNames.has(fileNameKey))) {
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, "reserved-file-name", baseDetails);
+  }
+  const expectedFileNames = [
+    VERSION_HISTORY_ARCHIVE_MANIFEST_FILE,
+    VERSION_HISTORY_ARCHIVE_PLAN_FILE,
+    VERSION_HISTORY_ARCHIVE_JOURNAL_FILE,
+    ...manifestFiles.map(file => file.fileName)
+  ];
+  if (pinMarkerPresent) expectedFileNames.push(VERSION_HISTORY_ARCHIVE_PIN_FILE);
+  const expectedNames = new Set(expectedFileNames.map(retentionArchiveFileNameKey));
+  if (
+    expectedNames.size !== entryNames.size
+    || [...entryNames].some(fileNameKey => !expectedNames.has(fileNameKey))
+  ) {
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, "unknown-contents", baseDetails);
+  }
+
+  const expectedFiles = [];
+  try {
+    for (const fileName of expectedFileNames.slice().sort()) {
+      const filePath = path.join(archiveFolderPath, fileName);
+      const stats = fs.lstatSync(filePath);
+      if (
+        !stats.isFile()
+        || stats.isSymbolicLink()
+        || stats.nlink !== 1
+        || path.dirname(filePath) !== archiveFolderPath
+      ) {
+        throw new Error("Archive entry is not a direct regular file.");
+      }
+      const rawHash = sha256File(filePath);
+      const manifestEntry = manifestFiles.find(file => file.fileName === fileName);
+      if (
+        manifestEntry
+        && (stats.size !== manifestEntry.size || rawHash !== manifestEntry.rawHash)
+      ) {
+        throw new Error("Archived content does not match its manifest.");
+      }
+      expectedFiles.push({
+        fileName,
+        size: stats.size,
+        mtimeMs: Math.trunc(stats.mtimeMs),
+        rawHash
+      });
+      progress({
+        step: `Checking archived file ${fileName}`,
+        completedBytes: stats.size
+      });
+    }
+  } catch {
+    return retentionArchiveProtectedRun(folderName, archiveFolderPath, "changed-or-unreadable-contents", baseDetails);
+  }
+  const directoryFingerprint = retentionArchiveRunFingerprint(expectedFiles);
+  const bytes = manifestFiles.reduce((sum, file) => sum + file.size, 0);
+  return {
+    folderName,
+    archiveFolderPath,
+    status: "complete",
+    planId: manifest.planId,
+    completedAt: new Date(completedAtMs).toISOString(),
+    completedAtMs,
+    retentionDays: 0,
+    expiresAt: "",
+    fileCount: manifestFiles.length,
+    bytes,
+    pinned,
+    protected: pinned,
+    expired: false,
+    movableToManualDeletion: false,
+    protectedReason: pinned ? "pinned" : "",
+    directoryFingerprint,
+    expectedFiles,
+    declaredRetention: manifest.archiveRetention || null
+  };
+}
+
+function versionHistoryRetentionArchiveRootFingerprint(archiveRootPath, runs, policyState) {
+  if (!directoryExists(archiveRootPath)) return textHash("[]");
+  const runFingerprints = new Map(runs.map(run => [run.folderName, run.directoryFingerprint || ""]));
+  const entries = fs.readdirSync(archiveRootPath, { withFileTypes: true }).map(entry => {
+    const entryPath = path.join(archiveRootPath, entry.name);
+    let stats;
+    try {
+      stats = fs.lstatSync(entryPath);
+    } catch {
+      return [entry.name, "unreadable"];
+    }
+    const type = stats.isSymbolicLink()
+      ? "link"
+      : stats.isDirectory()
+        ? "directory"
+        : stats.isFile()
+          ? "file"
+          : "other";
+    let contentHash = "";
+    if (entry.name === VERSION_HISTORY_ARCHIVE_POLICY_FILE && stats.isFile() && !stats.isSymbolicLink()) {
+      try {
+        contentHash = sha256File(entryPath);
+      } catch {
+        contentHash = "unreadable";
+      }
+    }
+    return [
+      entry.name,
+      type,
+      stats.size,
+      Math.trunc(stats.mtimeMs),
+      runFingerprints.get(entry.name) || contentHash
+    ];
+  });
+  entries.push(["policy-status", policyState.status]);
+  return textHash(JSON.stringify(entries.sort((left, right) => left[0].localeCompare(right[0]))));
+}
+
+function scanVersionHistoryRetentionArchives(options = {}, progress = () => {}) {
+  const rootFolderPath = normalizedRegistryPath(options.rootFolderPath)
+    || requireVersionHistoryFolderPath();
+  if (!rootFolderPath) {
+    throw new BackupFolderMissingError(readVersionHistoryFolderPath() || "No backup folder selected");
+  }
+  const archiveRootPath = versionHistoryJsonArchiveFolderPath(rootFolderPath);
+  assertManagedRetentionArchiveRoot(rootFolderPath, archiveRootPath, { allowMissing: true });
+  const policyState = readRetentionArchivePolicyState(archiveRootPath);
+  const names = directoryExists(archiveRootPath)
+    ? fs.readdirSync(archiveRootPath, { withFileTypes: true })
+      .filter(entry => retentionArchiveRunLooksManaged(entry.name))
+      .map(entry => entry.name)
+      .sort()
+    : [];
+  let completedBytes = 0;
+  const runs = names.map((folderName, index) => {
+    progress({
+      step: `Checking archive ${folderName}`,
+      completed: index,
+      total: names.length,
+      completedBytes,
+      totalBytes: 0
+    });
+    const run = inspectVersionHistoryRetentionArchiveRun(
+      archiveRootPath,
+      rootFolderPath,
+      folderName,
+      value => {
+        completedBytes += Math.max(0, Number(value?.completedBytes) || 0);
+      }
+    );
+    return run;
+  });
+  const validCompleted = runs
+    .filter(run => run.status === "complete" && run.directoryFingerprint)
+    .sort((left, right) => left.completedAtMs - right.completedAtMs
+      || left.folderName.localeCompare(right.folderName));
+  const derivedFirstRun = policyState.status === "valid"
+    ? {
+        folderName: policyState.state.firstCompletedRunName,
+        completedAt: policyState.state.firstCompletedAt,
+        planId: policyState.state.firstCompletedPlanId
+      }
+    : validCompleted[0]
+      ? {
+          folderName: validCompleted[0].folderName,
+          completedAt: validCompleted[0].completedAt,
+          planId: validCompleted[0].planId
+        }
+      : null;
+  const nowMs = retentionTimeMs(options.now, Date.now());
+  runs.forEach(run => {
+    if (run.status !== "complete" || !run.directoryFingerprint) return;
+    if (policyState.status === "malformed") {
+      run.protected = true;
+      run.protectedReason = "malformed-policy-state";
+      return;
+    }
+    if (run.completedAtMs > nowMs) {
+      run.protected = true;
+      run.protectedReason = "future-completion-time";
+      return;
+    }
+    const expectedDays = run.folderName === derivedFirstRun?.folderName
+      ? VERSION_HISTORY_ARCHIVE_EXPIRY_POLICY.firstRunDays
+      : VERSION_HISTORY_ARCHIVE_EXPIRY_POLICY.standardRetentionDays;
+    const declared = run.declaredRetention;
+    if (declared != null) {
+      const declaredDays = Number(declared?.days);
+      const declaredExpiresAtMs = Date.parse(asText(declared?.expiresAt));
+      const expectedExpiresAtMs = run.completedAtMs + (expectedDays * 24 * 60 * 60 * 1000);
+      if (
+        declared?.version !== 1
+        || declaredDays !== expectedDays
+        || !Number.isFinite(declaredExpiresAtMs)
+        || declaredExpiresAtMs !== expectedExpiresAtMs
+        || asText(declared.firstCompletedRunName) !== asText(derivedFirstRun?.folderName)
+        || asText(declared.firstCompletedAt) !== asText(derivedFirstRun?.completedAt)
+        || asText(declared.firstCompletedPlanId) !== asText(derivedFirstRun?.planId)
+      ) {
+        run.protected = true;
+        run.protectedReason = "changed-retention-metadata";
+        return;
+      }
+    }
+    run.retentionDays = expectedDays;
+    run.expiresAt = new Date(
+      run.completedAtMs + (expectedDays * 24 * 60 * 60 * 1000)
+    ).toISOString();
+    run.expired = nowMs >= Date.parse(run.expiresAt);
+    run.movableToManualDeletion = run.expired && !run.pinned && !run.protectedReason;
+    run.protected = Boolean(run.pinned || run.protectedReason);
+  });
+  const archiveRootFingerprint = versionHistoryRetentionArchiveRootFingerprint(
+    archiveRootPath,
+    runs,
+    policyState
+  );
+  return {
+    rootFolderPath,
+    archiveRootPath,
+    archiveRootFingerprint,
+    policyStateStatus: policyState.status,
+    policyStatePath: policyState.filePath,
+    firstCompletedRunName: derivedFirstRun?.folderName || "",
+    firstCompletedAt: derivedFirstRun?.completedAt || "",
+    firstCompletedPlanId: derivedFirstRun?.planId || "",
+    runs
+  };
+}
+
+function previewVersionHistoryRetentionArchiveExpiry(options = {}, progress = () => {}) {
+  const planId = asText(options.planId) || id("archive-expiry-plan");
+  const scan = scanVersionHistoryRetentionArchives(options, progress);
+  const readyForManualDeletion = versionHistoryArchiveReadyStatus({
+    rootFolderPath: scan.rootFolderPath
+  });
+  const runs = scan.runs.map(run => ({ ...run }));
+  const movableRuns = runs.filter(run => run.movableToManualDeletion);
+  const protectedRuns = runs.filter(run => run.protected);
+  const completedRuns = runs.filter(run => run.status === "complete");
+  const retainedRuns = runs.filter(run => !run.movableToManualDeletion);
+  const fingerprint = textHash(JSON.stringify({
+    archiveRootFingerprint: scan.archiveRootFingerprint,
+    firstCompletedRunName: scan.firstCompletedRunName,
+    runs: runs.map(run => [
+      run.folderName,
+      run.directoryFingerprint,
+      run.movableToManualDeletion,
+      run.protectedReason
+    ])
+  }));
+  progress({
+    step: "Archive expiry preview complete",
+    completed: runs.length,
+    total: runs.length,
+    completedBytes: runs.reduce((sum, run) => sum + run.bytes, 0),
+    totalBytes: runs.reduce((sum, run) => sum + run.bytes, 0)
+  });
+  const summary = {
+    managedRunCount: runs.length,
+    runCount: runs.length,
+    completedRunCount: completedRuns.length,
+    retainedRunCount: retainedRuns.length,
+    pinnedRunCount: runs.filter(run => run.pinned).length,
+    protectedRunCount: protectedRuns.length,
+    expiredRunCount: movableRuns.length,
+    expiredBytes: movableRuns.reduce((sum, run) => sum + run.bytes, 0),
+    movableRunCount: movableRuns.length,
+    movableBytes: movableRuns.reduce((sum, run) => sum + run.bytes, 0),
+    firstRunRetentionDays: VERSION_HISTORY_ARCHIVE_EXPIRY_POLICY.firstRunDays,
+    standardRetentionDays: VERSION_HISTORY_ARCHIVE_EXPIRY_POLICY.standardRetentionDays,
+    readyForManualDeletionRunCount: readyForManualDeletion.runCount,
+    readyForManualDeletionBytes: readyForManualDeletion.bytes
+  };
+  return {
+    ok: true,
+    planId,
+    fingerprint,
+    generatedAt: new Date(retentionTimeMs(options.now, Date.now())).toISOString(),
+    rootFolderPath: scan.rootFolderPath,
+    archiveRootPath: scan.archiveRootPath,
+    archiveRootFingerprint: scan.archiveRootFingerprint,
+    policyStateStatus: scan.policyStateStatus,
+    policyStatePath: scan.policyStatePath,
+    firstCompletedRunName: scan.firstCompletedRunName,
+    firstCompletedAt: scan.firstCompletedAt,
+    firstCompletedPlanId: scan.firstCompletedPlanId,
+    policy: {
+      firstRunRetentionDays: VERSION_HISTORY_ARCHIVE_EXPIRY_POLICY.firstRunDays,
+      standardRetentionDays: VERSION_HISTORY_ARCHIVE_EXPIRY_POLICY.standardRetentionDays
+    },
+    readyForManualDeletion,
+    ...summary,
+    summary,
+    runs
+  };
+}
+
+function previewVersionHistoryArchiveExpiry(options = {}, progress = () => {}) {
+  return previewVersionHistoryRetentionArchiveExpiry(options, progress);
+}
+
+function assertVersionHistoryArchiveExpiryPlanCurrent(plan, options = {}, progress = () => {}) {
+  if (!plan?.planId || !plan?.fingerprint || !plan?.archiveRootFingerprint) {
+    const error = new Error("Archive expiry plan is incomplete.");
+    error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_INVALID_PLAN";
+    error.statusCode = 400;
+    throw error;
+  }
+  const current = scanVersionHistoryRetentionArchives({
+    rootFolderPath: plan.rootFolderPath,
+    now: options.now
+  }, progress);
+  if (current.archiveRootFingerprint !== plan.archiveRootFingerprint) {
+    const error = new Error("Retention archives changed after the preview. Scan again before moving.");
+    error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_STALE";
+    error.statusCode = 409;
+    error.expectedFingerprint = plan.archiveRootFingerprint;
+    error.currentFingerprint = current.archiveRootFingerprint;
+    throw error;
+  }
+  const currentByName = new Map(current.runs.map(run => [run.folderName, run]));
+  const candidates = (Array.isArray(plan.runs) ? plan.runs : [])
+    .filter(run => run.movableToManualDeletion);
+  for (const planned of candidates) {
+    const currentRun = currentByName.get(planned.folderName);
+    if (
+      !currentRun
+      || !currentRun.movableToManualDeletion
+      || currentRun.directoryFingerprint !== planned.directoryFingerprint
+    ) {
+      const error = new Error(`Retention archive changed after the preview: ${planned.folderName}`);
+      error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_STALE";
+      error.statusCode = 409;
+      throw error;
+    }
+  }
+  return { current, candidates: candidates.map(run => currentByName.get(run.folderName)) };
+}
+
+function assertVersionHistoryArchiveRunReadyForMove(archiveRootPath, run) {
+  const archiveRoot = path.resolve(archiveRootPath);
+  const archiveFolderPath = path.join(archiveRoot, run.folderName);
+  if (
+    path.dirname(archiveFolderPath) !== archiveRoot
+    || !sameHistoryPath(archiveFolderPath, run.archiveFolderPath)
+  ) {
+    const error = new Error(`Archive run is outside the managed archive root: ${run.folderName}`);
+    error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_OUTSIDE_ROOT";
+    error.statusCode = 400;
+    throw error;
+  }
+
+  const folderStats = fs.lstatSync(archiveFolderPath);
+  const rootRealPath = fs.realpathSync(archiveRoot);
+  const folderRealPath = fs.realpathSync(archiveFolderPath);
+  const currentEntries = fs.readdirSync(archiveFolderPath, { withFileTypes: true });
+  const expectedNames = new Set(
+    run.expectedFiles.map(file => retentionArchiveFileNameKey(file.fileName))
+  );
+  if (
+    !folderStats.isDirectory()
+    || folderStats.isSymbolicLink()
+    || !sameHistoryPath(path.dirname(folderRealPath), rootRealPath)
+    || currentEntries.length !== expectedNames.size
+    || currentEntries.some(entry => (
+      !entry.isFile()
+      || entry.isSymbolicLink()
+      || !expectedNames.has(retentionArchiveFileNameKey(entry.name))
+    ))
+  ) {
+    const error = new Error(`Archive run inventory changed before moving: ${run.folderName}`);
+    error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_STALE";
+    error.statusCode = 409;
+    throw error;
+  }
+
+  for (const file of run.expectedFiles) {
+    const filePath = path.join(archiveFolderPath, file.fileName);
+    const stats = fs.lstatSync(filePath);
+    if (
+      path.dirname(filePath) !== archiveFolderPath
+      || !stats.isFile()
+      || stats.isSymbolicLink()
+      || stats.nlink !== 1
+      || stats.size !== file.size
+      || Math.trunc(stats.mtimeMs) !== file.mtimeMs
+      || sha256File(filePath) !== file.rawHash
+    ) {
+      const error = new Error(`Archive run changed before moving: ${run.folderName}`);
+      error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_STALE";
+      error.statusCode = 409;
+      throw error;
+    }
+  }
+  return archiveFolderPath;
+}
+
+function assertVersionHistoryArchiveReadyDestinationAvailable(
+  rootFolderPath,
+  archiveRootPath,
+  readyFolderPath,
+  run
+) {
+  const archiveRoot = requireManagedRetentionArchiveRoot(rootFolderPath, archiveRootPath);
+  const readyFolder = requireVersionHistoryArchiveReadyFolder(
+    rootFolderPath,
+    archiveRoot,
+    { create: true }
+  );
+  const folderName = asText(run?.folderName);
+  const destinationFolderPath = path.join(readyFolder, folderName);
+  if (
+    !sameHistoryPath(readyFolder, readyFolderPath)
+    || path.dirname(readyFolder) !== archiveRoot
+    || !retentionArchiveRunLooksManaged(folderName)
+    || path.basename(folderName) !== folderName
+    || path.dirname(destinationFolderPath) !== readyFolder
+  ) {
+    const error = new Error("A manual deletion destination is outside the managed archive folder.");
+    error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_OUTSIDE_ROOT";
+    error.statusCode = 409;
+    throw error;
+  }
+
+  try {
+    fs.lstatSync(destinationFolderPath);
+    const error = new Error(`Manual-deletion destination already exists: ${folderName}`);
+    error.code = "VERSION_HISTORY_ARCHIVE_READY_COLLISION";
+    error.statusCode = 409;
+    throw error;
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  return destinationFolderPath;
+}
+
+function assertVersionHistoryArchiveRenameBoundaryCurrent(
+  rootFolderPath,
+  archiveRootPath,
+  readyFolderPath,
+  run
+) {
+  const archiveRoot = requireManagedRetentionArchiveRoot(rootFolderPath, archiveRootPath);
+  const readyFolder = requireVersionHistoryArchiveReadyFolder(
+    rootFolderPath,
+    archiveRoot
+  );
+  const sourceFolderPath = path.join(archiveRoot, run.folderName);
+  const destinationFolderPath = path.join(readyFolder, run.folderName);
+  const sourceStats = fs.lstatSync(sourceFolderPath);
+  const archiveRootRealPath = fs.realpathSync(archiveRoot);
+  const sourceRealPath = fs.realpathSync(sourceFolderPath);
+  if (
+    !sameHistoryPath(readyFolder, readyFolderPath)
+    || path.dirname(sourceFolderPath) !== archiveRoot
+    || path.dirname(destinationFolderPath) !== readyFolder
+    || !sourceStats.isDirectory()
+    || sourceStats.isSymbolicLink()
+    || !sameHistoryPath(path.dirname(sourceRealPath), archiveRootRealPath)
+  ) {
+    const error = new Error(`Archive move boundary changed: ${run.folderName}`);
+    error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_STALE";
+    error.statusCode = 409;
+    throw error;
+  }
+  try {
+    fs.lstatSync(destinationFolderPath);
+    const error = new Error(`Manual-deletion destination already exists: ${run.folderName}`);
+    error.code = "VERSION_HISTORY_ARCHIVE_READY_COLLISION";
+    error.statusCode = 409;
+    throw error;
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  return { sourceFolderPath, destinationFolderPath };
+}
+
+function assertVersionHistoryArchiveRunMoved(readyFolderPath, destinationFolderPath) {
+  const readyFolder = path.resolve(readyFolderPath);
+  const destinationFolder = path.resolve(destinationFolderPath);
+  try {
+    const stats = fs.lstatSync(destinationFolder);
+    const readyFolderRealPath = fs.realpathSync(readyFolder);
+    const destinationRealPath = fs.realpathSync(destinationFolder);
+    if (
+      path.dirname(destinationFolder) !== readyFolder
+      || !retentionArchiveRunLooksManaged(path.basename(destinationFolder))
+      || !stats.isDirectory()
+      || stats.isSymbolicLink()
+      || !sameHistoryPath(path.dirname(destinationRealPath), readyFolderRealPath)
+    ) {
+      throw new Error("unsafe-destination");
+    }
+  } catch (cause) {
+    const error = new Error("The archive run moved, but its manual deletion destination could not be verified.");
+    error.code = "VERSION_HISTORY_ARCHIVE_READY_MOVE_UNVERIFIED";
+    error.statusCode = 409;
+    error.cause = cause;
+    throw error;
+  }
+  return destinationFolder;
+}
+
+function moveVersionHistoryRetentionArchiveExpiryPlan(plan, options = {}, progress = () => {}) {
+  const configuredRootFolderPath = normalizedRegistryPath(options.rootFolderPath)
+    || normalizedRegistryPath(readVersionHistoryFolderPath());
+  if (
+    !configuredRootFolderPath
+    || !sameHistoryPath(configuredRootFolderPath, plan?.rootFolderPath)
+  ) {
+    const error = new Error("The configured backup folder changed after the archive expiry preview.");
+    error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_ROOT_CHANGED";
+    error.statusCode = 409;
+    throw error;
+  }
+  const archiveRootPath = requireManagedRetentionArchiveRoot(
+    configuredRootFolderPath,
+    plan.archiveRootPath,
+    { allowMissing: true }
+  );
+  const { current, candidates } = assertVersionHistoryArchiveExpiryPlanCurrent(
+    plan,
+    options,
+    progress
+  );
+  requireManagedRetentionArchiveRoot(
+    configuredRootFolderPath,
+    current.archiveRootPath,
+    { allowMissing: candidates.length === 0 }
+  );
+  if (!candidates.length) {
+    return {
+      ok: true,
+      status: "no-op",
+      planId: plan.planId,
+      movedRunCount: 0,
+      movedBytes: 0,
+      readyForManualDeletion: versionHistoryArchiveReadyStatus({
+        rootFolderPath: configuredRootFolderPath
+      }),
+      failedRunCount: 0,
+      failures: []
+    };
+  }
+  const readyFolderPath = requireVersionHistoryArchiveReadyFolder(
+    configuredRootFolderPath,
+    archiveRootPath,
+    { create: true }
+  );
+  const plannedDestinations = new Map(candidates.map(run => [
+    run.folderName,
+    assertVersionHistoryArchiveReadyDestinationAvailable(
+      configuredRootFolderPath,
+      archiveRootPath,
+      readyFolderPath,
+      run
+    )
+  ]));
+  persistRetentionArchivePolicyState(archiveRootPath, {
+    firstCompletedRunName: plan.firstCompletedRunName,
+    firstCompletedAt: plan.firstCompletedAt,
+    firstCompletedPlanId: plan.firstCompletedPlanId
+  });
+  const moveJournal = openRetentionArchiveReadyJournal(archiveRootPath);
+  const moveJournalPath = moveJournal.journalPath;
+  const totalBytes = candidates.reduce((sum, entry) => sum + entry.bytes, 0);
+  let movedBytes = 0;
+  let movedRunCount = 0;
+  const failures = [];
+  try {
+    appendRetentionArchiveReadyJournal(moveJournal.descriptor, {
+      at: nowIso(),
+      status: "move-plan-started",
+      planId: plan.planId,
+      planFingerprint: plan.fingerprint,
+      readyFolderPath,
+      runs: candidates.map(run => ({
+        folderName: run.folderName,
+        directoryFingerprint: run.directoryFingerprint,
+        bytes: run.bytes
+      }))
+    });
+
+    candidates.forEach((run, index) => {
+      progress({
+        step: `Moving expired archive ${run.folderName}`,
+        completed: index,
+        total: candidates.length,
+        completedBytes: movedBytes,
+        totalBytes
+      });
+      let sourceFolderPath = path.join(archiveRootPath, run.folderName);
+      let destinationFolderPath = plannedDestinations.get(run.folderName)
+        || path.join(readyFolderPath, run.folderName);
+      let moved = false;
+      try {
+        // Recheck the complete run immediately before moving it. Earlier runs may
+        // take long enough for OneDrive or another process to change a later run.
+        sourceFolderPath = assertVersionHistoryArchiveRunReadyForMove(
+          archiveRootPath,
+          run
+        );
+        destinationFolderPath = assertVersionHistoryArchiveReadyDestinationAvailable(
+          configuredRootFolderPath,
+          archiveRootPath,
+          readyFolderPath,
+          run
+        );
+        appendRetentionArchiveReadyJournal(moveJournal.descriptor, {
+          at: nowIso(),
+          status: "moving-to-manual-deletion",
+          planId: plan.planId,
+          folderName: run.folderName,
+          sourceFolderPath,
+          destinationFolderPath,
+          directoryFingerprint: run.directoryFingerprint,
+          bytes: run.bytes
+        });
+        // Keep the final boundary check adjacent to the rename. This operation
+        // intentionally has no copy-and-delete fallback.
+        ({
+          sourceFolderPath,
+          destinationFolderPath
+        } = assertVersionHistoryArchiveRenameBoundaryCurrent(
+          configuredRootFolderPath,
+          archiveRootPath,
+          readyFolderPath,
+          run
+        ));
+        fs.renameSync(sourceFolderPath, destinationFolderPath);
+        moved = true;
+        movedRunCount += 1;
+        movedBytes += run.bytes;
+        assertVersionHistoryArchiveRunMoved(readyFolderPath, destinationFolderPath);
+        try {
+          appendRetentionArchiveReadyJournal(moveJournal.descriptor, {
+            at: nowIso(),
+            status: "ready-for-manual-deletion",
+            planId: plan.planId,
+            folderName: run.folderName,
+            sourceFolderPath,
+            destinationFolderPath,
+            directoryFingerprint: run.directoryFingerprint,
+            bytes: run.bytes
+          });
+        } catch {}
+      } catch (error) {
+        failures.push({
+          folderName: run.folderName,
+          sourceFolderPath,
+          destinationFolderPath,
+          moved,
+          error: error?.message || String(error)
+        });
+        try {
+          appendRetentionArchiveReadyJournal(moveJournal.descriptor, {
+            at: nowIso(),
+            status: "move-failed",
+            planId: plan.planId,
+            folderName: run.folderName,
+            sourceFolderPath,
+            destinationFolderPath,
+            moved,
+            directoryFingerprint: run.directoryFingerprint,
+            error: error?.message || String(error)
+          });
+        } catch {}
+      }
+    });
+    progress({
+      step: failures.length
+        ? "Manual-deletion preparation completed with errors"
+        : "Expired archives are ready for manual deletion",
+      completed: candidates.length,
+      total: candidates.length,
+      completedBytes: movedBytes,
+      totalBytes
+    });
+    return {
+      ok: failures.length === 0,
+      status: failures.length ? "partial" : "complete",
+      planId: plan.planId,
+      movedRunCount,
+      movedBytes,
+      readyForManualDeletionFolderPath: readyFolderPath,
+      readyForManualDeletion: versionHistoryArchiveReadyStatus({
+        rootFolderPath: configuredRootFolderPath
+      }),
+      moveJournalPath,
+      failedRunCount: failures.length,
+      failures
+    };
+  } finally {
+    try {
+      fs.closeSync(moveJournal.descriptor);
+    } catch {}
+  }
+}
+
+function moveExpiredVersionHistoryArchiveRunsToManualDeletion(
+  plan,
+  options = {},
+  progress = () => {}
+) {
+  return moveVersionHistoryRetentionArchiveExpiryPlan(plan, options, progress);
 }
 
 function versionHistoryTransactionWrite(state, options = {}) {
@@ -1784,9 +4410,13 @@ function versionHistoryTransactionWrite(state, options = {}) {
   if (existingPayload) {
     assertVersionHistoryPreservesExistingText(existingPayload, nextPayload, existingHistoryPath);
   }
+  const previousBuffer = fileExists(filePath) ? fs.readFileSync(filePath) : null;
+  const previousContent = previousBuffer === null ? null : previousBuffer.toString("utf8");
+  const previousFilePayload = previousContent === null ? null : parseVersionHistoryJson(previousContent);
+  if (previousFilePayload) stabilizeVersionHistoryPayloadMetadata(previousFilePayload, nextPayload);
   const content = `${JSON.stringify(nextPayload, null, 2)}\n`;
-  if (fileExists(filePath) && fs.readFileSync(filePath, "utf8") !== content) {
-    backupExistingVersionHistoryJson(rootFolderPath, source, filePath);
+  if (previousContent !== null && previousContent !== content) {
+    backupExistingVersionHistoryJson(rootFolderPath, source, filePath, previousBuffer);
   }
   return {
     filePath,
@@ -2677,7 +5307,15 @@ function versionSummaryPeriodGroups(entries) {
   return groups;
 }
 
-function versionSummaryPeriodLabel(period) {
+function versionSummaryPeriodVersionLabel(period) {
+  const firstEntry = period?.entries?.[0];
+  const lastEntry = period?.entries?.[period.entries.length - 1];
+  const firstVersion = Number.isInteger(firstEntry?.index) ? firstEntry.index + 1 : 1;
+  const lastVersion = Number.isInteger(lastEntry?.index) ? lastEntry.index + 1 : firstVersion;
+  return `Versions ${firstVersion} - ${lastVersion}`;
+}
+
+function versionSummaryPeriodDateLabel(period) {
   const first = formatDate(period.firstIso);
   const last = formatDate(period.lastIso);
   return first === last ? first : `${first} to ${last}`;
@@ -2702,7 +5340,15 @@ function fullSummaryDraftChangeHtml(left, right, index) {
   return {
     anchor,
     title,
-    html: `<article id="${escapeHtml(anchor)}" class="draft-change"><h3>${escapeHtml(title)}</h3><p class="meta">${escapeHtml(meta)}</p>${body}</article>`
+    html: `
+      <details id="${escapeHtml(anchor)}" class="draft-change" data-collapsible>
+        <summary class="draft-change-summary">
+          <span class="draft-change-title">${escapeHtml(title)}</span>
+          <span class="meta">${escapeHtml(meta)}</span>
+        </summary>
+        <div class="draft-change-content">${body}</div>
+      </details>
+    `
   };
 }
 
@@ -2716,12 +5362,53 @@ function fullSummaryDraftBaselineHtml(draft) {
   return {
     anchor,
     title,
-    html: `<article id="${anchor}" class="draft-change"><h3>${escapeHtml(title)}</h3><p class="meta">First draft baseline; no earlier draft to compare.</p>${body}</article>`
+    html: `
+      <details id="${anchor}" class="draft-change" data-collapsible>
+        <summary class="draft-change-summary">
+          <span class="draft-change-title">${escapeHtml(title)}</span>
+          <span class="meta">First draft baseline; no earlier draft to compare.</span>
+        </summary>
+        <div class="draft-change-content">${body}</div>
+      </details>
+    `
   };
 }
 
 function contentsCountText(count, singular, plural = `${singular}s`) {
   return `${count.toLocaleString("en-GB")} ${count === 1 ? singular : plural}`;
+}
+
+function nestedSummaryActionsHtml(label, nestedCount) {
+  if (nestedCount < 2) return "";
+  return `
+    <span class="nested-actions" role="group" aria-label="${escapeHtml(`${label} controls`)}">
+      <button class="nested-action" type="button" data-nested-action="expand">Expand all</button>
+      <button class="nested-action" type="button" data-nested-action="collapse">Collapse all</button>
+    </span>
+  `;
+}
+
+function versionSummaryPageMetaHtml(page) {
+  const firstVersion = page.versions[0];
+  const lastVersion = page.versions[page.versions.length - 1];
+  const createdAt = asText(page.page?.createdAt) || asText(firstVersion?.createdAt);
+  const parts = [escapeHtml(page.type)];
+
+  if (createdAt) {
+    parts.push(`Created <time datetime="${escapeHtml(createdAt)}">${escapeHtml(formatDate(createdAt))}</time>`);
+  }
+  if (firstVersion?.createdAt && lastVersion?.createdAt) {
+    parts.push(
+      `Version dates <time datetime="${escapeHtml(firstVersion.createdAt)}">${escapeHtml(formatDate(firstVersion.createdAt))}</time>`
+      + ` to <time datetime="${escapeHtml(lastVersion.createdAt)}">${escapeHtml(formatDate(lastVersion.createdAt))}</time>`
+    );
+  }
+  parts.push(
+    `${page.reportVersions.length.toLocaleString("en-GB")} text-changing `
+    + `${page.reportVersions.length === 1 ? "version" : "versions"} shown`
+  );
+
+  return parts.join(' <span class="meta-separator" aria-hidden="true">&middot;</span> ');
 }
 
 function versionChangeDiffHtml(previousVersion, version) {
@@ -2801,7 +5488,11 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
               data-collapsible
             >
               <summary>
-                <span>${escapeHtml(versionSummaryPeriodLabel(period))}</span>
+                <span class="contents-period-label">
+                  <span>${escapeHtml(versionSummaryPeriodVersionLabel(period))}</span>
+                  <span class="meta-separator" aria-hidden="true">&middot;</span>
+                  <span class="contents-period-dates">${escapeHtml(versionSummaryPeriodDateLabel(period))}</span>
+                </span>
                 <span class="contents-count">${escapeHtml(contentsCountText(period.entries.length, "version"))}</span>
               </summary>
               <ul>${period.entries.map(({ entry, index }) => `<li><a href="#${escapeHtml(`${page.anchor}-version-${index + 1}`)}">${escapeHtml(versionHeadingLabel(index, page.reportVersions.length))} (${escapeHtml(formatDate(entry.version.createdAt))})</a></li>`).join("")}</ul>
@@ -2811,8 +5502,16 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
       : '<p class="contents-empty">No text-changing versions.</p>';
     return `
       <li>
-        <details class="contents-group" data-collapsible>
-          <summary><a href="#${escapeHtml(page.anchor)}">${escapeHtml(page.title)}</a><span class="contents-count">${escapeHtml(contentsCountText(page.reportVersions.length, "version"))}</span></summary>
+        <details
+          class="contents-group"
+          data-collapsible
+          ${page.reportVersionPeriods.length > 1 ? "data-nested-container" : ""}
+        >
+          <summary${page.reportVersionPeriods.length > 1 ? ' class="contents-summary-with-actions"' : ""}>
+            <a href="#${escapeHtml(page.anchor)}">${escapeHtml(page.title)}</a>
+            <span class="contents-count">${escapeHtml(contentsCountText(page.reportVersions.length, "version"))}</span>
+            ${nestedSummaryActionsHtml(`${page.title} contents`, page.reportVersionPeriods.length)}
+          </summary>
           ${versionLinksHtml}
         </details>
       </li>
@@ -2827,8 +5526,16 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
         </details>
       </li>
       <li>
-        <details class="contents-group" data-collapsible>
-          <summary><a href="#version-history">Version history</a><span class="contents-count">${escapeHtml(contentsCountText(pages.length, "page"))}</span></summary>
+        <details
+          class="contents-group"
+          data-collapsible
+          ${pages.length > 1 ? "data-nested-container" : ""}
+        >
+          <summary${pages.length > 1 ? ' class="contents-summary-with-actions"' : ""}>
+            <a href="#version-history">Version history</a>
+            <span class="contents-count">${escapeHtml(contentsCountText(pages.length, "page"))}</span>
+            ${nestedSummaryActionsHtml("Version history contents", pages.length)}
+          </summary>
           <ul>${versionPageLinksHtml}</ul>
         </details>
       </li>
@@ -2851,13 +5558,15 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
       }
       await tick(`Rendering ${page.title}: ${versionHeadingLabel(index, page.reportVersions.length)}`);
       versionArticles.push(`
-        <article id="${escapeHtml(`${page.anchor}-version-${index + 1}`)}" class="version-entry">
-          <header class="version-heading">
-            <h3>${escapeHtml(versionHeadingLabel(index, page.reportVersions.length))}</h3>
-            <p class="meta"><time datetime="${escapeHtml(version.createdAt)}">${escapeHtml(formatDate(version.createdAt))}</time> · ${versionWordCount(version).toLocaleString("en-GB")} ${versionWordCount(version) === 1 ? "word" : "words"}</p>
-          </header>
-          ${changeHtml}
-        </article>
+        <details id="${escapeHtml(`${page.anchor}-version-${index + 1}`)}" class="version-entry" data-collapsible>
+          <summary class="version-heading">
+            <span class="version-entry-title">${escapeHtml(versionHeadingLabel(index, page.reportVersions.length))}</span>
+            <span class="meta"><time datetime="${escapeHtml(version.createdAt)}">${escapeHtml(formatDate(version.createdAt))}</time> · ${versionWordCount(version).toLocaleString("en-GB")} ${versionWordCount(version) === 1 ? "word" : "words"}</span>
+          </summary>
+          <div class="version-entry-content">
+            ${changeHtml}
+          </div>
+        </details>
       `);
       completed += 1;
     }
@@ -2868,10 +5577,15 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
         data-version-period-start="${escapeHtml(period.firstIso)}"
         data-version-period-end="${escapeHtml(period.lastIso)}"
         data-collapsible
+        ${period.entries.length > 1 ? "data-nested-container" : ""}
       >
         <summary>
-          <span class="version-period-title">${escapeHtml(versionSummaryPeriodLabel(period))}</span>
+          <span class="version-period-label">
+            <span class="version-period-title">${escapeHtml(versionSummaryPeriodVersionLabel(period))}</span>
+            <span class="version-period-dates">${escapeHtml(versionSummaryPeriodDateLabel(period))}</span>
+          </span>
           <span class="version-period-count">${escapeHtml(contentsCountText(period.entries.length, "version"))}</span>
+          ${nestedSummaryActionsHtml(versionSummaryPeriodVersionLabel(period), period.entries.length)}
         </summary>
         ${period.entries.map(({ index }) => versionArticles[index]).join("\n")}
       </details>
@@ -2884,10 +5598,16 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
       : "";
 
     versionSections.push(`
-      <details id="${escapeHtml(page.anchor)}" class="history-page-section" data-collapsible>
+      <details
+        id="${escapeHtml(page.anchor)}"
+        class="history-page-section"
+        data-collapsible
+        ${page.reportVersions.length > 1 ? "data-nested-container" : ""}
+      >
         <summary>
           <span class="section-title">${escapeHtml(page.title)}</span>
-          <span class="section-summary-meta">${escapeHtml(page.type)} · ${page.reportVersions.length.toLocaleString("en-GB")} text-changing ${page.reportVersions.length === 1 ? "version" : "versions"} shown</span>
+          <span class="section-summary-meta">${versionSummaryPageMetaHtml(page)}</span>
+          ${nestedSummaryActionsHtml(`${page.title} version history`, page.reportVersions.length)}
         </summary>
         ${skippedVersionMetaHtml}
         ${versionPeriodsHtml}
@@ -2940,6 +5660,10 @@ h4{margin:0 0 5px;color:var(--fg-subtle);font-size:10.5px;font-weight:700;letter
 .summary-button:first-child{border-radius:var(--r-sm) 0 0 var(--r-sm)}
 .summary-button:last-child{margin-left:-1px;border-radius:0 var(--r-sm) var(--r-sm) 0}
 .summary-button:hover{position:relative;background:var(--hover);border-color:var(--accent)}
+.nested-actions{display:inline-flex;align-items:center;justify-self:end;white-space:nowrap}
+.nested-action{min-height:24px;margin:0;padding:2px 6px;border:0;background:transparent;color:var(--accent-deep);cursor:pointer;font-size:10.5px;font-weight:650;line-height:1}
+.nested-action+.nested-action{border-left:1px solid var(--border)}
+.nested-action:hover{background:var(--hover);text-decoration:underline}
 .contents-page ul{margin:6px 0 0;padding:0;list-style:none}
 .contents-page li{margin:1px 0}
 .contents-group{margin:2px 0}
@@ -2948,44 +5672,66 @@ details[data-collapsible]>summary::-webkit-details-marker{display:none}
 details[data-collapsible]>summary::before{content:"";width:6px;height:6px;border-right:1.5px solid var(--fg-muted);border-bottom:1.5px solid var(--fg-muted);transform:translateY(-1px) rotate(45deg);transition:transform 120ms ease}
 details[data-collapsible][open]>summary::before{transform:translateY(1px) rotate(225deg)}
 .contents-group>summary{min-width:0;display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:7px;min-height:27px;padding:3px 6px;border-radius:var(--r-sm);cursor:pointer;font-size:12.5px;font-weight:650}
+.contents-group>summary.contents-summary-with-actions{grid-template-columns:8px minmax(0,1fr) auto auto}
+.contents-summary-with-actions>.nested-actions{grid-column:4}
 .contents-group>summary:hover{background:var(--hover)}
 .contents-group>summary>a,.contents-group>summary>span:not(.contents-count){min-width:0;overflow-wrap:anywhere}
+.contents-period-label{display:flex;flex-wrap:wrap;align-items:baseline;gap:0 4px}
+.contents-period-dates{color:var(--fg-subtle);font-weight:400}
 .contents-count{color:var(--fg-subtle);font-size:10.5px;font-weight:400;font-variant-numeric:tabular-nums;white-space:nowrap}
 .contents-group>ul{margin-left:10px;padding-left:11px;border-left:1px solid var(--border)}
 .contents-empty{margin:6px 0 2px 21px;color:var(--fg-muted);font-size:11.5px}
 .report-section{margin:24px 0 0;border-top:1px solid var(--border)}
-.report-section>summary,.history-page-section>summary{min-width:0;display:grid;grid-template-columns:8px minmax(0,1fr);align-items:center;gap:2px 9px;cursor:pointer}
+.report-section>summary,.history-page-section>summary{min-width:0;display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:2px 9px;cursor:pointer}
 .report-section>summary{padding:10px 4px}
 .report-section>summary:hover,.history-page-section>summary:hover,.version-period>summary:hover{background:var(--hover)}
 .report-section>summary::before,.history-page-section>summary::before{grid-row:1 / span 2}
 .section-title{grid-column:2;min-width:0;font-family:var(--font-title);font-size:18px;font-weight:600;letter-spacing:0;line-height:1.2;overflow-wrap:anywhere}
-.section-summary-meta{grid-column:2;color:var(--fg-subtle);font-size:11px;font-variant-numeric:tabular-nums;line-height:1.35}
-.draft-change{margin:8px 0;padding:12px 14px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface)}
-.draft-change:target,.version-entry:target{scroll-margin-top:12px;background:var(--accent-soft);box-shadow:inset 3px 0 var(--accent)}
+.section-summary-meta{grid-column:2;min-width:0;color:var(--fg-subtle);font-size:11px;font-variant-numeric:tabular-nums;line-height:1.35;overflow-wrap:anywhere}
+.report-section>summary>.nested-actions,.history-page-section>summary>.nested-actions{grid-column:3;grid-row:1 / span 2}
+.draft-change{margin:8px 0;overflow:hidden;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface)}
+.draft-change:target{scroll-margin-top:12px;background:var(--accent-soft);box-shadow:inset 3px 0 var(--accent)}
+.draft-change>summary{min-width:0;display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:baseline;gap:8px;min-height:38px;padding:7px 13px;cursor:pointer}
+.draft-change>summary:hover{background:var(--hover)}
+.draft-change[open]>summary{border-bottom:1px solid var(--border);background:var(--surface-alt)}
+.draft-change>summary::before{align-self:center}
+.draft-change-title{min-width:0;font-family:var(--font-title);font-size:14px;font-weight:600;line-height:1.3;overflow-wrap:anywhere}
+.draft-change>summary .meta{min-width:0;margin:0;text-align:right}
+.draft-change-content{padding:11px 14px 13px}
+.draft-change-content>p{margin:0}
 #version-history>h2{margin-bottom:9px}
 .history-page-section{margin:8px 0;overflow:hidden;border:1px solid var(--border);border-radius:var(--r);background:var(--surface)}
 .history-page-section>summary{padding:9px 11px;background:var(--surface-alt)}
 .history-page-section .section-title{font-size:15.5px}
 .history-page-section>.meta{margin:0;padding:7px 12px;border-top:1px solid var(--border)}
 .version-period{margin:0;border-top:1px solid var(--border)}
-.version-period>summary{min-width:0;display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:8px;min-height:38px;padding:7px 12px;cursor:pointer;background:var(--surface)}
+.version-period>summary{min-width:0;display:grid;grid-template-columns:8px minmax(0,1fr) auto auto;align-items:center;gap:8px;min-height:38px;padding:7px 12px;cursor:pointer;background:var(--surface)}
 .version-period[open]>summary{border-bottom:1px solid var(--border);background:var(--surface-alt)}
+.version-period-label{min-width:0}
 .version-period-title{min-width:0;font-size:12.5px;font-weight:650;line-height:1.35;overflow-wrap:anywhere}
+.version-period-dates{display:block;color:var(--fg-subtle);font-size:10.5px;font-variant-numeric:tabular-nums;line-height:1.35;overflow-wrap:anywhere}
 .version-period-count{color:var(--fg-subtle);font-size:10.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
-.version-entry{margin:0;padding:12px 14px;background:var(--surface)}
+.version-period>summary>.nested-actions{grid-column:4}
+.version-entry{margin:0;background:var(--surface);scroll-margin-top:12px}
 .version-entry+.version-entry{border-top:1px solid var(--border)}
-.version-heading{display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border)}
-.version-heading .meta{flex:0 0 auto;margin:0;text-align:right;white-space:nowrap}
+.version-entry>summary.version-heading{min-width:0;display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:baseline;gap:8px;min-height:36px;padding:7px 14px;cursor:pointer;background:var(--surface)}
+.version-entry>summary.version-heading:hover{background:var(--hover)}
+.version-entry[open]>summary.version-heading{border-bottom:1px solid var(--border);background:var(--surface-alt)}
+.version-entry:target>summary.version-heading{background:var(--accent-soft);box-shadow:inset 3px 0 var(--accent)}
+.version-entry>summary.version-heading::before{align-self:center}
+.version-entry-title{min-width:0;font-family:var(--font-title);font-size:14px;font-weight:600;line-height:1.3;overflow-wrap:anywhere}
+.version-heading .meta{min-width:0;margin:0;text-align:right;white-space:nowrap}
+.version-entry-content{padding:11px 14px 13px}
 .version-change{margin:0}
 .version-change>.meta{margin:0 0 8px}
 .final-draft-diff-text,.version-change-diff{white-space:pre-wrap;color:var(--fg);font:15px/1.62 var(--font-ui);overflow-wrap:anywhere}
 .compare-token{border-radius:2px;padding:0 2px;text-decoration-thickness:1.6px;text-underline-offset:2px}
 .compare-token.added{background:var(--diff-add-bg);color:var(--diff-add);text-decoration:underline}
 .compare-token.removed{background:var(--diff-del-bg);color:var(--diff-del);text-decoration:line-through}
-@media(max-width:720px){main{padding:16px 14px 42px}.report-header{display:grid;gap:7px}.report-meta{max-width:none;text-align:left}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.summary-stat:nth-child(2n){border-right:0}.summary-stat:nth-child(-n+2){border-bottom:1px solid var(--border)}.version-heading{display:block}.version-heading .meta{margin-top:3px;text-align:left;white-space:normal}}
-@media(max-width:560px){.contents-header{align-items:flex-start;flex-direction:column}}
+@media(max-width:720px){main{padding:16px 14px 42px}.report-header{display:grid;gap:7px}.report-meta{max-width:none;text-align:left}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.summary-stat:nth-child(2n){border-right:0}.summary-stat:nth-child(-n+2){border-bottom:1px solid var(--border)}.draft-change>summary,.version-entry>summary.version-heading{grid-template-columns:8px minmax(0,1fr)}.draft-change>summary .meta,.version-heading .meta{grid-column:2;margin-top:2px;text-align:left;white-space:normal}}
+@media(max-width:560px){.contents-header{align-items:flex-start;flex-direction:column}.contents-group>summary.contents-summary-with-actions{grid-template-columns:8px minmax(0,1fr) auto}.contents-summary-with-actions>.nested-actions{grid-column:2 / -1;justify-self:end}.report-section>summary,.history-page-section>summary,.version-period>summary{grid-template-columns:8px minmax(0,1fr)}.report-section>summary>.nested-actions,.history-page-section>summary>.nested-actions{grid-column:2;grid-row:3;justify-self:end}.version-period-count,.version-period>summary>.nested-actions{grid-column:2}.version-period>summary>.nested-actions{justify-self:end}}
 @media(max-width:440px){h1{font-size:21px}.summary-grid{grid-template-columns:1fr}.summary-stat{border-right:0!important;border-bottom:1px solid var(--border)}.summary-stat:last-child{border-bottom:0}.contents-group>ul{margin-left:6px;padding-left:8px}.history-page-section>summary,.version-period>summary{padding-left:9px;padding-right:9px}.version-period>summary{grid-template-columns:8px minmax(0,1fr)}.version-period-count{grid-column:2}.final-draft-diff-text,.version-change-diff{font-size:14.5px}}
-@media print{body{background:#fff;color:#111;font-size:11pt}main{width:auto;max-width:none;padding:0}.summary-actions{display:none}.report-header,.summary-grid,.contents-page,.report-section,.history-page-section,.version-period,.draft-change,.version-entry{background:#fff;box-shadow:none}.draft-change,.version-entry{break-inside:auto}details[data-collapsible]:not([open])>:not(summary){display:block}details[data-collapsible]>summary{list-style:none}details[data-collapsible]>summary::before{display:none}a{color:inherit;text-decoration:none}}
+@media print{body{background:#fff;color:#111;font-size:11pt}main{width:auto;max-width:none;padding:0}.summary-actions,.nested-actions{display:none}.report-header,.summary-grid,.contents-page,.report-section,.history-page-section,.version-period,.draft-change,.version-entry{background:#fff;box-shadow:none}.draft-change,.version-entry{break-inside:auto}details[data-collapsible]:not([open])>:not(summary){display:block}details[data-collapsible]>summary{list-style:none}details[data-collapsible]>summary::before{display:none}a{color:inherit;text-decoration:none}}
 </style>
 </head>
 <body>
@@ -3016,10 +5762,16 @@ details[data-collapsible][open]>summary::before{transform:translateY(1px) rotate
 </div>
 ${contentsHtml}
 </nav>
-<details id="draft-changes" class="report-section" data-collapsible>
+<details
+  id="draft-changes"
+  class="report-section"
+  data-collapsible
+  ${draftChanges.length > 1 ? "data-nested-container" : ""}
+>
 <summary>
   <span class="section-title">Draft changes</span>
   <span class="section-summary-meta">${draftChanges.length.toLocaleString("en-GB")} ${draftChanges.length === 1 ? "comparison" : "comparisons"}</span>
+  ${nestedSummaryActionsHtml("Draft changes", draftChanges.length)}
 </summary>
 ${draftChanges.length ? draftChanges.map(change => change.html).join("\n") : "<p>No draft-to-draft changes to show.</p>"}
 </details>
@@ -3061,6 +5813,22 @@ ${versionSections.join("\n")}
   }
 
   document.addEventListener("click", function (event) {
+    var nestedActionButton = event.target.closest("[data-nested-action]");
+    if (nestedActionButton) {
+      event.preventDefault();
+      event.stopPropagation();
+      var nestedContainer = nestedActionButton.closest("[data-nested-container]");
+      if (!nestedContainer) return;
+      var shouldExpandNested = nestedActionButton.getAttribute("data-nested-action") === "expand";
+      if (shouldExpandNested) nestedContainer.open = true;
+      Array.prototype.slice.call(
+        nestedContainer.querySelectorAll("details[data-collapsible]")
+      ).forEach(function (details) {
+        details.open = shouldExpandNested;
+      });
+      return;
+    }
+
     var actionButton = event.target.closest("[data-summary-action]");
     if (actionButton) {
       var shouldOpen = actionButton.getAttribute("data-summary-action") === "expand";
@@ -3300,6 +6068,470 @@ function versionHistorySummaryJobProgress(jobId) {
   return job
     ? { ok: true, progress: versionSummaryJobSnapshot(job) }
     : { ok: false, error: "Summary job not found" };
+}
+
+function versionHistoryRetentionJobSnapshot(job) {
+  if (!job) return null;
+  const elapsedMs = Date.now() - new Date(job.startedAt).getTime();
+  return {
+    id: job.id,
+    operation: job.operation,
+    planId: job.planId,
+    ok: job.status !== "failed" && job.result?.ok !== false,
+    status: job.status,
+    step: job.step,
+    completed: job.completed,
+    total: job.total,
+    completedBytes: job.completedBytes,
+    totalBytes: job.totalBytes,
+    startedAt: job.startedAt,
+    updatedAt: job.updatedAt,
+    elapsedMs,
+    result: job.result || null,
+    error: job.error || "",
+    errorCode: job.errorCode || ""
+  };
+}
+
+function updateVersionHistoryRetentionJob(job, patch = {}) {
+  Object.assign(job, patch, { updatedAt: nowIso() });
+}
+
+function scheduleVersionHistoryRetentionJobCleanup(job) {
+  if (job.cleanupTimer) return;
+  job.cleanupTimer = setTimeout(() => {
+    versionHistoryRetentionJobs.delete(job.id);
+  }, 60 * 60_000);
+  job.cleanupTimer.unref?.();
+}
+
+function completeVersionHistoryRetentionJob(job, patch = {}) {
+  updateVersionHistoryRetentionJob(job, patch);
+  scheduleVersionHistoryRetentionJobCleanup(job);
+}
+
+function storeVersionHistoryRetentionPlan(plan) {
+  const record = {
+    plan,
+    inUse: false,
+    used: false,
+    createdAt: nowIso(),
+    cleanupTimer: null
+  };
+  record.cleanupTimer = setTimeout(() => {
+    const current = versionHistoryRetentionPlans.get(plan.planId);
+    if (current === record && !current.inUse) versionHistoryRetentionPlans.delete(plan.planId);
+  }, 2 * 60 * 60_000);
+  record.cleanupTimer.unref?.();
+  versionHistoryRetentionPlans.set(plan.planId, record);
+  return record;
+}
+
+function storeVersionHistoryArchiveExpiryPlan(plan) {
+  const record = {
+    plan,
+    inUse: false,
+    used: false,
+    createdAt: nowIso(),
+    cleanupTimer: null
+  };
+  record.cleanupTimer = setTimeout(() => {
+    const current = versionHistoryArchiveExpiryPlans.get(plan.planId);
+    if (current === record && !current.inUse) versionHistoryArchiveExpiryPlans.delete(plan.planId);
+  }, 2 * 60 * 60_000);
+  record.cleanupTimer.unref?.();
+  versionHistoryArchiveExpiryPlans.set(plan.planId, record);
+  return record;
+}
+
+function versionHistoryRetentionMutationRootKey(rootFolderPath) {
+  const resolved = path.resolve(rootFolderPath);
+  return process.platform === "win32" ? resolved.toLowerCase() : resolved;
+}
+
+function activeVersionHistoryRetentionMutationJobId() {
+  return versionHistoryRetentionMutationRoots.values().next().value || "";
+}
+
+function assertVersionHistoryRetentionMutationIdle() {
+  const activeJobId = activeVersionHistoryRetentionMutationJobId();
+  if (!activeJobId) return;
+  const error = new Error("Backup storage cannot be changed while a storage operation is running.");
+  error.code = "VERSION_HISTORY_RETENTION_BUSY";
+  error.statusCode = 409;
+  error.activeJobId = activeJobId;
+  throw error;
+}
+
+function assertVersionHistoryRetentionRootChangeAllowed(folderPath) {
+  const currentRootFolderPath = normalizedRegistryPath(readVersionHistoryFolderPath());
+  const nextRootFolderPath = normalizedRegistryPath(folderPath);
+  if (
+    (!currentRootFolderPath && !nextRootFolderPath)
+    || sameHistoryPath(currentRootFolderPath, nextRootFolderPath)
+  ) {
+    return;
+  }
+  assertVersionHistoryRetentionMutationIdle();
+}
+
+function acquireVersionHistoryRetentionMutation(job, rootFolderPath) {
+  const rootKey = versionHistoryRetentionMutationRootKey(rootFolderPath);
+  const activeJobId = versionHistoryRetentionMutationRoots.get(rootKey);
+  if (activeJobId) {
+    const error = new Error("Another version-history storage operation is already running for this backup folder.");
+    error.code = "VERSION_HISTORY_RETENTION_BUSY";
+    error.statusCode = 409;
+    error.activeJobId = activeJobId;
+    throw error;
+  }
+  versionHistoryRetentionMutationRoots.set(rootKey, job.id);
+  job.mutationRootKey = rootKey;
+}
+
+function releaseVersionHistoryRetentionMutation(job) {
+  const rootKey = job?.mutationRootKey;
+  if (!rootKey) return;
+  if (versionHistoryRetentionMutationRoots.get(rootKey) === job.id) {
+    versionHistoryRetentionMutationRoots.delete(rootKey);
+  }
+  job.mutationRootKey = "";
+}
+
+function versionHistoryRetentionWorkerSource() {
+  return `
+    const { parentPort, workerData } = require("node:worker_threads");
+    Promise.resolve()
+      .then(() => {
+        const server = require(workerData.serverPath);
+        const progress = value => parentPort.postMessage({ type: "progress", progress: value });
+        if (workerData.operation === "preview") {
+          return server.previewVersionHistoryBackupRetention(workerData.options, progress);
+        }
+        if (workerData.operation === "archive") {
+          return server.archiveVersionHistoryBackupRetentionPlan(
+            workerData.plan,
+            workerData.options,
+            progress
+          );
+        }
+        if (workerData.operation === "archive-expiry-preview") {
+          return server.previewVersionHistoryArchiveExpiry(workerData.options, progress);
+        }
+        if (workerData.operation === "archive-expiry-move") {
+          return server.moveExpiredVersionHistoryArchiveRunsToManualDeletion(
+            workerData.plan,
+            workerData.options,
+            progress
+          );
+        }
+        throw new Error("Unknown version-history retention worker operation.");
+      })
+      .then(result => parentPort.postMessage({ type: "complete", result }))
+      .catch(error => {
+        parentPort.postMessage({
+          type: "error",
+          error: error && error.stack ? error.stack : String(error),
+          message: error && error.message ? error.message : String(error),
+          code: error && error.code ? error.code : "",
+          statusCode: error && error.statusCode ? error.statusCode : 500
+        });
+      });
+  `;
+}
+
+function startVersionHistoryRetentionWorker(job, workerData) {
+  const worker = new Worker(versionHistoryRetentionWorkerSource(), {
+    eval: true,
+    workerData: {
+      serverPath: __filename,
+      ...workerData
+    }
+  });
+  job.worker = worker;
+  worker.on("message", message => {
+    if (message?.type === "progress") {
+      const progress = message.progress || {};
+      updateVersionHistoryRetentionJob(job, {
+        status: "running",
+        step: progress.step || job.step,
+        completed: Number.isFinite(progress.completed) ? progress.completed : job.completed,
+        total: Number.isFinite(progress.total) ? progress.total : job.total,
+        completedBytes: Number.isFinite(progress.completedBytes)
+          ? progress.completedBytes
+          : job.completedBytes,
+        totalBytes: Number.isFinite(progress.totalBytes) ? progress.totalBytes : job.totalBytes
+      });
+      return;
+    }
+    if (message?.type === "complete") {
+      if (job.operation === "preview") storeVersionHistoryRetentionPlan(message.result);
+      if (job.operation === "archive-expiry-preview") {
+        storeVersionHistoryArchiveExpiryPlan(message.result);
+      }
+      const planRecord = job.operation === "archive-expiry-move"
+        ? versionHistoryArchiveExpiryPlans.get(job.planId)
+        : versionHistoryRetentionPlans.get(job.planId);
+      if (job.operation === "archive" && planRecord) {
+        planRecord.inUse = false;
+        planRecord.used = true;
+      }
+      if (job.operation === "archive-expiry-move" && planRecord) {
+        planRecord.inUse = false;
+        planRecord.used = true;
+      }
+      const partialMutation = (
+        job.operation === "archive"
+        || job.operation === "archive-expiry-move"
+      ) && message.result?.ok === false;
+      releaseVersionHistoryRetentionMutation(job);
+      completeVersionHistoryRetentionJob(job, {
+        status: partialMutation ? "failed" : "complete",
+        step: partialMutation ? "Completed with errors" : "Complete",
+        completed: job.total || 1,
+        completedBytes: job.totalBytes || job.completedBytes,
+        result: message.result || null,
+        error: partialMutation
+          ? job.operation === "archive-expiry-move"
+            ? `${Number(message.result?.failedRunCount || 0).toLocaleString("en-GB")} expired archive run${Number(message.result?.failedRunCount || 0) === 1 ? "" : "s"} could not be prepared for manual deletion.`
+            : `${Number(message.result?.failedFileCount || 0).toLocaleString("en-GB")} backup file${Number(message.result?.failedFileCount || 0) === 1 ? "" : "s"} could not be archived.`
+          : "",
+        errorCode: partialMutation
+          ? job.operation === "archive-expiry-move"
+            ? "VERSION_HISTORY_ARCHIVE_EXPIRY_PARTIAL"
+            : "VERSION_HISTORY_RETENTION_PARTIAL"
+          : ""
+      });
+      return;
+    }
+    if (message?.type === "error") {
+      const planRecord = job.operation === "archive-expiry-move"
+        ? versionHistoryArchiveExpiryPlans.get(job.planId)
+        : versionHistoryRetentionPlans.get(job.planId);
+      if (job.operation === "archive" && planRecord) {
+        planRecord.inUse = false;
+        planRecord.used = true;
+      }
+      if (job.operation === "archive-expiry-move" && planRecord) {
+        planRecord.inUse = false;
+        planRecord.used = true;
+      }
+      releaseVersionHistoryRetentionMutation(job);
+      completeVersionHistoryRetentionJob(job, {
+        status: "failed",
+        step: "Failed",
+        error: message.message || message.error || "Retention worker failed",
+        errorCode: message.code || ""
+      });
+    }
+  });
+  worker.on("error", error => {
+    const planRecord = job.operation === "archive-expiry-move"
+      ? versionHistoryArchiveExpiryPlans.get(job.planId)
+      : versionHistoryRetentionPlans.get(job.planId);
+    if (job.operation === "archive" && planRecord) {
+      planRecord.inUse = false;
+      planRecord.used = true;
+    }
+    if (job.operation === "archive-expiry-move" && planRecord) {
+      planRecord.inUse = false;
+      planRecord.used = true;
+    }
+    releaseVersionHistoryRetentionMutation(job);
+    completeVersionHistoryRetentionJob(job, {
+      status: "failed",
+      step: "Failed",
+      error: error?.message || String(error),
+      errorCode: error?.code || ""
+    });
+  });
+  worker.on("exit", code => {
+    if (code && job.status !== "failed" && job.status !== "complete") {
+      const planRecord = job.operation === "archive-expiry-move"
+        ? versionHistoryArchiveExpiryPlans.get(job.planId)
+        : versionHistoryRetentionPlans.get(job.planId);
+      if (job.operation === "archive" && planRecord) {
+        planRecord.inUse = false;
+        planRecord.used = true;
+      }
+      if (job.operation === "archive-expiry-move" && planRecord) {
+        planRecord.inUse = false;
+        planRecord.used = true;
+      }
+      releaseVersionHistoryRetentionMutation(job);
+      completeVersionHistoryRetentionJob(job, {
+        status: "failed",
+        step: "Failed",
+        error: `Retention worker exited with code ${code}.`,
+        errorCode: "VERSION_HISTORY_RETENTION_WORKER_EXIT"
+      });
+    }
+    if (job.status === "complete" || job.status === "failed") {
+      releaseVersionHistoryRetentionMutation(job);
+      scheduleVersionHistoryRetentionJobCleanup(job);
+    }
+  });
+}
+
+function newVersionHistoryRetentionJob(operation, planId) {
+  const job = {
+    id: id(`retention-${operation}`),
+    operation,
+    planId,
+    status: "queued",
+    step: "Queued",
+    completed: 0,
+    total: 1,
+    completedBytes: 0,
+    totalBytes: 0,
+    startedAt: nowIso(),
+    updatedAt: nowIso(),
+    result: null,
+    error: "",
+    errorCode: ""
+  };
+  versionHistoryRetentionJobs.set(job.id, job);
+  return job;
+}
+
+function startVersionHistoryBackupRetentionPreview(options = {}) {
+  const rootFolderPath = normalizedRegistryPath(options.rootFolderPath)
+    || requireVersionHistoryFolderPath();
+  if (!rootFolderPath) {
+    throw new BackupFolderMissingError(readVersionHistoryFolderPath() || "No backup folder selected");
+  }
+  const planId = id("retention-plan");
+  const job = newVersionHistoryRetentionJob("preview", planId);
+  startVersionHistoryRetentionWorker(job, {
+    operation: "preview",
+    options: {
+      rootFolderPath,
+      planId,
+      now: options.now,
+      policy: options.policy
+    }
+  });
+  return {
+    ok: true,
+    jobId: job.id,
+    planId,
+    progress: versionHistoryRetentionJobSnapshot(job)
+  };
+}
+
+function archiveVersionHistoryBackupsFromPlanId(planId, options = {}) {
+  const normalizedPlanId = asText(planId).trim();
+  const planRecord = versionHistoryRetentionPlans.get(normalizedPlanId);
+  if (!planRecord) {
+    const error = new Error("Version-history retention plan not found or expired.");
+    error.code = "VERSION_HISTORY_RETENTION_PLAN_NOT_FOUND";
+    error.statusCode = 404;
+    throw error;
+  }
+  if (planRecord.inUse || planRecord.used) {
+    const error = new Error("Version-history retention plan has already been used.");
+    error.code = "VERSION_HISTORY_RETENTION_PLAN_USED";
+    error.statusCode = 409;
+    throw error;
+  }
+  planRecord.inUse = true;
+  const job = newVersionHistoryRetentionJob("archive", normalizedPlanId);
+  try {
+    acquireVersionHistoryRetentionMutation(job, planRecord.plan.rootFolderPath);
+    startVersionHistoryRetentionWorker(job, {
+      operation: "archive",
+      plan: planRecord.plan,
+      options
+    });
+  } catch (error) {
+    planRecord.inUse = false;
+    releaseVersionHistoryRetentionMutation(job);
+    versionHistoryRetentionJobs.delete(job.id);
+    throw error;
+  }
+  return {
+    ok: true,
+    jobId: job.id,
+    planId: normalizedPlanId,
+    progress: versionHistoryRetentionJobSnapshot(job)
+  };
+}
+
+function startVersionHistoryArchiveExpiryPreview(options = {}) {
+  const rootFolderPath = normalizedRegistryPath(options.rootFolderPath)
+    || requireVersionHistoryFolderPath();
+  if (!rootFolderPath) {
+    throw new BackupFolderMissingError(readVersionHistoryFolderPath() || "No backup folder selected");
+  }
+  const planId = id("archive-expiry-plan");
+  const job = newVersionHistoryRetentionJob("archive-expiry-preview", planId);
+  startVersionHistoryRetentionWorker(job, {
+    operation: "archive-expiry-preview",
+    options: {
+      rootFolderPath,
+      planId,
+      now: options.now
+    }
+  });
+  return {
+    ok: true,
+    jobId: job.id,
+    planId,
+    progress: versionHistoryRetentionJobSnapshot(job)
+  };
+}
+
+function moveVersionHistoryRetentionArchivesFromPlanId(planId, options = {}) {
+  const normalizedPlanId = asText(planId).trim();
+  const planRecord = versionHistoryArchiveExpiryPlans.get(normalizedPlanId);
+  if (!planRecord) {
+    const error = new Error("Archive expiry plan not found or expired.");
+    error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_PLAN_NOT_FOUND";
+    error.statusCode = 404;
+    throw error;
+  }
+  if (planRecord.inUse || planRecord.used) {
+    const error = new Error("Archive expiry plan has already been used.");
+    error.code = "VERSION_HISTORY_ARCHIVE_EXPIRY_PLAN_USED";
+    error.statusCode = 409;
+    throw error;
+  }
+  planRecord.inUse = true;
+  const job = newVersionHistoryRetentionJob("archive-expiry-move", normalizedPlanId);
+  try {
+    acquireVersionHistoryRetentionMutation(job, planRecord.plan.rootFolderPath);
+    startVersionHistoryRetentionWorker(job, {
+      operation: "archive-expiry-move",
+      plan: planRecord.plan,
+      options
+    });
+  } catch (error) {
+    planRecord.inUse = false;
+    releaseVersionHistoryRetentionMutation(job);
+    versionHistoryRetentionJobs.delete(job.id);
+    throw error;
+  }
+  return {
+    ok: true,
+    jobId: job.id,
+    planId: normalizedPlanId,
+    progress: versionHistoryRetentionJobSnapshot(job)
+  };
+}
+
+function versionHistoryBackupRetentionJobProgress(jobId) {
+  const job = versionHistoryRetentionJobs.get(asText(jobId));
+  return job
+    ? { ok: true, progress: versionHistoryRetentionJobSnapshot(job) }
+    : { ok: false, error: "Version-history retention job not found" };
+}
+
+function versionHistoryRetentionPlanForId(planId) {
+  return versionHistoryRetentionPlans.get(asText(planId))?.plan || null;
+}
+
+function versionHistoryArchiveExpiryPlanForId(planId) {
+  return versionHistoryArchiveExpiryPlans.get(asText(planId))?.plan || null;
 }
 
 function backupCutHistoryReport(state, options = {}) {
@@ -4388,6 +7620,7 @@ function writeAll(state, options = {}) {
   recoverPersistenceTransaction();
   let normalized = normalizeState(stateWithNewestStoredViewState(state), { touch: true });
   const linkedTextPath = readTextFileLink();
+  const skipLinkedTextFileWrite = Boolean(options.skipLinkedTextFileWrite);
   const missingLinkedTextFile = !options.allowCreateLinkedTextFile && linkedTextFileMissing(linkedTextPath);
   const versionHistoryWrites = [];
 
@@ -4409,22 +7642,22 @@ function writeAll(state, options = {}) {
   }
 
   const exportText = formatExport(normalized);
-  const coreWrites = [
-    {
-      filePath: STATE_FILE,
-      content: `${JSON.stringify(stateForStorage(normalized, {
-        embedVersionHistory: Boolean(options.embedVersionHistory)
-      }), null, 2)}\n`
-    },
-    {
+  const coreWrites = [{
+    filePath: STATE_FILE,
+    content: `${JSON.stringify(stateForStorage(normalized, {
+      embedVersionHistory: Boolean(options.embedVersionHistory)
+    }), null, 2)}\n`
+  }];
+  if (!(skipLinkedTextFileWrite && pathsReferToSameFile(EXPORT_FILE, linkedTextPath))) {
+    coreWrites.push({
       filePath: EXPORT_FILE,
       content: exportText
-    }
-  ];
+    });
+  }
   const linkedWrites = [];
 
   if (linkedTextPath) {
-    if (!missingLinkedTextFile) {
+    if (!skipLinkedTextFileWrite && !missingLinkedTextFile) {
       linkedWrites.push({
         filePath: linkedTextPath,
         content: exportText,
@@ -5755,6 +8988,7 @@ function writeRegisteredStoryTarget(state, destination) {
 }
 
 function applyUsbTransferFolder(folderPath, options = {}) {
+  assertVersionHistoryRetentionMutationIdle();
   const review = reviewUsbTransferFolder(folderPath);
   const identityDecision = review.targetStory?.identityDecision;
   if (identityDecision?.required && !["restore", "new"].includes(options.identityResolution)) {
@@ -5904,7 +9138,10 @@ function readState() {
     return recoverCorruptProjectState(error);
   }
 
-  const normalized = applyExternalVersionHistory(parsed, { filePath: readTextFileLink() || EXPORT_FILE }).state;
+  const normalized = applyExternalVersionHistory(parsed, {
+    filePath: readTextFileLink() || EXPORT_FILE,
+    promotePages: false
+  }).state;
   writeTransactionalTextFiles([{
     filePath: EXPORT_FILE,
     content: formatExport(normalized)
@@ -6040,7 +9277,9 @@ function parseStatePayload(body) {
       waitForSummary: Boolean(payload.waitForSummary),
       skipSummary: Boolean(payload.skipSummary),
       allowMissingVersionHistoryFolder: Boolean(payload.allowMissingVersionHistoryFolder),
-      allowLinkedTextFileFailure: Boolean(payload.allowLinkedTextFileFailure)
+      allowLinkedTextFileFailure: Boolean(payload.allowLinkedTextFileFailure),
+      skipLinkedTextFileWrite: Boolean(payload.skipLinkedTextFileWrite),
+      keepCurrentPages: Boolean(payload.keepCurrentPages)
     };
   }
 
@@ -6051,7 +9290,9 @@ function parseStatePayload(body) {
     waitForSummary: false,
     skipSummary: false,
     allowMissingVersionHistoryFolder: false,
-    allowLinkedTextFileFailure: false
+    allowLinkedTextFileFailure: false,
+    skipLinkedTextFileWrite: false,
+    keepCurrentPages: false
   };
 }
 
@@ -6088,7 +9329,8 @@ function writeBackupFromRequestBody(body) {
       waitForSummary: payload.waitForSummary,
       skipSummary: payload.skipSummary,
       allowMissingVersionHistoryFolder: Boolean(payload.allowMissingVersionHistoryFolder),
-      allowLinkedTextFileFailure: Boolean(payload.allowLinkedTextFileFailure)
+      allowLinkedTextFileFailure: Boolean(payload.allowLinkedTextFileFailure),
+      skipLinkedTextFileWrite: Boolean(payload.skipLinkedTextFileWrite)
     });
   }
 
@@ -6104,7 +9346,8 @@ function writeStateFromRequestBody(body) {
       allowMissingVersionHistoryFolder: true,
       allowLinkedTextFileFailure: true,
       skipVersionHistory: true,
-      embedVersionHistory: true
+      embedVersionHistory: true,
+      skipLinkedTextFileWrite: Boolean(payload.skipLinkedTextFileWrite)
     });
   }
 
@@ -6121,7 +9364,8 @@ function saveStateFromRequestBody(body) {
   const state = writeAll(payload.state, {
     filePath: payload.filePath,
     fileName: payload.fileName,
-    allowLinkedTextFileFailure: true
+    allowLinkedTextFileFailure: true,
+    skipLinkedTextFileWrite: Boolean(payload.skipLinkedTextFileWrite)
   });
   return {
     ok: true,
@@ -6136,14 +9380,41 @@ function saveStateFromRequestBody(body) {
 function openedTextFilePayload(filePath) {
   const resolvedPath = path.resolve(filePath);
   const fileName = path.basename(resolvedPath);
-  writeTextFileLink(resolvedPath);
+  const linkedTextPath = readTextFileLink();
+  const text = fs.readFileSync(resolvedPath, "utf8");
   return {
     ok: true,
     filePath: resolvedPath,
     fileName,
-    text: fs.readFileSync(resolvedPath, "utf8"),
+    text,
+    matchesLinkedTextFile: pathsReferToSameFile(resolvedPath, linkedTextPath),
     storedState: readTextFileState(resolvedPath),
     ...statePathPayload({ filePath: resolvedPath, fileName })
+  };
+}
+
+function activateTextFileLinkFromRequestBody(body) {
+  const payload = body ? JSON.parse(body) : {};
+  const filePath = asText(payload.filePath);
+  if (!filePath) throw new Error("Missing text file path.");
+
+  const resolvedPath = path.resolve(filePath);
+  if (!fileExists(resolvedPath)) {
+    const error = new Error("Text file no longer exists.");
+    error.code = "LINKED_TEXT_FILE_MISSING";
+    error.statusCode = 404;
+    throw error;
+  }
+
+  writeTextFileLink(resolvedPath);
+  return {
+    ok: true,
+    filePath: resolvedPath,
+    fileName: path.basename(resolvedPath),
+    ...statePathPayload({
+      filePath: resolvedPath,
+      fileName: path.basename(resolvedPath)
+    })
   };
 }
 
@@ -6190,6 +9461,7 @@ function selectVersionHistoryFolderPathFromRequestBody(folderPath, body) {
     : { state: readState(), filePath: "", fileName: null };
   const recoverMissingFolder = Boolean(requestPayload.recoverMissingFolder);
   if (!folderPath) return { ok: false, cancelled: true };
+  assertVersionHistoryRetentionRootChangeAllowed(folderPath);
 
   const previousVersionHistoryFolderPath = existingVersionHistoryFolderPath();
   const carriedHistoryFiles = carryVersionHistoryJsonFiles(previousVersionHistoryFolderPath, folderPath);
@@ -6940,6 +10212,56 @@ function openFileLocation(filePath) {
   });
 }
 
+async function openVersionHistoryArchiveReadyFolder(options = {}) {
+  const rootFolderPath = normalizedRegistryPath(readVersionHistoryFolderPath());
+  if (!rootFolderPath || !directoryExists(rootFolderPath)) {
+    const error = new Error("No backup folder is currently available.");
+    error.code = "VERSION_HISTORY_FOLDER_MISSING";
+    error.statusCode = 404;
+    throw error;
+  }
+  const archiveRootPath = versionHistoryJsonArchiveFolderPath(rootFolderPath);
+  const readyFolderPath = requireVersionHistoryArchiveReadyFolder(
+    rootFolderPath,
+    archiveRootPath
+  );
+  let readyFolderRealPath;
+  try {
+    const archiveRoot = requireManagedRetentionArchiveRoot(rootFolderPath, archiveRootPath);
+    const readyFolderStats = fs.lstatSync(readyFolderPath);
+    const archiveRootRealPath = fs.realpathSync(archiveRoot);
+    readyFolderRealPath = fs.realpathSync(readyFolderPath);
+    if (
+      !readyFolderStats.isDirectory()
+      || readyFolderStats.isSymbolicLink()
+      || !sameHistoryPath(path.dirname(readyFolderRealPath), archiveRootRealPath)
+    ) {
+      throw new Error("linked-or-outside");
+    }
+  } catch (cause) {
+    if (cause?.code !== "ENOENT") {
+      const error = new Error("The manual deletion folder is unsafe or cannot be opened.");
+      error.code = "VERSION_HISTORY_ARCHIVE_READY_FOLDER_UNSAFE";
+      error.statusCode = 409;
+      error.cause = cause;
+      throw error;
+    }
+    const error = new Error("There are no archive runs waiting for manual deletion.");
+    error.code = "VERSION_HISTORY_ARCHIVE_READY_FOLDER_MISSING";
+    error.statusCode = 404;
+    throw error;
+  }
+  const openLocation = typeof options.openFileLocation === "function"
+    ? options.openFileLocation
+    : openFileLocation;
+  const location = await openLocation(readyFolderRealPath);
+  return {
+    ok: true,
+    ...location,
+    readyForManualDeletion: versionHistoryArchiveReadyStatus({ rootFolderPath })
+  };
+}
+
 async function handleApi(req, res, pathname) {
   if (req.method === "GET" && pathname === "/api/server-info") {
     sendJson(res, 200, {
@@ -6970,12 +10292,69 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/version-history-backups/retention/start") {
+    markClientActive();
+    sendJson(res, 200, startVersionHistoryBackupRetentionPreview());
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/version-history-backups/retention/progress") {
+    markClientActive();
+    const jobId = new URL(req.url, `http://${req.headers.host || "localhost"}`).searchParams.get("id") || "";
+    const payload = versionHistoryBackupRetentionJobProgress(jobId);
+    sendJson(res, payload.ok ? 200 : 404, payload);
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/version-history-backups/retention/archive") {
+    markClientActive();
+    const body = await readBody(req);
+    const payload = body ? JSON.parse(body) : {};
+    sendJson(res, 200, archiveVersionHistoryBackupsFromPlanId(payload.planId));
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/version-history-backups/archive-expiry/start") {
+    markClientActive();
+    sendJson(res, 200, startVersionHistoryArchiveExpiryPreview());
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/version-history-backups/archive-expiry/progress") {
+    markClientActive();
+    const jobId = new URL(req.url, `http://${req.headers.host || "localhost"}`).searchParams.get("id") || "";
+    const payload = versionHistoryBackupRetentionJobProgress(jobId);
+    sendJson(res, payload.ok ? 200 : 404, payload);
+    return;
+  }
+
+  if (
+    req.method === "POST"
+    && pathname === "/api/version-history-backups/archive-expiry/move-to-manual-deletion"
+  ) {
+    markClientActive();
+    const body = await readBody(req);
+    const payload = body ? JSON.parse(body) : {};
+    sendJson(res, 200, moveVersionHistoryRetentionArchivesFromPlanId(payload.planId));
+    return;
+  }
+
+  if (
+    req.method === "POST"
+    && pathname === "/api/version-history-backups/manual-deletion/open"
+  ) {
+    markClientActive();
+    sendJson(res, 200, await openVersionHistoryArchiveReadyFolder());
+    return;
+  }
+
   if (req.method === "GET" && pathname === "/api/state") {
     markClientActive();
     const state = readState();
     sendJson(res, 200, {
       state,
       projectRecovery: readProjectRecoveryNotice(),
+      readyForManualDeletion: versionHistoryArchiveReadyStatus(),
       ...statePathPayload()
     });
     return;
@@ -6995,7 +10374,8 @@ async function handleApi(req, res, pathname) {
     const state = writeAll(payload.state, {
       filePath: payload.filePath,
       fileName: payload.fileName,
-      allowLinkedTextFileFailure: true
+      allowLinkedTextFileFailure: true,
+      skipLinkedTextFileWrite: Boolean(payload.skipLinkedTextFileWrite)
     });
     sendJson(res, 200, {
       ok: true,
@@ -7125,7 +10505,8 @@ async function handleApi(req, res, pathname) {
     const payload = parseStatePayload(body);
     const result = applyExternalVersionHistory(payload.state, {
       filePath: payload.filePath,
-      fileName: payload.fileName
+      fileName: payload.fileName,
+      promotePages: !payload.keepCurrentPages
     });
     sendJson(res, 200, {
       ok: true,
@@ -7155,15 +10536,7 @@ async function handleApi(req, res, pathname) {
       return;
     }
 
-    writeTextFileLink(filePath);
-    sendJson(res, 200, {
-      ok: true,
-      filePath,
-      fileName: path.basename(filePath),
-      text: fs.readFileSync(filePath, "utf8"),
-      storedState: readTextFileState(filePath),
-      ...statePathPayload({ filePath, fileName: path.basename(filePath) })
-    });
+    sendJson(res, 200, openedTextFilePayload(filePath));
     return;
   }
 
@@ -7211,6 +10584,13 @@ async function handleApi(req, res, pathname) {
     markClientActive();
     writeTextFileLink(null);
     sendJson(res, 200, { ok: true });
+    return;
+  }
+
+  if (req.method === "POST" && pathname === "/api/text-file-link/activate") {
+    markClientActive();
+    const body = await readBody(req);
+    sendJson(res, 200, activateTextFileLinkFromRequestBody(body));
     return;
   }
 
@@ -7405,10 +10785,22 @@ module.exports = {
   backupProjectFromRequestBody,
   startVersionHistorySummaryJobFromRequestBody,
   versionHistorySummaryJobProgress,
+  previewVersionHistoryBackupRetention,
+  archiveVersionHistoryBackupRetentionPlan,
+  startVersionHistoryBackupRetentionPreview,
+  archiveVersionHistoryBackupsFromPlanId,
+  previewVersionHistoryArchiveExpiry,
+  moveExpiredVersionHistoryArchiveRunsToManualDeletion,
+  startVersionHistoryArchiveExpiryPreview,
+  moveVersionHistoryRetentionArchivesFromPlanId,
+  versionHistoryArchiveReadyStatus,
+  openVersionHistoryArchiveReadyFolder,
+  versionHistoryBackupRetentionJobProgress,
   writeFullVersionHistorySummaryReport,
   resolveGeneratedReportPath,
   parseStatePayload,
   openedTextFilePayload,
+  activateTextFileLinkFromRequestBody,
   saveTextFileToPath,
   openTextFileFromDialog,
   activateBackupFolderFromDialog,
@@ -7435,12 +10827,32 @@ module.exports = {
     writeAll,
     writeTextFileLink,
     writeVersionHistoryFolderPath,
+    acquireVersionHistoryRetentionMutation,
+    releaseVersionHistoryRetentionMutation,
     versionHistoryFolderCheck,
     existingFolderForDialog,
     nearestExistingDirectory,
     openFileLocationCommand,
     carryVersionHistoryJsonFiles,
     assertCarriedVersionHistoryFilesSafe,
+    backupExistingVersionHistoryJson,
+    versionHistoryPayloadWithoutVolatileMetadataHash,
+    scanVersionHistoryBackupRetention,
+    buildVersionHistoryBackupRetentionPlan,
+    archiveVersionHistoryBackupRetentionPlan,
+    versionHistoryRetentionPlanForId,
+    readRetentionArchivePolicyState,
+    retentionPolicyForCompletedArchiveRun,
+    persistRetentionArchivePolicyState,
+    inspectVersionHistoryRetentionArchiveRun,
+    scanVersionHistoryRetentionArchives,
+    previewVersionHistoryArchiveExpiry,
+    moveExpiredVersionHistoryArchiveRunsToManualDeletion,
+    versionHistoryArchiveReadyStatus,
+    versionHistoryArchiveReadyFolderPath,
+    requireVersionHistoryArchiveReadyFolder,
+    openVersionHistoryArchiveReadyFolder,
+    versionHistoryArchiveExpiryPlanForId,
     migrateEmbeddedVersionHistoriesToFolder,
     assertVersionHistoryMigrationSafe,
     macOpenFileDialogScript,
