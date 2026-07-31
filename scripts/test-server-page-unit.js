@@ -495,11 +495,154 @@ async function run() {
     assert.doesNotMatch(unchangedSummaryHtml, /Version 3/u);
     assert.match(unchangedSummaryHtml, /1 unchanged version skipped/u);
 
+    const firstPeriodStart = "2026-01-01T00:00:00.000Z";
+    const firstPeriodEnd = "2026-01-01T12:00:00.000Z";
+    const secondPeriodStart = "2026-01-01T12:00:01.000Z";
+    const secondPeriodEnd = "2026-01-01T23:00:00.000Z";
+    const groupedVersionState = StateCore.normalizeState({
+      createdAt: firstPeriodStart,
+      updatedAt: secondPeriodEnd,
+      initialNotes: {
+        title: "Project notes",
+        createdAt: firstPeriodStart,
+        updatedAt: secondPeriodEnd,
+        content: "Fourth grouped version",
+        contentHtml: "Fourth grouped version",
+        versionHistory: [
+          {
+            id: "grouped-version-1",
+            createdAt: firstPeriodStart,
+            title: "Project notes",
+            content: "First grouped version",
+            contentHtml: "First grouped version"
+          },
+          {
+            id: "grouped-version-2",
+            createdAt: firstPeriodEnd,
+            title: "Project notes",
+            content: "Second grouped version",
+            contentHtml: "Second grouped version"
+          },
+          {
+            id: "grouped-version-3",
+            createdAt: secondPeriodStart,
+            title: "Project notes",
+            content: "Third grouped version",
+            contentHtml: "Third grouped version"
+          },
+          {
+            id: "grouped-version-4",
+            createdAt: secondPeriodEnd,
+            title: "Project notes",
+            content: "Fourth grouped version",
+            contentHtml: "Fourth grouped version"
+          }
+        ]
+      },
+      drafts: []
+    });
+    const groupedSummaryResult = await writeFullVersionHistorySummaryReport(groupedVersionState, {
+      fileName: "grouped-summary.txt",
+      filePath: path.join(dataDir, "grouped-summary.txt")
+    });
+    const groupedSummaryHtml = fs.readFileSync(groupedSummaryResult.reportPath, "utf8");
+    const periodOpeningTags = className => [...groupedSummaryHtml.matchAll(/<details\b[^>]*>/gu)]
+      .map(match => match[0])
+      .filter(tag => (tag.match(/\bclass="([^"]*)"/u)?.[1] || "").split(/\s+/u).includes(className));
+    const periodRanges = tags => tags.map(tag => ({
+      start: tag.match(/\bdata-version-period-start="([^"]+)"/u)?.[1],
+      end: tag.match(/\bdata-version-period-end="([^"]+)"/u)?.[1]
+    }));
+    const expectedPeriodRanges = [
+      { start: firstPeriodStart, end: firstPeriodEnd },
+      { start: secondPeriodStart, end: secondPeriodEnd }
+    ];
+    const contentsPeriodTags = periodOpeningTags("contents-version-period");
+    const bodyPeriodTags = periodOpeningTags("version-period");
+    assert.equal(contentsPeriodTags.length, 2);
+    assert.equal(bodyPeriodTags.length, 2);
+    assert.deepEqual(periodRanges(contentsPeriodTags), expectedPeriodRanges);
+    assert.deepEqual(periodRanges(bodyPeriodTags), expectedPeriodRanges);
+    assert.equal(contentsPeriodTags.every(tag => /\bdata-collapsible\b/u.test(tag)), true);
+    assert.equal(bodyPeriodTags.every(tag => /\bdata-collapsible\b/u.test(tag)), true);
+
+    const firstContentsPeriodStart = groupedSummaryHtml.indexOf(contentsPeriodTags[0]);
+    const secondContentsPeriodStart = groupedSummaryHtml.indexOf(contentsPeriodTags[1], firstContentsPeriodStart + 1);
+    const firstBodyPeriodStart = groupedSummaryHtml.indexOf(bodyPeriodTags[0], secondContentsPeriodStart + 1);
+    const secondBodyPeriodStart = groupedSummaryHtml.indexOf(bodyPeriodTags[1], firstBodyPeriodStart + 1);
+    const firstContentsPeriodHtml = groupedSummaryHtml.slice(firstContentsPeriodStart, secondContentsPeriodStart);
+    const secondContentsPeriodHtml = groupedSummaryHtml.slice(secondContentsPeriodStart, firstBodyPeriodStart);
+    const firstBodyPeriodHtml = groupedSummaryHtml.slice(firstBodyPeriodStart, secondBodyPeriodStart);
+    const secondBodyPeriodHtml = groupedSummaryHtml.slice(secondBodyPeriodStart);
+    assert.match(firstContentsPeriodHtml, /href="#project-notes-version-1"/u);
+    assert.match(firstContentsPeriodHtml, /href="#project-notes-version-2"/u);
+    assert.doesNotMatch(firstContentsPeriodHtml, /href="#project-notes-version-3"/u);
+    assert.match(secondContentsPeriodHtml, /href="#project-notes-version-3"/u);
+    assert.match(secondContentsPeriodHtml, /href="#project-notes-version-4"/u);
+    assert.match(firstBodyPeriodHtml, /<article id="project-notes-version-1" class="version-entry">/u);
+    assert.match(firstBodyPeriodHtml, /<article id="project-notes-version-2" class="version-entry">/u);
+    assert.doesNotMatch(firstBodyPeriodHtml, /<article id="project-notes-version-3" class="version-entry">/u);
+    assert.match(secondBodyPeriodHtml, /<article id="project-notes-version-3" class="version-entry">/u);
+    assert.match(secondBodyPeriodHtml, /<article id="project-notes-version-4" class="version-entry">/u);
+    assert.match(firstBodyPeriodHtml, /class="version-period-title">[^<]+ to [^<]+<\/span>/u);
+    assert.match(secondBodyPeriodHtml, /class="version-period-title">[^<]+ to [^<]+<\/span>/u);
+
     const summaryResult = await writeFullVersionHistorySummaryReport(afterNotesHistory, {
       fileName: "server-page-unit-test.txt",
       filePath: path.join(dataDir, "server-page-unit-test.txt")
     });
     const summaryHtml = fs.readFileSync(summaryResult.reportPath, "utf8");
+    const htmlAttribute = (tag, name) => tag.match(new RegExp(`\\b${name}="([^"]*)"`, "u"))?.[1] || "";
+    const htmlClassNames = tag => htmlAttribute(tag, "class").split(/\s+/u).filter(Boolean);
+    const visibleText = html => html.replace(/<[^>]*>/gu, "").replace(/\s+/gu, " ").trim();
+
+    const viewportMeta = [...summaryHtml.matchAll(/<meta\b[^>]*>/gu)]
+      .map(match => match[0])
+      .find(tag => htmlAttribute(tag, "name") === "viewport");
+    assert.ok(viewportMeta, "summary should declare a responsive viewport");
+    assert.equal(htmlAttribute(viewportMeta, "content"), "width=device-width, initial-scale=1");
+
+    const reportHeader = [...summaryHtml.matchAll(/<header\b[^>]*>[\s\S]*?<\/header>/gu)]
+      .map(match => match[0])
+      .find(header => htmlClassNames(header).includes("report-header"));
+    assert.ok(reportHeader, "summary should have a report header");
+    assert.equal((summaryHtml.match(/<h1\b[^>]*>/gu) || []).length, 1, "summary should have one h1");
+    assert.equal((reportHeader.match(/<h1\b[^>]*>/gu) || []).length, 1, "the h1 should be in the report header");
+
+    const summaryGrid = [...summaryHtml.matchAll(/<dl\b[^>]*>[\s\S]*?<\/dl>/gu)]
+      .map(match => match[0])
+      .find(list => htmlClassNames(list).includes("summary-grid"));
+    assert.ok(summaryGrid, "report statistics should use a summary definition list");
+    assert.equal((summaryGrid.match(/<dt\b[^>]*>[\s\S]*?<\/dt>/gu) || []).length, 4);
+    assert.equal((summaryGrid.match(/<dd\b[^>]*>[\s\S]*?<\/dd>/gu) || []).length, 4);
+    assert.equal(
+      (summaryGrid.match(/<dt\b[^>]*>[\s\S]*?<\/dt>\s*<dd\b[^>]*>[\s\S]*?<\/dd>/gu) || []).length,
+      4,
+      "summary definition terms and values should remain paired"
+    );
+
+    const contentsNav = [...summaryHtml.matchAll(/<nav\b[^>]*>[\s\S]*?<\/nav>/gu)]
+      .map(match => match[0])
+      .find(nav => htmlAttribute(nav, "aria-label") === "Contents");
+    assert.ok(contentsNav, "summary contents should be a labelled navigation region");
+    assert.match(contentsNav, /<h2\b[^>]*>\s*Contents\s*<\/h2>/u);
+
+    const summaryControls = contentsNav.match(
+      /<div\b(?=[^>]*\brole="group")(?=[^>]*\baria-label="Summary controls")[^>]*>([\s\S]*?)<\/div>/u
+    );
+    assert.ok(summaryControls, "summary actions should be an accessible control group");
+    const actionButtons = [...summaryControls[1].matchAll(/<button\b([^>]*)>([\s\S]*?)<\/button>/gu)];
+    assert.equal(actionButtons.length, 2);
+    [
+      { action: "expand", name: "Expand all" },
+      { action: "collapse", name: "Collapse all" }
+    ].forEach(expected => {
+      const button = actionButtons.find(match => htmlAttribute(match[1], "data-summary-action") === expected.action);
+      assert.ok(button, `summary should retain its ${expected.action} action`);
+      assert.equal(htmlAttribute(button[1], "type"), "button");
+      assert.equal(htmlAttribute(button[1], "aria-label") || visibleText(button[2]), expected.name);
+    });
+
     assert.doesNotMatch(summaryHtml, /First saved version; no previous version to compare/u);
     assert.match(summaryHtml, /First saved version/u);
     assert.match(summaryHtml, /Baseline text; no changes to compare/u);

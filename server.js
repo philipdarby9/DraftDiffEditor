@@ -2645,6 +2645,44 @@ function textSignificantVersionEntries(versions) {
   return entries;
 }
 
+const VERSION_SUMMARY_PERIOD_MS = 12 * 60 * 60 * 1000;
+
+function versionSummaryPeriodGroups(entries) {
+  const groups = [];
+
+  (Array.isArray(entries) ? entries : []).forEach((entry, index) => {
+    const createdAt = asText(entry?.version?.createdAt);
+    const timestamp = new Date(createdAt).valueOf();
+    let group = groups[groups.length - 1];
+    const startsNewGroup = !group
+      || !Number.isFinite(timestamp)
+      || !Number.isFinite(group.firstTimestamp)
+      || timestamp < group.firstTimestamp
+      || timestamp - group.firstTimestamp > VERSION_SUMMARY_PERIOD_MS;
+
+    if (startsNewGroup) {
+      group = {
+        firstTimestamp: timestamp,
+        firstIso: createdAt,
+        lastIso: createdAt,
+        entries: []
+      };
+      groups.push(group);
+    }
+
+    group.entries.push({ entry, index });
+    group.lastIso = createdAt;
+  });
+
+  return groups;
+}
+
+function versionSummaryPeriodLabel(period) {
+  const first = formatDate(period.firstIso);
+  const last = formatDate(period.lastIso);
+  return first === last ? first : `${first} to ${last}`;
+}
+
 function fullSummaryDraftChangeHtml(left, right, index) {
   const anchor = `draft-change-${index + 1}-${index + 2}`;
   const numberedTitle = `Draft ${index + 1} to Draft ${index + 2}`;
@@ -2709,10 +2747,14 @@ function versionChangeDiffHtml(previousVersion, version) {
 async function fullVersionHistorySummaryHtml(state, options = {}, progress = () => {}) {
   const source = historySourceInfo(options);
   const sourceName = source.fileName || "draft-history.txt";
-  const pages = versionSummaryPages(state).map(page => ({
-    ...page,
-    reportVersions: textSignificantVersionEntries(page.versions)
-  }));
+  const pages = versionSummaryPages(state).map(page => {
+    const reportVersions = textSignificantVersionEntries(page.versions);
+    return {
+      ...page,
+      reportVersions,
+      reportVersionPeriods: versionSummaryPeriodGroups(reportVersions)
+    };
+  });
   const draftAnalyses = (state.drafts || []).map(analyseDraftCutHistory);
   const totalVersions = pages.reduce((sum, page) => sum + page.versions.length, 0);
   const totalReportVersions = pages.reduce((sum, page) => sum + page.reportVersions.length, 0);
@@ -2749,8 +2791,23 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
     ? `<ul>${draftChanges.map(change => `<li><a href="#${escapeHtml(change.anchor)}">${escapeHtml(change.title)}</a></li>`).join("")}</ul>`
     : '<p class="contents-empty">No draft-to-draft changes.</p>';
   const versionPageLinksHtml = pages.map(page => {
-    const versionLinksHtml = page.reportVersions.length
-      ? `<ul>${page.reportVersions.map((entry, index) => `<li><a href="#${escapeHtml(`${page.anchor}-version-${index + 1}`)}">${escapeHtml(versionHeadingLabel(index, page.reportVersions.length))} (${escapeHtml(formatDate(entry.version.createdAt))})</a></li>`).join("")}</ul>`
+    const versionLinksHtml = page.reportVersionPeriods.length
+      ? `<ul class="contents-version-periods">${page.reportVersionPeriods.map(period => `
+          <li>
+            <details
+              class="contents-group contents-version-period"
+              data-version-period-start="${escapeHtml(period.firstIso)}"
+              data-version-period-end="${escapeHtml(period.lastIso)}"
+              data-collapsible
+            >
+              <summary>
+                <span>${escapeHtml(versionSummaryPeriodLabel(period))}</span>
+                <span class="contents-count">${escapeHtml(contentsCountText(period.entries.length, "version"))}</span>
+              </summary>
+              <ul>${period.entries.map(({ entry, index }) => `<li><a href="#${escapeHtml(`${page.anchor}-version-${index + 1}`)}">${escapeHtml(versionHeadingLabel(index, page.reportVersions.length))} (${escapeHtml(formatDate(entry.version.createdAt))})</a></li>`).join("")}</ul>
+            </details>
+          </li>
+        `).join("")}</ul>`
       : '<p class="contents-empty">No text-changing versions.</p>';
     return `
       <li>
@@ -2797,13 +2854,28 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
         <article id="${escapeHtml(`${page.anchor}-version-${index + 1}`)}" class="version-entry">
           <header class="version-heading">
             <h3>${escapeHtml(versionHeadingLabel(index, page.reportVersions.length))}</h3>
-            <p class="meta">${escapeHtml(formatDate(version.createdAt))} · ${versionWordCount(version).toLocaleString("en-GB")} ${versionWordCount(version) === 1 ? "word" : "words"}</p>
+            <p class="meta"><time datetime="${escapeHtml(version.createdAt)}">${escapeHtml(formatDate(version.createdAt))}</time> · ${versionWordCount(version).toLocaleString("en-GB")} ${versionWordCount(version) === 1 ? "word" : "words"}</p>
           </header>
           ${changeHtml}
         </article>
       `);
       completed += 1;
     }
+
+    const versionPeriodsHtml = page.reportVersionPeriods.map(period => `
+      <details
+        class="version-period"
+        data-version-period-start="${escapeHtml(period.firstIso)}"
+        data-version-period-end="${escapeHtml(period.lastIso)}"
+        data-collapsible
+      >
+        <summary>
+          <span class="version-period-title">${escapeHtml(versionSummaryPeriodLabel(period))}</span>
+          <span class="version-period-count">${escapeHtml(contentsCountText(period.entries.length, "version"))}</span>
+        </summary>
+        ${period.entries.map(({ index }) => versionArticles[index]).join("\n")}
+      </details>
+    `).join("\n");
 
     const originalVersionCount = page.versions.length;
     const skippedVersionCount = originalVersionCount - page.reportVersions.length;
@@ -2818,74 +2890,129 @@ async function fullVersionHistorySummaryHtml(state, options = {}, progress = () 
           <span class="section-summary-meta">${escapeHtml(page.type)} · ${page.reportVersions.length.toLocaleString("en-GB")} text-changing ${page.reportVersions.length === 1 ? "version" : "versions"} shown</span>
         </summary>
         ${skippedVersionMetaHtml}
-        ${versionArticles.join("\n")}
+        ${versionPeriodsHtml}
       </details>
     `);
   }
 
   completed = totalSteps;
   await tick("Writing HTML file");
+  const generatedAt = nowIso();
+  const currentDraftCount = (state.drafts || []).length;
 
   return `<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${escapeHtml(sourceName)} version history summary</title>
 <style>
-body{margin:0;background:#f8f7f4;color:#24211d;font:16px/1.55 Georgia,'Times New Roman',serif}
-main{max-width:1100px;margin:0 auto;padding:34px 30px 72px}
-h1,h2,h3,h4,.meta,.contents-page,.draft-change{font-family:system-ui,-apple-system,Segoe UI,sans-serif}
-h1{font-size:30px;line-height:1.2;margin:0 0 8px}
-h2{border-top:1px solid #d8d3ca;margin:36px 0 12px;padding-top:24px;font-size:22px}
-h3{font-size:17px;margin:0}
-h4{font-size:14px;margin:16px 0 8px;color:#403b34}
-.meta{color:#6d675e;font-size:13px;margin:4px 0 12px}
-.contents-page{background:#fff;border:1px solid #d8d3ca;padding:18px 22px;margin:24px 0}
-.summary-actions{display:flex;flex-wrap:wrap;gap:8px;margin:10px 0 14px}
-.summary-button{appearance:none;border:1px solid #b8b0a4;background:#f8f7f4;color:#24211d;cursor:pointer;font:600 13px/1 system-ui,-apple-system,Segoe UI,sans-serif;padding:7px 10px}
-.summary-button:hover,.summary-button:focus{background:#ece7dd}
-.contents-page ul{margin:8px 0 0 22px;padding:0}
-.contents-page li{margin:5px 0}
-.contents-group{margin:6px 0}
-.contents-group>summary{cursor:pointer;font-weight:700}
-.contents-count{color:#6d675e;font-size:12px;font-weight:400;margin-left:6px}
-.contents-empty{color:#6d675e;font-size:13px;margin:6px 0 0 22px}
-.contents-page a{color:#17456f;text-decoration:none}
-.contents-page a:hover,.contents-page a:focus{text-decoration:underline}
-.summary-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:12px;margin:22px 0}
-.summary-stat{background:#fff;border:1px solid #d8d3ca;padding:12px}
-.summary-stat strong{display:block;font:700 20px/1.2 system-ui,-apple-system,Segoe UI,sans-serif}
-.draft-change,.version-entry{background:#fff;border:1px solid #d8d3ca;margin:14px 0;padding:14px 16px;break-inside:avoid}
-.report-section,.history-page-section{border-top:1px solid #d8d3ca;margin:36px 0 0;padding-top:18px}
-.report-section>summary,.history-page-section>summary{cursor:pointer;font-family:system-ui,-apple-system,Segoe UI,sans-serif}
-.report-section[open]>summary,.history-page-section[open]>summary{margin-bottom:12px}
-.section-title{display:inline;font-size:22px;font-weight:700;line-height:1.25}
-.history-page-section .section-title{font-size:19px}
-.section-summary-meta{display:block;color:#6d675e;font-size:13px;margin:4px 0 0 20px}
-.final-draft-diff-text,.version-change-diff{white-space:pre-wrap;font:15px/1.62 Georgia,'Times New Roman',serif}
-.version-change{border-bottom:1px solid #ece7dd;margin:0 0 14px;padding:0 0 12px}
-.compare-token{border-radius:2px;padding:0 1px}
-.compare-token.added{background:#dff5df;color:#17602b;text-decoration:none}
-.compare-token.removed{background:#ffe1d6;color:#9b1c1c;text-decoration:line-through}
-.version-heading{border-bottom:1px solid #ece7dd;margin-bottom:12px;padding-bottom:8px}
-@media print{body{background:#fff}.contents-page,.draft-change,.version-entry{break-inside:avoid}details[data-collapsible]:not([open])>:not(summary){display:block}details[data-collapsible]>summary{list-style:none}}
+:root{color-scheme:light;--bg:oklch(96.4% 0.014 80);--surface:oklch(99.2% 0.006 80);--surface-alt:oklch(97.6% 0.013 80);--surface-sunk:oklch(95.2% 0.014 80);--fg:oklch(22% 0.018 60);--fg-muted:oklch(47% 0.013 60);--fg-subtle:oklch(52% 0.011 60);--border:oklch(88.5% 0.012 80);--border-strong:oklch(75% 0.014 70);--hover:oklch(93.5% 0.014 80);--selected:oklch(91% 0.022 80);--accent:oklch(48% 0.13 252);--accent-deep:oklch(40% 0.14 252);--accent-soft:oklch(94% 0.042 252);--accent-fg:oklch(99% 0.005 252);--focus-ring:oklch(60% 0.16 252 / 0.45);--diff-add:oklch(42% 0.15 148);--diff-add-bg:oklch(95% 0.05 148);--diff-del:oklch(52% 0.18 22);--diff-del-bg:oklch(96.5% 0.05 22);--font-ui:Charter,"Bitstream Charter","Iowan Old Style",Georgia,serif;--font-title:"Fraunces",Charter,"Bitstream Charter","Iowan Old Style",Georgia,serif;--r-sm:4px;--r:6px}
+*,*::before,*::after{box-sizing:border-box}
+html{scrollbar-color:oklch(62% 0.055 68) var(--surface-sunk)}
+body{margin:0;background:var(--bg);color:var(--fg);font:14px/1.5 var(--font-ui);-webkit-font-smoothing:antialiased;text-rendering:optimizeLegibility}
+main{width:min(100%,1020px);margin:0 auto;padding:24px 24px 56px}
+a{color:var(--accent-deep);text-decoration:none}
+a:hover{text-decoration:underline}
+button{font:inherit}
+button:focus-visible,a:focus-visible,summary:focus-visible{outline:2px solid var(--focus-ring);outline-offset:1px}
+::selection{background:oklch(78% 0.12 252 / 0.35)}
+.report-header{min-width:0;display:flex;align-items:flex-end;justify-content:space-between;gap:18px;padding-bottom:14px;border-bottom:1px solid var(--border)}
+.report-heading{min-width:0}
+.report-kicker{margin:0 0 3px;color:var(--fg-subtle);font-size:10.5px;font-weight:700;letter-spacing:0;text-transform:uppercase}
+h1{min-width:0;margin:0;font-family:var(--font-title);font-size:23px;font-weight:600;letter-spacing:0;line-height:1.18;overflow-wrap:anywhere}
+.report-meta{min-width:0;max-width:48%;margin:0;color:var(--fg-subtle);font-size:11.5px;font-variant-numeric:tabular-nums;line-height:1.45;text-align:right;overflow-wrap:anywhere}
+.report-meta span{display:block}
+h2{margin:24px 0 10px;padding-top:18px;border-top:1px solid var(--border);font-family:var(--font-title);font-size:18px;font-weight:600;letter-spacing:0;line-height:1.2}
+h3{margin:0;font-family:var(--font-title);font-size:15px;font-weight:600;letter-spacing:0;line-height:1.25}
+h4{margin:0 0 5px;color:var(--fg-subtle);font-size:10.5px;font-weight:700;letter-spacing:0;text-transform:uppercase}
+.meta{margin:3px 0 9px;color:var(--fg-subtle);font-size:11.5px;font-variant-numeric:tabular-nums;line-height:1.4}
+.summary-grid{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));margin:14px 0 16px;overflow:hidden;border:1px solid var(--border);border-radius:var(--r);background:var(--surface)}
+.summary-stat{min-width:0;display:flex;align-items:baseline;gap:7px;padding:9px 11px;color:var(--fg-muted);font-size:11.5px;line-height:1.3}
+.summary-stat:not(:last-child){border-right:1px solid var(--border)}
+.summary-stat dt{min-width:0}
+.summary-stat dd{order:-1;flex:0 0 auto;margin:0;color:var(--fg);font-family:var(--font-title);font-size:18px;font-weight:600;line-height:1;font-variant-numeric:tabular-nums}
+.contents-page{margin:0 0 22px;padding:11px 13px 12px;border:1px solid var(--border);border-radius:var(--r);background:var(--surface)}
+.contents-header{display:flex;align-items:center;justify-content:space-between;gap:12px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.contents-page h2{margin:0;padding:0;border:0;font-family:var(--font-title);font-size:14px;font-weight:600;letter-spacing:0}
+.summary-actions{display:inline-flex;align-items:center}
+.summary-button{min-height:28px;margin:0;padding:0 9px;border:1px solid var(--border-strong);border-radius:0;background:var(--surface);color:var(--fg);cursor:pointer;font-size:11.5px;font-weight:600;line-height:1;white-space:nowrap}
+.summary-button:first-child{border-radius:var(--r-sm) 0 0 var(--r-sm)}
+.summary-button:last-child{margin-left:-1px;border-radius:0 var(--r-sm) var(--r-sm) 0}
+.summary-button:hover{position:relative;background:var(--hover);border-color:var(--accent)}
+.contents-page ul{margin:6px 0 0;padding:0;list-style:none}
+.contents-page li{margin:1px 0}
+.contents-group{margin:2px 0}
+details[data-collapsible]>summary{list-style:none}
+details[data-collapsible]>summary::-webkit-details-marker{display:none}
+details[data-collapsible]>summary::before{content:"";width:6px;height:6px;border-right:1.5px solid var(--fg-muted);border-bottom:1.5px solid var(--fg-muted);transform:translateY(-1px) rotate(45deg);transition:transform 120ms ease}
+details[data-collapsible][open]>summary::before{transform:translateY(1px) rotate(225deg)}
+.contents-group>summary{min-width:0;display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:7px;min-height:27px;padding:3px 6px;border-radius:var(--r-sm);cursor:pointer;font-size:12.5px;font-weight:650}
+.contents-group>summary:hover{background:var(--hover)}
+.contents-group>summary>a,.contents-group>summary>span:not(.contents-count){min-width:0;overflow-wrap:anywhere}
+.contents-count{color:var(--fg-subtle);font-size:10.5px;font-weight:400;font-variant-numeric:tabular-nums;white-space:nowrap}
+.contents-group>ul{margin-left:10px;padding-left:11px;border-left:1px solid var(--border)}
+.contents-empty{margin:6px 0 2px 21px;color:var(--fg-muted);font-size:11.5px}
+.report-section{margin:24px 0 0;border-top:1px solid var(--border)}
+.report-section>summary,.history-page-section>summary{min-width:0;display:grid;grid-template-columns:8px minmax(0,1fr);align-items:center;gap:2px 9px;cursor:pointer}
+.report-section>summary{padding:10px 4px}
+.report-section>summary:hover,.history-page-section>summary:hover,.version-period>summary:hover{background:var(--hover)}
+.report-section>summary::before,.history-page-section>summary::before{grid-row:1 / span 2}
+.section-title{grid-column:2;min-width:0;font-family:var(--font-title);font-size:18px;font-weight:600;letter-spacing:0;line-height:1.2;overflow-wrap:anywhere}
+.section-summary-meta{grid-column:2;color:var(--fg-subtle);font-size:11px;font-variant-numeric:tabular-nums;line-height:1.35}
+.draft-change{margin:8px 0;padding:12px 14px;border:1px solid var(--border);border-radius:var(--r-sm);background:var(--surface)}
+.draft-change:target,.version-entry:target{scroll-margin-top:12px;background:var(--accent-soft);box-shadow:inset 3px 0 var(--accent)}
+#version-history>h2{margin-bottom:9px}
+.history-page-section{margin:8px 0;overflow:hidden;border:1px solid var(--border);border-radius:var(--r);background:var(--surface)}
+.history-page-section>summary{padding:9px 11px;background:var(--surface-alt)}
+.history-page-section .section-title{font-size:15.5px}
+.history-page-section>.meta{margin:0;padding:7px 12px;border-top:1px solid var(--border)}
+.version-period{margin:0;border-top:1px solid var(--border)}
+.version-period>summary{min-width:0;display:grid;grid-template-columns:8px minmax(0,1fr) auto;align-items:center;gap:8px;min-height:38px;padding:7px 12px;cursor:pointer;background:var(--surface)}
+.version-period[open]>summary{border-bottom:1px solid var(--border);background:var(--surface-alt)}
+.version-period-title{min-width:0;font-size:12.5px;font-weight:650;line-height:1.35;overflow-wrap:anywhere}
+.version-period-count{color:var(--fg-subtle);font-size:10.5px;font-variant-numeric:tabular-nums;white-space:nowrap}
+.version-entry{margin:0;padding:12px 14px;background:var(--surface)}
+.version-entry+.version-entry{border-top:1px solid var(--border)}
+.version-heading{display:flex;align-items:baseline;justify-content:space-between;gap:14px;margin-bottom:10px;padding-bottom:8px;border-bottom:1px solid var(--border)}
+.version-heading .meta{flex:0 0 auto;margin:0;text-align:right;white-space:nowrap}
+.version-change{margin:0}
+.version-change>.meta{margin:0 0 8px}
+.final-draft-diff-text,.version-change-diff{white-space:pre-wrap;color:var(--fg);font:15px/1.62 var(--font-ui);overflow-wrap:anywhere}
+.compare-token{border-radius:2px;padding:0 2px;text-decoration-thickness:1.6px;text-underline-offset:2px}
+.compare-token.added{background:var(--diff-add-bg);color:var(--diff-add);text-decoration:underline}
+.compare-token.removed{background:var(--diff-del-bg);color:var(--diff-del);text-decoration:line-through}
+@media(max-width:720px){main{padding:16px 14px 42px}.report-header{display:grid;gap:7px}.report-meta{max-width:none;text-align:left}.summary-grid{grid-template-columns:repeat(2,minmax(0,1fr))}.summary-stat:nth-child(2n){border-right:0}.summary-stat:nth-child(-n+2){border-bottom:1px solid var(--border)}.version-heading{display:block}.version-heading .meta{margin-top:3px;text-align:left;white-space:normal}}
+@media(max-width:560px){.contents-header{align-items:flex-start;flex-direction:column}}
+@media(max-width:440px){h1{font-size:21px}.summary-grid{grid-template-columns:1fr}.summary-stat{border-right:0!important;border-bottom:1px solid var(--border)}.summary-stat:last-child{border-bottom:0}.contents-group>ul{margin-left:6px;padding-left:8px}.history-page-section>summary,.version-period>summary{padding-left:9px;padding-right:9px}.version-period>summary{grid-template-columns:8px minmax(0,1fr)}.version-period-count{grid-column:2}.final-draft-diff-text,.version-change-diff{font-size:14.5px}}
+@media print{body{background:#fff;color:#111;font-size:11pt}main{width:auto;max-width:none;padding:0}.summary-actions{display:none}.report-header,.summary-grid,.contents-page,.report-section,.history-page-section,.version-period,.draft-change,.version-entry{background:#fff;box-shadow:none}.draft-change,.version-entry{break-inside:auto}details[data-collapsible]:not([open])>:not(summary){display:block}details[data-collapsible]>summary{list-style:none}details[data-collapsible]>summary::before{display:none}a{color:inherit;text-decoration:none}}
 </style>
 </head>
 <body>
 <main>
-<h1>${escapeHtml(sourceName)} version history summary</h1>
-<p class="meta">Generated ${escapeHtml(formatDate(nowIso()))}. Source text: ${escapeHtml(source.filePath || "companion draft-history.txt")}.</p>
-<div class="summary-grid">
-  <div class="summary-stat"><strong>${(state.drafts || []).length.toLocaleString("en-GB")}</strong> current drafts</div>
-  <div class="summary-stat"><strong>${totalReportVersions.toLocaleString("en-GB")}</strong> text-changing versions shown</div>
-  <div class="summary-stat"><strong>${totalSkippedVersions.toLocaleString("en-GB")}</strong> unchanged versions skipped</div>
-  <div class="summary-stat"><strong>${totalChanges.toLocaleString("en-GB")}</strong> draft-change sections</div>
-</div>
+<header class="report-header">
+  <div class="report-heading">
+    <p class="report-kicker">Draft Diff Editor · Version history</p>
+    <h1>${escapeHtml(sourceName)}</h1>
+  </div>
+  <p class="report-meta">
+    <span>Generated <time datetime="${escapeHtml(generatedAt)}">${escapeHtml(formatDate(generatedAt))}</time></span>
+    <span>Source text: ${escapeHtml(source.filePath || "companion draft-history.txt")}</span>
+  </p>
+</header>
+<dl class="summary-grid" aria-label="Report summary">
+  <div class="summary-stat"><dt>Current ${currentDraftCount === 1 ? "draft" : "drafts"}</dt><dd>${currentDraftCount.toLocaleString("en-GB")}</dd></div>
+  <div class="summary-stat"><dt>Text-changing ${totalReportVersions === 1 ? "version" : "versions"} shown</dt><dd>${totalReportVersions.toLocaleString("en-GB")}</dd></div>
+  <div class="summary-stat"><dt>Unchanged ${totalSkippedVersions === 1 ? "version" : "versions"} skipped</dt><dd>${totalSkippedVersions.toLocaleString("en-GB")}</dd></div>
+  <div class="summary-stat"><dt>Draft-change ${totalChanges === 1 ? "section" : "sections"}</dt><dd>${totalChanges.toLocaleString("en-GB")}</dd></div>
+</dl>
 <nav class="contents-page" aria-label="Contents">
-<h2>Contents</h2>
-<div class="summary-actions" aria-label="Summary controls">
-  <button class="summary-button" type="button" data-summary-action="expand">Expand all</button>
-  <button class="summary-button" type="button" data-summary-action="collapse">Collapse all</button>
+<div class="contents-header">
+  <h2>Contents</h2>
+  <div class="summary-actions" role="group" aria-label="Summary controls">
+    <button class="summary-button" type="button" data-summary-action="expand">Expand all</button>
+    <button class="summary-button" type="button" data-summary-action="collapse">Collapse all</button>
+  </div>
 </div>
 ${contentsHtml}
 </nav>
