@@ -788,7 +788,7 @@ function mergePageVersionHistories(existingHistory, incomingHistory, page, fallb
   addEntries(existing);
   addEntries(normalizePageVersionHistory(incomingHistory, page, fallbackTitle));
 
-  return sortVersionHistoryByCreatedAt(merged);
+  return normalizePageVersionHistory(merged, page, fallbackTitle);
 }
 
 function normalizeHistoryTitle(value) {
@@ -1073,6 +1073,37 @@ function historyTextValues(entry) {
   ].filter(([, value]) => value);
 }
 
+function versionHistorySafetySignature(entry) {
+  return versionHistorySignature({
+    title: entry?.title,
+    content: entry?.content ?? entry?.text,
+    contentHtml: entry?.contentHtml ?? entry?.html,
+    format: entry?.format
+  });
+}
+
+function versionHistoryEntriesAfterAdjacentDeduplication(entries) {
+  const deduped = [];
+  let previousSignature = null;
+  let previousEntryHasMeaningfulContent = false;
+
+  sortVersionHistoryByCreatedAt(entries).forEach(entry => {
+    const signature = versionHistorySafetySignature(entry);
+    const entryHasMeaningfulContent = versionHasMeaningfulContent(entry);
+    if (
+      deduped.length
+      && entryHasMeaningfulContent
+      && previousEntryHasMeaningfulContent
+      && signature === previousSignature
+    ) return;
+    deduped.push(entry);
+    previousSignature = signature;
+    previousEntryHasMeaningfulContent = entryHasMeaningfulContent;
+  });
+
+  return deduped;
+}
+
 function missingVersionHistoryTextEntries(previousPayload, nextPayload) {
   const nextPages = new Map();
   const nextPagesByMatchKey = new Map();
@@ -1093,7 +1124,7 @@ function missingVersionHistoryTextEntries(previousPayload, nextPayload) {
       || nextPagesByMatchKey.get(page.matchKey)
       || nextPagesByTitleMatchKey.get(page.titleMatchKey)
       || new Map();
-    (page.entries || []).forEach((entry, index) => {
+    versionHistoryEntriesAfterAdjacentDeduplication(page.entries).forEach((entry, index) => {
       historyTextValues(entry).forEach(([kind, value]) => {
         if (decrementCount(nextValues, `${kind}\0${value}`)) return;
         missing.push({
@@ -1123,7 +1154,7 @@ function versionHistoryEntryCountLosses(previousPayload, nextPayload) {
 
   const losses = [];
   versionHistoryPayloadPages(previousPayload).forEach(page => {
-    const previousCount = Array.isArray(page.entries) ? page.entries.length : 0;
+    const previousCount = versionHistoryEntriesAfterAdjacentDeduplication(page.entries).length;
     if (!previousCount) return;
     const nextCount = nextPages.get(page.key)
       ?? nextPagesByMatchKey.get(page.matchKey)
@@ -4386,9 +4417,10 @@ function versionHistoryTransactionWrite(state, options = {}) {
   if (!folderPath) return null;
 
   fs.mkdirSync(folderPath, { recursive: true });
-  const filePath = expectedVersionHistoryFilePath({ ...options, requireExistingRoot: true, rootFolderPath });
   const source = historySourceInfo(options);
+  const expectedFilePath = expectedVersionHistoryFilePath({ ...options, requireExistingRoot: true, rootFolderPath });
   const existingHistoryPath = findVersionHistoryFilePath(options);
+  const filePath = existingHistoryPath || expectedFilePath;
   const existingPayload = existingHistoryPath && fileExists(existingHistoryPath)
     ? parseVersionHistoryFile(existingHistoryPath)
     : null;
@@ -10863,6 +10895,7 @@ module.exports = {
     reviewUsbTransferFolder,
     applyUsbTransferFolder,
     updateRegisteredStoryStatus,
-    storySummaryFromTransferFiles
+    storySummaryFromTransferFiles,
+    mergePageVersionHistories
   }
 };

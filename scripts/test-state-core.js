@@ -170,6 +170,61 @@ function run() {
 
   {
     const page = {
+      title: "Draft duplicate cleanup",
+      createdAt: "2026-01-01T00:00:00.000Z",
+      updatedAt: "2026-01-01T00:00:00.000Z",
+      content: "Alpha",
+      contentHtml: "Alpha",
+      format: StateCore.DEFAULT_FORMAT,
+      versionHistory: [
+        {
+          id: "v1",
+          createdAt: "2026-01-01T00:00:00.000Z",
+          title: "Draft duplicate cleanup",
+          content: "Alpha",
+          contentHtml: "Alpha"
+        },
+        {
+          id: "v1-copy",
+          createdAt: "2026-01-01T00:00:02.500Z",
+          title: "Draft duplicate cleanup",
+          content: "Alpha",
+          contentHtml: "Alpha"
+        },
+        {
+          id: "v2",
+          createdAt: "2026-01-01T00:00:05.000Z",
+          title: "Draft duplicate cleanup",
+          content: "Alpha beta",
+          contentHtml: "Alpha beta"
+        },
+        {
+          id: "v2-copy",
+          createdAt: "2026-01-01T00:00:07.500Z",
+          title: "Draft duplicate cleanup",
+          content: "Alpha beta",
+          contentHtml: "Alpha beta"
+        },
+        {
+          id: "v3",
+          createdAt: "2026-01-01T00:00:10.000Z",
+          title: "Draft duplicate cleanup",
+          content: "Alpha",
+          contentHtml: "Alpha"
+        }
+      ]
+    };
+
+    StateCore.ensurePageVersionHistory(page, page.title);
+    assert.deepEqual(page.versionHistory.map(version => version.id), ["v1", "v2", "v3"]);
+
+    page.updatedAt = "2026-01-01T00:00:10.500Z";
+    assert.equal(StateCore.appendPageVersionIfChanged(page, page.title), false);
+    assert.deepEqual(page.versionHistory.map(version => version.id), ["v1", "v2", "v3"]);
+  }
+
+  {
+    const page = {
       title: "",
       createdAt: "2026-01-01T00:00:00.000Z",
       updatedAt: "2026-01-01T00:00:00.000Z",

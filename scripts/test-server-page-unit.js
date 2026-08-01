@@ -16,6 +16,39 @@ const {
   __test
 } = require("../server");
 
+{
+  const page = {
+    title: "Merge duplicate cleanup",
+    content: "Alpha",
+    contentHtml: "Alpha",
+    format: StateCore.DEFAULT_FORMAT,
+    updatedAt: "2026-01-01T00:00:10.000Z",
+    versionHistory: []
+  };
+  const version = (id, createdAt, content) => ({
+    id,
+    createdAt,
+    title: page.title,
+    content,
+    contentHtml: content,
+    format: StateCore.DEFAULT_FORMAT
+  });
+  const merged = __test.mergePageVersionHistories(
+    [
+      version("v1", "2026-01-01T00:00:00.000Z", "Alpha"),
+      version("v2", "2026-01-01T00:00:05.000Z", "Alpha beta"),
+      version("v3", "2026-01-01T00:00:10.000Z", "Alpha")
+    ],
+    [
+      version("v1-copy", "2026-01-01T00:00:02.500Z", "Alpha"),
+      version("v2-copy", "2026-01-01T00:00:07.500Z", "Alpha beta")
+    ],
+    page,
+    page.title
+  );
+  assert.deepEqual(merged.map(entry => entry.id), ["v1", "v2", "v3"]);
+}
+
 assert.deepEqual(__test.macOpenFileDialogScript(), [
   "on run argv",
   "set initialPath to item 1 of argv",
@@ -957,6 +990,68 @@ async function run() {
       summaryHtml,
       /\.closest\((?:"|')\[data-nested-container\](?:"|')\)/u,
       "nested actions should resolve their nearest parent dropdown"
+    );
+
+    const cleanupHistoryRoot = path.join(dataDir, "cleanup-history");
+    const cleanupLinkedPath = path.join(dataDir, "cleanup-source.txt");
+    const cleanupHistoryPath = path.join(
+      cleanupHistoryRoot,
+      "jsons",
+      "cleanup-source.version-history.json"
+    );
+    fs.mkdirSync(path.dirname(cleanupHistoryPath), { recursive: true });
+    fs.writeFileSync(cleanupLinkedPath, "Alpha", "utf8");
+    __test.writeVersionHistoryFolderPath(cleanupHistoryRoot);
+    __test.writeTextFileLink(cleanupLinkedPath);
+    fs.writeFileSync(
+      path.join(dataDir, "project.json"),
+      `${JSON.stringify(StateCore.stateForStorage(fixtureState()), null, 2)}\n`,
+      "utf8"
+    );
+    fs.writeFileSync(
+      cleanupHistoryPath,
+      `${JSON.stringify({
+        version: 1,
+        sourceFileName: "cleanup-source.txt",
+        sourceFilePath: cleanupLinkedPath,
+        story: { title: "Project notes", history: [] },
+        drafts: [{
+          id: "draft-a",
+          index: 0,
+          title: "Draft A",
+          history: [
+            {
+              id: "cleanup-1",
+              createdAt: "2026-01-01T00:00:00.000Z",
+              title: "Draft A",
+              content: "Alpha",
+              contentHtml: "Alpha"
+            },
+            {
+              id: "cleanup-2",
+              createdAt: "2026-01-01T00:00:02.500Z",
+              title: "Draft A",
+              content: "Alpha",
+              contentHtml: "Alpha"
+            }
+          ]
+        }]
+      }, null, 2)}\n`,
+      "utf8"
+    );
+
+    await api(baseUrl, "/api/page", {
+      method: "PATCH",
+      body: JSON.stringify({
+        key: "draft:draft-a:content",
+        page: { content: "Alpha", contentHtml: "Alpha" }
+      })
+    });
+    const cleanedHistory = JSON.parse(fs.readFileSync(cleanupHistoryPath, "utf8"));
+    assert.equal(
+      cleanedHistory.drafts[0].history.filter(version => version.content === "Alpha").length,
+      1,
+      "saving a project with an existing sidecar should persist duplicate cleanup"
     );
 
     await api(baseUrl, "/api/page", {

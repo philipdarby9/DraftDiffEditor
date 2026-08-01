@@ -254,7 +254,7 @@
       if (versionHasMeaningfulContent(current)) normalized.push(current);
     }
 
-    return sortVersionHistoryByCreatedAt(normalized);
+    return dedupeAdjacentVersionHistory(sortVersionHistoryByCreatedAt(normalized));
   }
 
   function normalizeDraftVersionHistory(history, draft) {
@@ -291,6 +291,20 @@
       contentHtml: asText(version?.contentHtml),
       format: normalizeFormat(version?.format || {})
     });
+  }
+
+  function dedupeAdjacentVersionHistory(history) {
+    const deduped = [];
+    let previousSignature = null;
+
+    (Array.isArray(history) ? history : []).forEach(version => {
+      const signature = pageVersionSignature(version);
+      if (deduped.length && signature === previousSignature) return;
+      deduped.push(version);
+      previousSignature = signature;
+    });
+
+    return deduped;
   }
 
   function latestVersionHistoryEntry(history) {

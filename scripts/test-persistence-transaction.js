@@ -446,11 +446,12 @@ try {
     fileName: "linked.txt"
   });
   const sameTextAfterSave = JSON.parse(readText(linkedHistoryPath));
-  const sameTextHistoryIds = sameTextAfterSave.drafts[0].history.map(version => version.id);
+  const sameTextHistory = sameTextAfterSave.drafts[0].history
+    .filter(version => version.content === "Same saved text");
   assert.equal(
-    sameTextHistoryIds.includes("same-text-1") && sameTextHistoryIds.includes("same-text-2"),
-    true,
-    "normal save should preserve separate saved versions even when their text is identical"
+    sameTextHistory.length,
+    1,
+    "normal save should collapse adjacent saved versions when their full snapshot is identical"
   );
 
   const retiredStoryPath = path.join(dataDir, "retired-story.txt");
