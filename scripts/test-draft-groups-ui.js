@@ -93,6 +93,43 @@ async function run() {
     await window.loadURL(started.url);
     await waitFor(window, "state?.drafts?.length === 105", "105-draft fixture");
 
+    const pageScrollbarLayout = await window.webContents.executeJavaScript(`
+      (() => {
+        const canvas = document.querySelector("#page-canvas");
+        const editor = canvas?.querySelector(".rich-editor");
+        const resizer = canvas?.querySelector(".page-width-resizer");
+        const handle = resizer?.querySelector(".page-width-resizer-handle");
+        const resizerRect = resizer?.getBoundingClientRect();
+        const canvasRect = canvas?.getBoundingClientRect();
+        const lineTarget = resizerRect && canvasRect
+          ? document.elementFromPoint(
+              resizerRect.left + resizerRect.width / 2,
+              canvasRect.top + 100
+            )
+          : null;
+        return {
+          resizerPointerEvents: resizer ? getComputedStyle(resizer).pointerEvents : "",
+          handlePointerEvents: handle ? getComputedStyle(handle).pointerEvents : "",
+          lineTarget: lineTarget?.className || "",
+          scrollbarWidth: editor
+            ? getComputedStyle(editor, "::-webkit-scrollbar").width
+            : "",
+          scrollbarThumbCursor: editor
+            ? getComputedStyle(editor, "::-webkit-scrollbar-thumb").cursor
+            : ""
+        };
+      })()
+    `);
+    assert.equal(
+      pageScrollbarLayout.resizerPointerEvents,
+      "none"
+    );
+    assert.equal(pageScrollbarLayout.handlePointerEvents, "auto");
+    assert.notEqual(pageScrollbarLayout.lineTarget, "page-width-resizer");
+    assert.notEqual(pageScrollbarLayout.lineTarget, "page-width-resizer-handle");
+    assert.equal(pageScrollbarLayout.scrollbarWidth, "8px");
+    assert.equal(pageScrollbarLayout.scrollbarThumbCursor, "pointer");
+
     const boundaries = await window.webContents.executeJavaScript(`
       (() => {
         const allDrafts = state.drafts.slice();

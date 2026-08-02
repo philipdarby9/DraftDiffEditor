@@ -6716,13 +6716,17 @@ function pageWidthResizerHtml(beforeKey, afterKey) {
   return `
     <div
       class="page-width-resizer"
-      data-resize-page-before="${escapeHtml(beforeKey)}"
-      data-resize-page-after="${escapeHtml(afterKey)}"
-      role="separator"
-      aria-orientation="vertical"
-      aria-label="Resize page panels"
-      tabindex="0"
-    ></div>
+    >
+      <button
+        class="page-width-resizer-handle"
+        type="button"
+        data-resize-page-before="${escapeHtml(beforeKey)}"
+        data-resize-page-after="${escapeHtml(afterKey)}"
+        role="separator"
+        aria-orientation="vertical"
+        aria-label="Resize page panels"
+      ></button>
+    </div>
   `;
 }
 

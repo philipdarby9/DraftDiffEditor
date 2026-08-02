@@ -3000,7 +3000,7 @@ select:hover {
   margin: 0 -7px;
   position: relative;
   z-index: 5;
-  cursor: col-resize;
+  pointer-events: none;
   scroll-snap-align: none;
 }
 
@@ -3016,7 +3016,6 @@ select:hover {
   transition: background 100ms ease, width 100ms ease;
 }
 
-.page-width-resizer::after,
 .notes-resizer::after {
   content: "";
   position: absolute;
@@ -3031,15 +3030,16 @@ select:hover {
 }
 
 .page-width-resizer:hover::before,
-.page-width-resizer:focus-visible::before,
-.page-canvas.is-page-resizing .page-width-resizer.is-active::before {
+.page-width-resizer:has(.page-width-resizer-handle:hover)::before,
+.page-width-resizer:has(.page-width-resizer-handle:focus-visible)::before,
+.page-canvas.is-page-resizing .page-width-resizer::before {
   width: 2px;
   background: var(--resize-accent);
 }
 
-.page-width-resizer:hover::after,
-.page-width-resizer:focus-visible::after,
-.page-canvas.is-page-resizing .page-width-resizer.is-active::after,
+.page-width-resizer-handle:hover,
+.page-width-resizer-handle:focus-visible,
+.page-canvas.is-page-resizing .page-width-resizer-handle.is-active,
 .notes-resizer:hover::after,
 .notes-resizer:focus-visible::after,
 .draft-stack-page.is-resizing .notes-resizer::after {
@@ -3048,9 +3048,23 @@ select:hover {
   box-shadow: 0 4px 16px oklch(22% 0.03 75 / 0.16);
 }
 
-.page-width-resizer::after {
+.page-width-resizer-handle {
+  appearance: none;
+  position: absolute;
+  left: 50%;
+  top: 50%;
   width: 8px;
   height: 22px;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  box-shadow: var(--shadow-menu);
+  transform: translate(-50%, -50%);
+  cursor: col-resize;
+  pointer-events: auto;
+  transition: border-color 100ms ease, box-shadow 100ms ease, background 100ms ease;
 }
 
 .notes-resizer::after {
@@ -5648,6 +5662,7 @@ textarea {
   background: oklch(82% 0.012 80);
   border-radius: 6px;
   border: 2px solid var(--surface);
+  cursor: pointer;
 }
 
 .page-canvas::-webkit-scrollbar-thumb:hover,
