@@ -169,6 +169,17 @@ assert.equal(unchangedReview.merge.counts.usbOnly, 0);
 assert.equal(unchangedReview.merge.counts.localOnly, 0);
 assert.equal(unchangedReview.merge.counts.bothChanged, 0);
 
+const progressEvents = [];
+const progressReview = __test.reviewUsbTransferFolder(exported.packageFolderPath, {
+  progress: progress => progressEvents.push(progress)
+});
+assert.equal(progressReview.merge.status, unchangedReview.merge.status);
+assert.ok(progressEvents.some(progress => progress.indeterminate), "USB review should report indeterminate long-running stages");
+assert.ok(progressEvents.some(progress => /Checking story file/u.test(progress.step)), "USB review should report item checks");
+const finalProgress = progressEvents[progressEvents.length - 1];
+assert.equal(finalProgress.step, "Review complete");
+assert.equal(finalProgress.completed, finalProgress.total);
+
 const newComputerPackagePath = path.join(dataDir, "new-computer-package");
 fs.cpSync(exported.packageFolderPath, newComputerPackagePath, { recursive: true });
 const newComputerManifestPath = path.join(newComputerPackagePath, path.basename(exported.manifestPath));
@@ -750,4 +761,27 @@ const cachedTargetLocations = Object.values(JSON.parse(fs.readFileSync(__test.TE
   .map(entry => entry.filePath);
 assert.deepEqual(cachedTargetLocations, [movedTargetPath], "relocating a story should remove its stale cached path");
 
-console.log("USB transfer review test passed");
+async function waitForUsbReviewJob(jobId) {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const payload = __test.usbTransferReviewJobProgress(jobId);
+    assert.equal(payload.ok, true);
+    const progress = payload.progress;
+    if (progress.status === "complete" || progress.status === "failed") return progress;
+    await new Promise(resolve => setTimeout(resolve, 25));
+  }
+  throw new Error(`Timed out waiting for USB review job ${jobId}`);
+}
+
+(async () => {
+  const started = __test.startUsbTransferReviewJobFromFolder(exported.packageFolderPath);
+  assert.equal(started.ok, true);
+  assert.ok(started.jobId);
+  const completed = await waitForUsbReviewJob(started.jobId);
+  assert.equal(completed.status, "complete", completed.error);
+  assert.equal(completed.result?.ok, true);
+  assert.equal(completed.completed, completed.total);
+  console.log("USB transfer review test passed");
+})().catch(error => {
+  console.error(error);
+  process.exitCode = 1;
+});

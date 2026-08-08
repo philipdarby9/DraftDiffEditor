@@ -85,6 +85,7 @@ let processExitRequested = false;
 const cutHistoryJobs = new Map();
 const cutHistoryIdleWaiters = new Set();
 const versionSummaryJobs = new Map();
+const usbTransferReviewJobs = new Map();
 const versionHistoryPathCache = new Map();
 const versionHistoryRetentionJobs = new Map();
 const versionHistoryRetentionPlans = new Map();
@@ -8191,16 +8192,66 @@ function readUsbTransferManifest(folderPath) {
   };
 }
 
-function reviewUsbTransferFolder(folderPath) {
+function reviewUsbTransferFolder(folderPath, options = {}) {
+  const reportProgress = typeof options === "function"
+    ? options
+    : typeof options?.progress === "function" ? options.progress : () => {};
+  const progress = update => reportProgress({
+    completed: Number(update.completed) || 0,
+    total: Math.max(Number(update.total) || 1, 1),
+    indeterminate: Boolean(update.indeterminate),
+    step: asText(update.step) || "Working..."
+  });
+
+  progress({
+    step: "Reading transfer manifest",
+    completed: 0,
+    total: 1,
+    indeterminate: true
+  });
   const { manifestPath, packageFolderPath, manifest } = readUsbTransferManifest(folderPath);
-  const entries = manifest.items.flatMap(item => (
-    item.kind === "directory"
-      ? compareTransferDirectoryItem(item, packageFolderPath, manifest)
-      : compareTransferFileItem(item, packageFolderPath, manifest)
-  ));
+  const total = Math.max(1, manifest.items.length + 3);
+  progress({
+    step: "Checking transfer contents",
+    completed: 0,
+    total,
+    indeterminate: false
+  });
+
+  const entries = [];
+  manifest.items.forEach((item, index) => {
+    const label = item.role === "storyText"
+      ? "story file"
+      : item.role === "backupFolder"
+        ? "backup folder"
+        : asText(item.label) || "transfer item";
+    progress({
+      step: `Checking ${label}`,
+      completed: index,
+      total,
+      indeterminate: true
+    });
+    entries.push(...(
+      item.kind === "directory"
+        ? compareTransferDirectoryItem(item, packageFolderPath, manifest)
+        : compareTransferFileItem(item, packageFolderPath, manifest)
+    ));
+    progress({
+      step: `Checked ${label}`,
+      completed: index + 1,
+      total,
+      indeterminate: false
+    });
+  });
 
   const storyItem = manifest.items.find(item => item.role === "storyText");
   const backupItem = manifest.items.find(item => item.role === "backupFolder");
+  progress({
+    step: "Comparing story history",
+    completed: manifest.items.length,
+    total,
+    indeterminate: true
+  });
   const usbStorySummary = storyItem
     ? storySummaryFromTransferFiles(
         pathFromPortable(packageFolderPath, storyItem.packagePath),
@@ -8208,6 +8259,12 @@ function reviewUsbTransferFolder(folderPath) {
       )
     : null;
 
+  progress({
+    step: "Preparing import review",
+    completed: manifest.items.length + 1,
+    total,
+    indeterminate: true
+  });
   const review = {
     ok: true,
     manifestPath,
@@ -8241,7 +8298,179 @@ function reviewUsbTransferFolder(folderPath) {
     })()
   };
   review.merge = createUsbTransferMergeReview(review);
+  progress({
+    step: "Review complete",
+    completed: total,
+    total,
+    indeterminate: false
+  });
   return review;
+}
+
+function usbTransferReviewJobSnapshot(job) {
+  if (!job) return null;
+  const elapsedMs = Date.now() - new Date(job.startedAt).getTime();
+  return {
+    id: job.id,
+    ok: job.status !== "failed",
+    status: job.status,
+    step: job.step,
+    completed: job.completed,
+    total: job.total,
+    indeterminate: Boolean(job.indeterminate),
+    startedAt: job.startedAt,
+    updatedAt: job.updatedAt,
+    elapsedMs,
+    result: job.result || null,
+    error: job.error || ""
+  };
+}
+
+function updateUsbTransferReviewJob(job, patch = {}) {
+  Object.assign(job, patch, { updatedAt: nowIso() });
+}
+
+function scheduleUsbTransferReviewJobCleanup(job) {
+  if (job.cleanupTimer) return;
+  job.cleanupTimer = setTimeout(() => {
+    usbTransferReviewJobs.delete(job.id);
+  }, 60 * 60_000);
+  job.cleanupTimer.unref?.();
+}
+
+function completeUsbTransferReviewJob(job, patch = {}) {
+  updateUsbTransferReviewJob(job, patch);
+  scheduleUsbTransferReviewJobCleanup(job);
+}
+
+function usbTransferReviewWorkerSource() {
+  return `
+    const { parentPort, workerData } = require("node:worker_threads");
+    Promise.resolve()
+      .then(() => {
+        const server = require(workerData.serverPath);
+        return server.reviewUsbTransferFolder(
+          workerData.folderPath,
+          progress => parentPort.postMessage({ type: "progress", progress })
+        );
+      })
+      .then(result => parentPort.postMessage({ type: "complete", result }))
+      .catch(error => {
+        parentPort.postMessage({
+          type: "error",
+          error: error && error.stack ? error.stack : String(error)
+        });
+      });
+  `;
+}
+
+function startUsbTransferReviewWorker(job, folderPath) {
+  const worker = new Worker(usbTransferReviewWorkerSource(), {
+    eval: true,
+    workerData: {
+      serverPath: __filename,
+      folderPath: path.resolve(folderPath)
+    }
+  });
+  job.worker = worker;
+
+  worker.on("message", message => {
+    if (message?.type === "progress") {
+      const progress = message.progress || {};
+      updateUsbTransferReviewJob(job, {
+        status: "running",
+        step: progress.step || job.step,
+        completed: Number.isFinite(progress.completed) ? progress.completed : job.completed,
+        total: Number.isFinite(progress.total) ? progress.total : job.total,
+        indeterminate: Boolean(progress.indeterminate)
+      });
+      return;
+    }
+
+    if (message?.type === "complete") {
+      completeUsbTransferReviewJob(job, {
+        status: "complete",
+        step: "Review complete",
+        completed: job.total || 1,
+        indeterminate: false,
+        result: message.result || null
+      });
+      return;
+    }
+
+    if (message?.type === "error") {
+      completeUsbTransferReviewJob(job, {
+        status: "failed",
+        step: "Failed",
+        indeterminate: false,
+        error: message.error || "USB review worker failed"
+      });
+    }
+  });
+
+  worker.on("error", error => {
+    completeUsbTransferReviewJob(job, {
+      status: "failed",
+      step: "Failed",
+      indeterminate: false,
+      error: error?.stack || error?.message || String(error)
+    });
+  });
+
+  worker.on("exit", code => {
+    if (code && job.status !== "failed" && job.status !== "complete") {
+      completeUsbTransferReviewJob(job, {
+        status: "failed",
+        step: "Failed",
+        indeterminate: false,
+        error: `USB review worker exited with code ${code}.`
+      });
+      return;
+    }
+
+    if (job.status === "complete" || job.status === "failed") scheduleUsbTransferReviewJobCleanup(job);
+  });
+}
+
+function startUsbTransferReviewJobFromFolder(folderPath) {
+  const { manifest } = readUsbTransferManifest(folderPath);
+  const job = {
+    id: id("usb-review"),
+    status: "queued",
+    step: "Preparing USB review",
+    completed: 0,
+    total: Math.max(1, manifest.items.length + 3),
+    indeterminate: true,
+    startedAt: nowIso(),
+    updatedAt: nowIso(),
+    result: null,
+    error: ""
+  };
+  usbTransferReviewJobs.set(job.id, job);
+
+  try {
+    startUsbTransferReviewWorker(job, folderPath);
+  } catch (error) {
+    completeUsbTransferReviewJob(job, {
+      status: "failed",
+      step: "Failed",
+      indeterminate: false,
+      error: error?.message || String(error)
+    });
+  }
+
+  return {
+    ok: true,
+    jobId: job.id,
+    progress: usbTransferReviewJobSnapshot(job)
+  };
+}
+
+function usbTransferReviewJobProgress(jobId) {
+  const job = usbTransferReviewJobs.get(asText(jobId));
+  return job
+    ? { ok: true, progress: usbTransferReviewJobSnapshot(job) }
+    : { ok: false, error: "USB review job not found" };
 }
 
 function importBackupRootForManifest(manifest) {
@@ -9103,6 +9332,12 @@ async function reviewUsbTransferFromRequestBody() {
   const folderPath = await chooseUsbTransferFolder("Select the returned DraftDiff USB transfer folder");
   if (!folderPath) return { ok: false, cancelled: true };
   return reviewUsbTransferFolder(folderPath);
+}
+
+async function startUsbTransferReviewFromRequestBody() {
+  const folderPath = await chooseUsbTransferFolder("Select the returned DraftDiff USB transfer folder");
+  if (!folderPath) return { ok: false, cancelled: true };
+  return startUsbTransferReviewJobFromFolder(folderPath);
 }
 
 function importUsbTransferFromRequestBody(body) {
@@ -10699,6 +10934,21 @@ async function handleApi(req, res, pathname) {
     return;
   }
 
+  if (req.method === "POST" && pathname === "/api/usb-transfer/review/start") {
+    markClientActive();
+    const result = await startUsbTransferReviewFromRequestBody();
+    sendJson(res, 200, result);
+    return;
+  }
+
+  if (req.method === "GET" && pathname === "/api/usb-transfer/review/progress") {
+    markClientActive();
+    const jobId = new URL(req.url, `http://${req.headers.host || "localhost"}`).searchParams.get("id") || "";
+    const payload = usbTransferReviewJobProgress(jobId);
+    sendJson(res, payload.ok ? 200 : 404, payload);
+    return;
+  }
+
   if (req.method === "POST" && pathname === "/api/usb-transfer/import") {
     markClientActive();
     const body = await readBody(req);
@@ -10880,6 +11130,9 @@ module.exports = {
   openRecentTextFileFromRequestBody,
   exportUsbTransferFromRequestBody,
   reviewUsbTransferFromRequestBody,
+  startUsbTransferReviewFromRequestBody,
+  usbTransferReviewJobProgress,
+  reviewUsbTransferFolder,
   importUsbTransferFromRequestBody,
   writeBackupFromRequestBody,
   saveStateFromRequestBody,
@@ -10931,6 +11184,8 @@ module.exports = {
     usbTransferTimestamp,
     createUsbTransferPackage,
     reviewUsbTransferFolder,
+    startUsbTransferReviewJobFromFolder,
+    usbTransferReviewJobProgress,
     applyUsbTransferFolder,
     updateRegisteredStoryStatus,
     storySummaryFromTransferFiles,

@@ -28,6 +28,9 @@ assert.match(stylesSource, /"restore coalesced"/, "version history headers shoul
 assert.match(stylesSource, /\.version-history-strip \.version-coalesced\s*\{[\s\S]*?grid-area: coalesced;/, "coalesced metadata should use its reserved grid area");
 assert.match(appSource, /function updateAppProgress\(progress = \{\}\)/, "file imports should have app-level progress reporting");
 assert.match(appSource, /document\.body\.setAttribute\("aria-busy", "true"\)/, "file import progress should mark the app busy for assistive tech");
+assert.match(appSource, /function startUsbTransferReviewJob\(\)/, "USB review should start as a background job");
+assert.match(appSource, /\/api\/usb-transfer\/review\/progress\?id=/, "USB review should poll background progress");
+assert.match(appSource, /title: "Reviewing USB import"/, "USB review should use the app progress overlay");
 assert.match(stylesSource, /\.app-progress-overlay/, "file import progress should have a visible overlay");
 assert.match(stylesSource, /\.app-progress-track\.is-indeterminate/, "file import progress should support indeterminate phases");
 

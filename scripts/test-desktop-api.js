@@ -25,6 +25,8 @@ assert.doesNotMatch(preloadSource, /\bshowItemInFolder\s*:/, "preload should not
 assert.match(mainSource, /resolveGeneratedReportPath/, "desktop opener should validate generated report paths");
 assert.match(mainSource, /draft-diff:open-generated-report/, "main should register report-specific open IPC");
 assert.match(mainSource, /draft-diff:show-generated-report-in-folder/, "main should register report-specific reveal IPC");
+assert.match(mainSource, /ipcFailurePayload\("open generated report"/, "report open IPC should always return a failure payload");
+assert.match(mainSource, /spawn\("xdg-open"/, "Linux report opening should use a non-blocking desktop opener");
 assert.match(mainSource, /draft-diff:activate-backup/, "main should register backup activation IPC");
 assert.match(mainSource, /draft-diff:deactivate-backup/, "main should register backup deactivation IPC");
 assert.match(mainSource, /draft-diff:select-version-history-folder/, "main should register version-history folder selection IPC");
@@ -41,6 +43,7 @@ assert.doesNotMatch(mainSource, /draft-diff:show-item-in-folder/, "main should n
 
 assert.match(appSource, /draftDiffDesktop\?\.openGeneratedReport/, "browser should call report-specific open API");
 assert.match(appSource, /draftDiffDesktop\?\.showGeneratedReportInFolder/, "browser should call report-specific reveal API");
+assert.match(appSource, /payload\.ok === false/, "browser should surface report opener failure payloads");
 assert.match(appSource, /draftDiffDesktop\?\.activateBackup/, "browser should fall back to desktop backup activation");
 assert.match(appSource, /draftDiffDesktop\?\.deactivateBackup/, "browser should fall back to desktop backup deactivation");
 assert.match(appSource, /draftDiffDesktop\?\.selectVersionHistoryFolder/, "browser should fall back to desktop version-history folder selection");

@@ -1,4 +1,5 @@
 const path = require("node:path");
+const { spawn } = require("node:child_process");
 const fsSync = require("node:fs");
 const fs = require("node:fs/promises");
 const { app, BrowserWindow, Menu, ipcMain, shell, dialog, screen } = require("electron");
@@ -192,9 +193,41 @@ function resolveGeneratedReportPath(value) {
 
 async function openGeneratedReport(value) {
   const reportPath = resolveGeneratedReportPath(value);
-  const error = await shell.openPath(reportPath);
-  if (error) throw new Error(error);
+  if (process.platform === "linux") {
+    await openPathWithLinuxDesktop(reportPath);
+  } else {
+    const error = await shell.openPath(reportPath);
+    if (error) throw new Error(error);
+  }
   return { ok: true, reportPath };
+}
+
+function openPathWithLinuxDesktop(filePath) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      callback(value);
+    };
+
+    let child;
+    try {
+      child = spawn("xdg-open", [filePath], {
+        detached: true,
+        stdio: "ignore"
+      });
+    } catch (error) {
+      finish(reject, error);
+      return;
+    }
+
+    child.once("error", error => finish(reject, error));
+    child.once("spawn", () => {
+      child.unref();
+      finish(resolve);
+    });
+  });
 }
 
 function showGeneratedReportInFolder(value) {
@@ -657,8 +690,12 @@ app.whenReady()
       const api = loadServerApi();
       return api.versionHistorySummaryJobProgress(String(jobId || ""));
     });
-    ipcMain.handle("draft-diff:open-generated-report", (_event, reportPath) => openGeneratedReport(reportPath));
-    ipcMain.handle("draft-diff:show-generated-report-in-folder", (_event, reportPath) => showGeneratedReportInFolder(reportPath));
+    ipcMain.handle("draft-diff:open-generated-report", (_event, reportPath) => {
+      return ipcFailurePayload("open generated report", () => openGeneratedReport(reportPath));
+    });
+    ipcMain.handle("draft-diff:show-generated-report-in-folder", (_event, reportPath) => {
+      return ipcFailurePayload("show generated report in folder", () => showGeneratedReportInFolder(reportPath));
+    });
     ipcMain.handle("draft-diff:open-text-file", () => openTextFileWithDesktopDialog());
     ipcMain.handle("draft-diff:read-text-file-path", (_event, filePath) => {
       const api = loadServerApi();

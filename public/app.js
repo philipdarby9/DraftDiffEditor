@@ -9497,7 +9497,8 @@ async function openGeneratedSummaryReport() {
   if (!latestSummaryReportPath) return;
   try {
     if (!window.draftDiffDesktop?.openGeneratedReport) throw new Error("Desktop file opener unavailable");
-    await window.draftDiffDesktop.openGeneratedReport(latestSummaryReportPath);
+    const payload = await window.draftDiffDesktop.openGeneratedReport(latestSummaryReportPath);
+    if (payload?.ok === false) throw new Error(payload.error || "Could not open summary");
     setStatus("Opened version history summary");
   } catch (error) {
     console.error(error);
@@ -9509,7 +9510,8 @@ async function revealGeneratedSummaryReport() {
   if (!latestSummaryReportPath) return;
   try {
     if (!window.draftDiffDesktop?.showGeneratedReportInFolder) throw new Error("Desktop folder opener unavailable");
-    await window.draftDiffDesktop.showGeneratedReportInFolder(latestSummaryReportPath);
+    const payload = await window.draftDiffDesktop.showGeneratedReportInFolder(latestSummaryReportPath);
+    if (payload?.ok === false) throw new Error(payload.error || "Could not open summary folder");
     setStatus("Opened summary folder");
   } catch (error) {
     console.error(error);
@@ -11963,25 +11965,88 @@ async function exportUsbTransfer() {
   }
 }
 
+async function startUsbTransferReviewJob() {
+  const response = await fetch("/api/usb-transfer/review/start", { method: "POST" });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+async function fetchUsbTransferReviewProgress(jobId) {
+  const response = await fetch(`/api/usb-transfer/review/progress?id=${encodeURIComponent(jobId)}`, {
+    cache: "no-store"
+  });
+  if (!response.ok) throw new Error(await response.text());
+  return response.json();
+}
+
+function updateUsbTransferReviewProgress(progress = {}) {
+  const total = Math.max(Number(progress.total) || 1, 1);
+  const completed = Math.min(total, Math.max(0, Number(progress.completed) || 0));
+  const failed = progress.status === "failed";
+  updateAppProgress({
+    title: "Reviewing USB import",
+    step: failed
+      ? `Failed: ${progress.error || "USB review failed"}`
+      : progress.step || "Preparing...",
+    completed,
+    total,
+    indeterminate: Boolean(progress.indeterminate) && !failed,
+    meta: `${Math.round(completed).toLocaleString("en-GB")} of ${Math.round(total).toLocaleString("en-GB")} · ${formatElapsedMs(progress.elapsedMs)}`
+  });
+}
+
+async function waitForUsbTransferReview(jobId, initialProgress = {}) {
+  let progress = initialProgress;
+  updateUsbTransferReviewProgress(progress);
+
+  while (progress.status !== "complete" && progress.status !== "failed") {
+    await new Promise(resolve => window.setTimeout(resolve, 400));
+    const payload = await fetchUsbTransferReviewProgress(jobId);
+    if (!payload.ok) throw new Error(payload.error || "USB review progress unavailable");
+    progress = payload.progress || {};
+    updateUsbTransferReviewProgress(progress);
+  }
+
+  if (progress.status === "failed") {
+    throw new Error(progress.error || "USB review failed");
+  }
+  return progress.result;
+}
+
 async function reviewUsbTransfer() {
   closeFileMenu();
 
   try {
     setStatus("Choose returned USB transfer folder...");
-    const response = await fetch("/api/usb-transfer/review", { method: "POST" });
-    if (!response.ok) throw new Error(await response.text());
+    await showAppProgress({
+      title: "Reviewing USB import",
+      step: "Choose returned USB transfer folder...",
+      completed: 0,
+      total: 1,
+      indeterminate: true,
+      meta: "Waiting for folder..."
+    });
 
-    const payload = await response.json();
-    if (payload.cancelled) {
+    const started = await startUsbTransferReviewJob();
+    if (started?.cancelled) {
       setStatus("USB review cancelled");
       return;
     }
+    if (!started?.ok) throw new Error(started?.error || "USB review job did not start");
+
+    const jobId = started.jobId || started.progress?.id;
+    if (!jobId) throw new Error("USB review job did not start");
+    setStatus("Reviewing USB import...");
+    const payload = await waitForUsbTransferReview(jobId, started.progress || {});
+    if (!payload?.ok) throw new Error(payload?.error || "USB review failed");
 
     renderTransferReview(payload);
     setStatus(`USB import review ready · ${USB_REVIEW_BUILD}`);
   } catch (error) {
     console.error(error);
     setStatus(`USB review failed: ${error?.message || "Unknown error"}`);
+  } finally {
+    hideAppProgress();
   }
 }
 
