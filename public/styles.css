@@ -5210,6 +5210,57 @@ textarea {
   white-space: nowrap;
 }
 
+/* Keep ordinary comparison titles out of the metadata's intrinsic-width column. */
+.compare-page:not(.version-page) .compare-page-header {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: auto auto auto;
+  align-items: center;
+  gap: 4px 0;
+}
+
+.compare-page:not(.version-page) .compare-page-header .kicker {
+  grid-column: 1;
+  grid-row: 1;
+}
+
+.compare-page:not(.version-page) .compare-page-header .title-row {
+  grid-column: 1;
+  grid-row: 2;
+  width: 100%;
+}
+
+.compare-page:not(.version-page) .compare-page-header .meta {
+  grid-column: 1;
+  grid-row: 3;
+  width: 100%;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 12px;
+  text-align: left;
+  white-space: normal;
+}
+
+.compare-page:not(.version-page) .compare-page-header .meta > div:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.compare-page:not(.version-page) .compare-page-header .compare-stats {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: baseline;
+  gap: 12px;
+  margin-top: 0;
+}
+
+.compare-page:not(.version-page) .compare-page-header .stat {
+  margin-left: 0;
+}
+
 .version-history-strip .version-page-header {
   height: 86px;
   min-height: 86px;
