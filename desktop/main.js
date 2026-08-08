@@ -623,6 +623,12 @@ app.whenReady()
       const api = loadServerApi();
       return api.backupProjectFromRequestBody(String(body || ""));
     });
+    ipcMain.handle("draft-diff:export-usb-transfer", (_event, body) => {
+      return ipcFailurePayload("export USB transfer", async () => {
+        const api = loadServerApi();
+        return api.exportUsbTransferFromRequestBody(String(body || ""));
+      });
+    });
     ipcMain.handle("draft-diff:activate-backup", () => {
       return ipcFailurePayload("activate backup folder", async () => {
         const api = loadServerApi();

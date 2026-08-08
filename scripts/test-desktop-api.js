@@ -16,6 +16,7 @@ assert.match(preloadSource, /showGeneratedReportInFolder:/, "preload should expo
 assert.match(preloadSource, /activateBackup:/, "preload should expose backup activation");
 assert.match(preloadSource, /deactivateBackup:/, "preload should expose backup deactivation");
 assert.match(preloadSource, /selectVersionHistoryFolder:/, "preload should expose version-history folder selection");
+assert.match(preloadSource, /exportUsbTransfer:/, "preload should expose the large-payload USB export API");
 assert.match(preloadSource, /webUtils\.getPathForFile\(file\)/, "fallback file opening should derive its path only from a user-selected File");
 assert.match(preloadSource, /draft-diff:read-text-file-path/, "preload should pass a fallback-selected text file to the read-only desktop API");
 assert.doesNotMatch(preloadSource, /\bopenPath\s*:/, "preload should not expose a generic path opener");
@@ -27,6 +28,7 @@ assert.match(mainSource, /draft-diff:show-generated-report-in-folder/, "main sho
 assert.match(mainSource, /draft-diff:activate-backup/, "main should register backup activation IPC");
 assert.match(mainSource, /draft-diff:deactivate-backup/, "main should register backup deactivation IPC");
 assert.match(mainSource, /draft-diff:select-version-history-folder/, "main should register version-history folder selection IPC");
+assert.match(mainSource, /draft-diff:export-usb-transfer/, "main should register the direct USB export IPC");
 assert.match(mainSource, /draft-diff:read-text-file-path/, "main should register read-only fallback text-file IPC");
 assert.match(mainSource, /openedTextFilePayload\(selectedPath\)/, "fallback text-file IPC should use the read-only server payload");
 assert.match(mainSource, /WINDOW_STATE_FILE = "window-state\.json"/, "desktop should persist window state");
@@ -42,6 +44,7 @@ assert.match(appSource, /draftDiffDesktop\?\.showGeneratedReportInFolder/, "brow
 assert.match(appSource, /draftDiffDesktop\?\.activateBackup/, "browser should fall back to desktop backup activation");
 assert.match(appSource, /draftDiffDesktop\?\.deactivateBackup/, "browser should fall back to desktop backup deactivation");
 assert.match(appSource, /draftDiffDesktop\?\.selectVersionHistoryFolder/, "browser should fall back to desktop version-history folder selection");
+assert.match(appSource, /draftDiffDesktop\?\.exportUsbTransfer/, "desktop should bypass the HTTP body limit for USB export");
 assert.doesNotMatch(appSource, /draftDiffDesktop\.(openPath|showItemInFolder)/, "browser should not call generic path APIs");
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "draft-diff-report-api-"));

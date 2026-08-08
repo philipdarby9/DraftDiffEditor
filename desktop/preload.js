@@ -24,6 +24,7 @@ contextBridge.exposeInMainWorld("draftDiffDesktop", {
   saveState: body => ipcRenderer.invoke("draft-diff:save-state", String(body || "")),
   saveAsTextFile: body => ipcRenderer.invoke("draft-diff:save-as-text-file", String(body || "")),
   backupProject: body => ipcRenderer.invoke("draft-diff:backup-project", String(body || "")),
+  exportUsbTransfer: body => ipcRenderer.invoke("draft-diff:export-usb-transfer", String(body || "")),
   activateBackup: () => ipcRenderer.invoke("draft-diff:activate-backup"),
   deactivateBackup: () => ipcRenderer.invoke("draft-diff:deactivate-backup"),
   selectVersionHistoryFolder: body => ipcRenderer.invoke("draft-diff:select-version-history-folder", String(body || "")),

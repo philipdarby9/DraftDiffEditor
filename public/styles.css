@@ -54,6 +54,7 @@
   --remove-ink: var(--diff-del);
   --same-bg: var(--diff-same-bg);
   --shadow: none;
+  --error-dot: oklch(56% 0.19 25);
   font-family: var(--font-ui);
 }
 
@@ -230,6 +231,12 @@ textarea,
   background: oklch(70% 0.14 80);
   box-shadow: 0 0 0 2px oklch(70% 0.14 80 / 0.18);
   animation: pulse 1.2s ease-in-out infinite;
+}
+
+.titlebar-status.is-error .status-dot {
+  background: var(--error-dot);
+  box-shadow: 0 0 0 2px oklch(56% 0.19 25 / 0.18);
+  animation: none;
 }
 
 @keyframes pulse {

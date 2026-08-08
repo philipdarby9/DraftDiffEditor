@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const http = require("node:http");
 const os = require("node:os");
 const path = require("node:path");
+const { Readable } = require("node:stream");
 
 const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "draft-diff-server-"));
 process.env.DRAFT_DIFF_DATA_DIR = dataDir;
@@ -268,6 +269,20 @@ function fixtureState() {
 async function run() {
   let server;
   try {
+    assert.equal(__test.MAX_REQUEST_BODY_BYTES, 100 * 1024 * 1024);
+    assert.equal(
+      await __test.readBody(Readable.from(["hello"]), { maxBytes: 5 }),
+      "hello"
+    );
+    await assert.rejects(
+      __test.readBody(Readable.from(["ééé"]), { maxBytes: 5 }),
+      error => {
+        assert.equal(error.code, "REQUEST_BODY_TOO_LARGE");
+        assert.equal(error.statusCode, 413);
+        return true;
+      }
+    );
+
     const corruptProjectPath = path.join(dataDir, "project.json");
     fs.writeFileSync(corruptProjectPath, "{ broken json", "utf8");
 

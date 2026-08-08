@@ -60,6 +60,7 @@ const LEGACY_DEFAULT_FONT_FAMILY = StateCore.LEGACY_DEFAULT_FONT_FAMILY;
 const MIN_PAGE_PANE_PERCENT = StateCore.MIN_PAGE_PANE_PERCENT;
 const SERVER_BUILD = "usb-baseline-review-2026-07-18";
 const AUTO_EXIT_ON_IDLE = process.env.DRAFT_DIFF_AUTO_EXIT === "1";
+const MAX_REQUEST_BODY_BYTES = 100 * 1024 * 1024;
 const CLIENT_IDLE_EXIT_MS = 5 * 60_000;
 const STARTUP_IDLE_EXIT_MS = 120_000;
 
@@ -9270,19 +9271,54 @@ function closeServerAndExit() {
   if (!maybeExitAfterCutHistoryJobs()) windowlessExitFallback();
 }
 
-function readBody(req) {
+function requestBodyTooLargeError(maxBytes) {
+  const error = new Error(`Request body is too large. Maximum size is ${maxBytes} bytes.`);
+  error.code = "REQUEST_BODY_TOO_LARGE";
+  error.statusCode = 413;
+  error.maxBytes = maxBytes;
+  return error;
+}
+
+function readBody(req, options = {}) {
+  const requestedLimit = Number(options.maxBytes);
+  const maxBytes = Number.isFinite(requestedLimit) && requestedLimit > 0
+    ? requestedLimit
+    : MAX_REQUEST_BODY_BYTES;
+
   return new Promise((resolve, reject) => {
     let body = "";
+    let bodyBytes = 0;
+    let settled = false;
+    const rejectOnce = error => {
+      if (settled) return;
+      settled = true;
+      reject(error);
+    };
+
     req.setEncoding("utf8");
     req.on("data", chunk => {
-      body += chunk;
-      if (body.length > 10_000_000) {
-        reject(new Error("Request body is too large."));
-        req.destroy();
+      if (settled) return;
+
+      bodyBytes += Buffer.byteLength(chunk, "utf8");
+      if (bodyBytes > maxBytes) {
+        body = "";
+        rejectOnce(requestBodyTooLargeError(maxBytes));
+        return;
       }
+
+      body += chunk;
     });
-    req.on("end", () => resolve(body));
-    req.on("error", reject);
+    req.on("end", () => {
+      if (settled) return;
+      settled = true;
+      resolve(body);
+    });
+    req.on("aborted", () => {
+      const error = new Error("Request aborted.");
+      error.code = "REQUEST_ABORTED";
+      rejectOnce(error);
+    });
+    req.on("error", rejectOnce);
   });
 }
 
@@ -10852,6 +10888,8 @@ module.exports = {
   __test: {
     STATE_FILE,
     EXPORT_FILE,
+    MAX_REQUEST_BODY_BYTES,
+    readBody,
     TEXT_FILE_STATES_FILE,
     PERSISTENCE_TRANSACTION_DIR,
     readState,

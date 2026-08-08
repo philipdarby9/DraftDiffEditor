@@ -1016,6 +1016,10 @@ function setStatus(text) {
   }
   els.saveStatus.title = statusText;
   els.saveStatus.classList.toggle("is-saving", /saving|unsaved/i.test(text));
+  els.saveStatus.classList.toggle(
+    "is-error",
+    /\b(?:failed|error|denied|unavailable|missing|blocked|paused)\b/i.test(statusText)
+  );
 }
 
 function nextUiFrame(delayMs = 0) {
@@ -8401,6 +8405,12 @@ function readableUsbExportFailure(message = "") {
   if (/EACCES|EPERM|access is denied|denied/i.test(text)) {
     return "USB export failed: access denied";
   }
+  if (/Failed to fetch|NetworkError|Load failed/i.test(text)) {
+    return "USB export failed: local server unavailable";
+  }
+  if (/request body is too large|REQUEST_BODY_TOO_LARGE|413/i.test(text)) {
+    return "USB export failed: project data is too large";
+  }
   if (/backup folder missing/i.test(text)) {
     return "USB export failed: backup folder missing";
   }
@@ -11899,6 +11909,33 @@ async function proceedTransferImport() {
   }
 }
 
+async function requestUsbTransferExport(body) {
+  if (window.draftDiffDesktop?.exportUsbTransfer) {
+    const payload = await window.draftDiffDesktop.exportUsbTransfer(body);
+    if (payload?.ok === false && !payload.cancelled) {
+      throw new Error(payload.error || payload.message || "USB export failed");
+    }
+    return payload;
+  }
+
+  const response = await fetch("/api/usb-transfer/export", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body
+  });
+  if (!response.ok) {
+    let message = "";
+    try {
+      const payload = await response.json();
+      message = payload?.error || payload?.message || "";
+    } catch {
+      message = response.statusText || `HTTP ${response.status}`;
+    }
+    throw new Error(message || `HTTP ${response.status}`);
+  }
+  return response.json();
+}
+
 async function exportUsbTransfer() {
   closeFileMenu();
   if (!state) return;
@@ -11911,17 +11948,7 @@ async function exportUsbTransfer() {
     rememberLinkedProjectState();
     window.clearTimeout(saveTimer);
     setStatus("Choose USB transfer folder...");
-    const response = await fetch("/api/usb-transfer/export", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: prepareClosePayload({ skipSummary: true })
-    });
-    if (!response.ok) {
-      const failure = await responseSaveFailure(response);
-      throw new Error(typeof failure === "object" && failure ? failure.message : failure);
-    }
-
-    const payload = await response.json();
+    const payload = await requestUsbTransferExport(prepareClosePayload({ skipSummary: true }));
     if (payload.cancelled) {
       setStatus("USB export cancelled");
       return;
