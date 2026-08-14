@@ -5467,6 +5467,10 @@ textarea {
   margin: 0 1px;
 }
 
+.version-history-strip .compare-token[data-history-change-token="true"] {
+  cursor: pointer;
+}
+
 .compare-token.removed {
   background: var(--diff-del-bg);
   color: var(--diff-del);

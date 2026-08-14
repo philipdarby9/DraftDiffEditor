@@ -216,7 +216,9 @@
 
   function focusEditor(options = {}) {
     const editor = options.editor || options.editorEl;
-    if (editor && typeof editor.focus === "function") editor.focus();
+    if (editor && typeof editor.focus === "function") {
+      editor.focus(options.preventScroll ? { preventScroll: true } : undefined);
+    }
   }
 
   function execDocumentCommand(command, value = null, options = {}) {

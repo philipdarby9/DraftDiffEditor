@@ -161,6 +161,7 @@ const MIN_PAGE_PANE_PERCENT = StateCore.MIN_PAGE_PANE_PERCENT;
 const MAX_SAVE_RETRIES = 3;
 const AUTOSAVE_DELAY_MS = 2000;
 const WORD_COUNT_REFRESH_DELAY_MS = 350;
+const EDITOR_SYNC_DEBOUNCE_MS = 300;
 const UNDO_TYPING_GROUP_WINDOW_MS = 1200;
 const UNDO_TYPING_GROUP_MAX_MS = 5000;
 const DRAFT_VERSION_CAPTURE_DELAY_MS = 2500;
@@ -226,12 +227,16 @@ let viewStateSaveTimer = null;
 let isSavingViewState = false;
 let viewStateSaveQueued = false;
 let typingUndoGroup = null;
+let pendingEditorSyncTimer = null;
 let draftNoteStatsTimers = new Map();
 let draftVersionTimers = new Map();
 let notesHeadingDensityFrame = null;
 let notesHeadingResizeObserver = null;
 let draftHeadingDensityFrame = null;
 let draftHeadingResizeObserver = null;
+
+const pendingEditorSyncKeys = new Set();
+const pageFieldNormalizationCache = new WeakMap();
 
 let fileViewStates = readStoredFileViewStates();
 let displayedPageKeys = new Set();
@@ -267,6 +272,7 @@ let historyVirtualState = null;
 let historyVirtualScrollFrame = null;
 let historyVirtualScrollSuppressed = false;
 let historyVirtualRevision = 0;
+let historyChangeClickTimer = null;
 let searchRefreshTimer = null;
 let spellcheckMenu = null;
 let spellcheckRange = null;
@@ -1131,6 +1137,50 @@ function markStateChanged() {
   stateRevision += 1;
 }
 
+function clearPendingEditorSync(pageKey) {
+  if (pageKey) pendingEditorSyncKeys.delete(pageKey);
+  if (!pendingEditorSyncKeys.size && pendingEditorSyncTimer !== null) {
+    window.clearTimeout(pendingEditorSyncTimer);
+    pendingEditorSyncTimer = null;
+  }
+}
+
+function scheduleEditorSync(editorEl) {
+  const pageKey = editorEl?.dataset?.editorKey;
+  if (!pageKey) return;
+
+  pendingEditorSyncKeys.add(pageKey);
+  window.clearTimeout(pendingEditorSyncTimer);
+  pendingEditorSyncTimer = window.setTimeout(() => {
+    pendingEditorSyncTimer = null;
+    flushPendingEditorSync();
+  }, EDITOR_SYNC_DEBOUNCE_MS);
+}
+
+function flushPendingEditorSync(pageKey = "") {
+  const keys = pageKey
+    ? (pendingEditorSyncKeys.has(pageKey) ? [pageKey] : [])
+    : Array.from(pendingEditorSyncKeys);
+  let synced = false;
+
+  keys.forEach(key => {
+    const editorEl = editorElementForKey(key);
+    const page = editorEl ? pageForEditorKey(key) : null;
+    pendingEditorSyncKeys.delete(key);
+    if (!editorEl || !page) return;
+
+    syncRichPage(page, editorEl);
+    synced = true;
+  });
+
+  if (!pendingEditorSyncKeys.size && pendingEditorSyncTimer !== null) {
+    window.clearTimeout(pendingEditorSyncTimer);
+    pendingEditorSyncTimer = null;
+  }
+
+  return synced;
+}
+
 function queueSave(delay = AUTOSAVE_DELAY_MS) {
   if (isOpeningTextProject) {
     saveQueued = true;
@@ -1246,6 +1296,7 @@ function pageHistorySnapshot(page) {
 }
 
 function pageHistoryEntryForKey(pageKey) {
+  flushPendingEditorSync(pageKey);
   const page = pageForEditorKey(pageKey);
   const snapshot = pageHistorySnapshot(page);
   return snapshot ? { type: "page", key: pageKey, page: snapshot } : null;
@@ -1328,15 +1379,26 @@ function projectFormatHistoryEntry() {
   };
 }
 
-function pageHistorySignature(entry) {
-  if (!isPageHistoryEntry(entry)) return "";
-  return JSON.stringify({
-    key: entry.key,
-    title: entry.page?.title || "",
-    content: entry.page?.content || "",
-    contentHtml: entry.page?.contentHtml || "",
-    format: normalizeFormat(entry.page?.format || {})
-  });
+function pageHistoryEntriesMatch(left, right) {
+  if (!isPageHistoryEntry(left) || !isPageHistoryEntry(right) || left.key !== right.key) return false;
+
+  const leftPage = left.page || {};
+  const rightPage = right.page || {};
+  const leftContent = typeof leftPage.content === "string" ? leftPage.content : "";
+  const rightContent = typeof rightPage.content === "string" ? rightPage.content : "";
+  const leftContentHtml = typeof leftPage.contentHtml === "string" ? leftPage.contentHtml : "";
+  const rightContentHtml = typeof rightPage.contentHtml === "string" ? rightPage.contentHtml : "";
+  const leftFormat = normalizeFormat(leftPage.format || {});
+  const rightFormat = normalizeFormat(rightPage.format || {});
+
+  return leftPage.title === rightPage.title
+    && leftContent.length === rightContent.length
+    && leftContentHtml.length === rightContentHtml.length
+    && leftContent === rightContent
+    && leftContentHtml === rightContentHtml
+    && leftFormat.fontFamily === rightFormat.fontFamily
+    && leftFormat.fontSize === rightFormat.fontSize
+    && leftFormat.lineHeight === rightFormat.lineHeight;
 }
 
 function draftStructureHistorySignature(entry) {
@@ -1365,9 +1427,7 @@ function projectFormatHistorySignature(entry) {
 
 function historyEntriesMatch(left, right) {
   if (isPageHistoryEntry(left) || isPageHistoryEntry(right)) {
-    return isPageHistoryEntry(left)
-      && isPageHistoryEntry(right)
-      && pageHistorySignature(left) === pageHistorySignature(right);
+    return pageHistoryEntriesMatch(left, right);
   }
 
   if (isDraftStructureHistoryEntry(left) || isDraftStructureHistoryEntry(right)) {
@@ -1411,6 +1471,7 @@ function recordUndoSnapshot() {
 
 function recordPageUndoSnapshot(pageKey) {
   if (!state || isRestoringHistory) return;
+  flushPendingEditorSync(pageKey);
   typingUndoGroup = null;
 
   pushUndoHistoryEntry(pageHistoryEntryForKey(pageKey));
@@ -2575,12 +2636,33 @@ function editableHistoryTarget(target) {
   return closestElement(target, "[data-editor-key], [data-title-draft-id]");
 }
 
+function rememberPageFieldNormalization(page) {
+  if (!page || typeof page !== "object") return;
+  pageFieldNormalizationCache.set(page, {
+    content: page.content,
+    contentHtml: page.contentHtml
+  });
+}
+
+function primePageFieldNormalizationCache(projectState = state) {
+  if (!projectState) return;
+  rememberPageFieldNormalization(projectState.initialNotes);
+  projectState.drafts?.forEach(draft => {
+    rememberPageFieldNormalization(draft);
+    rememberPageFieldNormalization(draft.notes);
+  });
+}
+
 function ensurePageFields(page) {
   page.createdAt = page.createdAt || nowIso();
   page.updatedAt = page.updatedAt || page.createdAt;
   page.content = typeof page.content === "string" ? page.content : "";
   page.contentHtml = typeof page.contentHtml === "string" ? page.contentHtml : textToHtml(page.content);
-  if (page.contentHtml) {
+  const cachedFields = pageFieldNormalizationCache.get(page);
+  const contentFieldsChanged = !cachedFields
+    || cachedFields.content !== page.content
+    || cachedFields.contentHtml !== page.contentHtml;
+  if (contentFieldsChanged && page.contentHtml) {
     const htmlContent = plainTextFromHtml(page.contentHtml);
     if (!hasParagraphHtml(page.contentHtml) && page.content && lineBreakCount(page.content) > lineBreakCount(htmlContent)) {
       page.contentHtml = textToHtml(page.content);
@@ -2589,6 +2671,7 @@ function ensurePageFields(page) {
     }
   }
   page.format = normalizeFormat({ ...currentDefaultFormat(state), ...(page.format || {}) });
+  rememberPageFieldNormalization(page);
   return page;
 }
 
@@ -2808,6 +2891,7 @@ function clearDraftVersionTimer(captureKey) {
 
 function flushPageVersionCapture(pageKey, options = {}) {
   const normalizedKey = normalizedVersionHistoryPageKey(pageKey);
+  flushPendingEditorSync(normalizedKey);
   const item = normalizedKey ? pageItemForKey(normalizedKey) : null;
   if (!item?.page) return false;
 
@@ -4655,6 +4739,15 @@ function selectSpellcheckRange(range = spellcheckRange) {
   return selectRange(range);
 }
 
+function editorForRange(range) {
+  if (!range) return null;
+  const container = range.commonAncestorContainer;
+  const element = container?.nodeType === Node.ELEMENT_NODE
+    ? container
+    : container?.parentElement;
+  return element?.closest?.("[data-editor-key]") || null;
+}
+
 function selectedClipboardPayload(editorEl) {
   const selection = window.getSelection();
   if (!selection?.rangeCount) return null;
@@ -4828,17 +4921,15 @@ async function pasteIntoEditor(editorEl, range = null) {
 
 function replaceSpellcheckWord(value) {
   const range = spellcheckRange?.cloneRange();
+  const editorEl = editorForRange(range);
   closeSpellcheckMenu();
-  if (!selectSpellcheckRange(range)) return;
+  if (!editorEl || !rangeInsideEditor(range, editorEl)) return;
 
-  const editorEl = range.startContainer.parentElement?.closest("[data-editor-key]");
   if (editorEl) activeEditorKey = editorEl.dataset.editorKey;
-  if (editorEl) {
-    recordPageUndoSnapshot(editorEl.dataset.editorKey);
-  } else {
-    recordUndoSnapshot();
-  }
-  insertPlainText(value, { document });
+  recordPageUndoSnapshot(editorEl.dataset.editorKey);
+  editorEl.focus({ preventScroll: true });
+  if (!selectSpellcheckRange(range)) return;
+  insertPlainText(value, { document, editor: editorEl, preventScroll: true });
   if (editorEl) {
     const page = pageForEditorKey(editorEl.dataset.editorKey);
     if (page) syncRichPage(page, editorEl);
@@ -5465,6 +5556,7 @@ function syncGlobalFormatControls() {
 
 function syncRichPage(page, editorEl) {
   ensurePageFields(page);
+  clearPendingEditorSync(editorEl?.dataset?.editorKey);
   const nextContentHtml = sanitizeRichHtml(editorEl.innerHTML);
   const nextContent = editorPlainText(editorEl);
   const nextFormat = normalizeFormat(page.format);
@@ -5480,6 +5572,7 @@ function syncRichPage(page, editorEl) {
   page.contentHtml = nextContentHtml;
   page.content = nextContent;
   page.format = nextFormat;
+  rememberPageFieldNormalization(page);
 }
 
 function splitLines(text) {
@@ -6963,6 +7056,10 @@ function renderDiffToken(part, pair) {
   const attributes = {};
 
   if (isCompareWordToken(part.text)) {
+    if (part.type === "added" || part.type === "removed") {
+      attributes["data-history-change-token"] = "true";
+    }
+
     if ((part.type === "same" || part.type === "added") && Number.isInteger(part.afterIndex)) {
       attributes["data-compare-token-index"] = part.afterIndex;
     }
@@ -7567,6 +7664,10 @@ function clearHistoryVirtualState() {
     window.cancelAnimationFrame(historyVirtualScrollFrame);
     historyVirtualScrollFrame = null;
   }
+  if (historyChangeClickTimer !== null) {
+    window.clearTimeout(historyChangeClickTimer);
+    historyChangeClickTimer = null;
+  }
   historyVirtualScrollSuppressed = false;
   historyVirtualState = null;
 }
@@ -7593,6 +7694,51 @@ function historyVirtualWindowBounds(virtualState, focusPosition = 0) {
   return { start, end: Math.min(total, start + size) };
 }
 
+function historyVersionPagesDiffer(beforePage, afterPage) {
+  if (!beforePage || !afterPage) return false;
+  return beforePage.content !== afterPage.content
+    || beforePage.contentHtml !== afterPage.contentHtml;
+}
+
+function firstHistoryChangePosition(pageKey, entries) {
+  let previousPage = null;
+
+  for (let position = 0; position < entries.length; position += 1) {
+    const entry = entries[position];
+    const currentPage = historyVersionPage(pageKey, entry.version, entry.index);
+    if (previousPage && historyVersionPagesDiffer(previousPage, currentPage)) {
+      const diffResult = diffRichPagesResult(previousPage, currentPage);
+      if (diffResult.hasChanges) return position;
+    }
+    previousPage = currentPage;
+  }
+
+  return -1;
+}
+
+function historyVirtualPage(virtualState, position) {
+  const entry = virtualState?.entries?.[position];
+  return entry
+    ? historyVersionPage(virtualState.pageKey, entry.version, entry.index)
+    : null;
+}
+
+function historyVirtualDiffResult(virtualState, position) {
+  if (!virtualState || position <= 0 || position >= virtualState.entries.length) return null;
+  if (virtualState.pageDiffResults.has(position)) return virtualState.pageDiffResults.get(position);
+
+  const result = diffRichPagesResult(
+    historyVirtualPage(virtualState, position - 1),
+    historyVirtualPage(virtualState, position)
+  );
+  virtualState.pageDiffResults.set(position, result);
+  return result;
+}
+
+function historyVirtualPositionHasChanges(virtualState, position) {
+  return Boolean(historyVirtualDiffResult(virtualState, position)?.hasChanges);
+}
+
 function historyVirtualPageHtml(virtualState, position) {
   if (!virtualState || position < 0 || position >= virtualState.entries.length) return "";
   if (virtualState.pageHtmlCache.has(position)) {
@@ -7603,6 +7749,7 @@ function historyVirtualPageHtml(virtualState, position) {
   }
 
   const current = virtualState.entries[position];
+  if (position > 0) historyVirtualDiffResult(virtualState, position);
   let html = "";
   if (position === 0) {
     html = virtualState.basePageHtml(current.version, current.index);
@@ -7740,6 +7887,75 @@ function ensureHistoryVirtualPosition(position, options = {}) {
   }
 
   return els.diffOutput.querySelector(`[data-history-position="${target}"]`);
+}
+
+function historyChangeTokenForPage(page) {
+  return page?.querySelector(
+    '[data-history-change-token="true"]'
+  ) || null;
+}
+
+function scrollHistoryChangeTokenToTop(token, behavior = "auto") {
+  const body = token?.closest?.(".compare-page-body");
+  if (!body || !token) return false;
+
+  const bodyRect = body.getBoundingClientRect();
+  const tokenRect = token.getBoundingClientRect();
+  const nextTop = body.scrollTop + tokenRect.top - bodyRect.top - 4;
+  body.scrollTo({ top: Math.max(0, nextTop), behavior });
+  return true;
+}
+
+function focusHistoryChangePosition(virtualState, position, behavior = "auto") {
+  const page = ensureHistoryVirtualPosition(position, { scroll: true });
+  const token = historyChangeTokenForPage(page);
+  if (!token) return null;
+
+  scrollHistoryChangeTokenToTop(token, behavior);
+  return token;
+}
+
+function nextHistoryChangeToken(token) {
+  const virtualState = historyVirtualState;
+  if (!virtualState || !token) return null;
+
+  const page = token.closest("[data-history-position]");
+  const currentPosition = Number(page?.dataset.historyPosition);
+  if (!Number.isInteger(currentPosition)) return null;
+
+  const mountedTokens = Array.from(
+    els.diffOutput.querySelectorAll('[data-history-change-token="true"]')
+  );
+  const mountedIndex = mountedTokens.indexOf(token);
+  if (mountedIndex >= 0 && mountedTokens[mountedIndex + 1]) {
+    return mountedTokens[mountedIndex + 1];
+  }
+
+  for (let position = currentPosition + 1; position < virtualState.entries.length; position += 1) {
+    if (!historyVirtualPositionHasChanges(virtualState, position)) continue;
+    const nextPage = ensureHistoryVirtualPosition(position, { scroll: true });
+    const nextToken = historyChangeTokenForPage(nextPage);
+    if (nextToken) return nextToken;
+  }
+
+  return null;
+}
+
+function queueHistoryChangeAdvance(token) {
+  if (historyChangeClickTimer !== null) {
+    window.clearTimeout(historyChangeClickTimer);
+    historyChangeClickTimer = null;
+  }
+
+  historyChangeClickTimer = window.setTimeout(() => {
+    historyChangeClickTimer = null;
+    if (!token?.isConnected || !historyVirtualState) return;
+
+    const nextToken = nextHistoryChangeToken(token);
+    if (!nextToken) return;
+    scrollHistoryChangeTokenToTop(nextToken, "smooth");
+    highlightCompareTarget(nextToken);
+  }, 160);
 }
 
 function updateHistoryVirtualWindowFromScroll() {
@@ -8032,12 +8248,17 @@ async function renderVersionHistoryStripProgressively(options) {
     visiblePages: compareVisiblePageCount(total),
     start: -1,
     end: -1,
+    firstChangedPosition: firstHistoryChangePosition(pageKey, entries),
     pageHtmlCache: new Map(),
-    pageScrollPositions: new Map()
+    pageScrollPositions: new Map(),
+    pageDiffResults: new Map()
   };
   clearHistoryVirtualState();
   historyVirtualState = virtualState;
-  const initialBounds = historyVirtualWindowBounds(virtualState, 0);
+  const initialFocusPosition = virtualState.firstChangedPosition >= 0
+    ? virtualState.firstChangedPosition
+    : 0;
+  const initialBounds = historyVirtualWindowBounds(virtualState, initialFocusPosition);
   const initialTotal = initialBounds.end - initialBounds.start;
   const renderProgress = (completed, detail) => {
     if (!diffRenderIsCurrent(token)) return;
@@ -8070,11 +8291,14 @@ async function renderVersionHistoryStripProgressively(options) {
   }
 
   if (!diffRenderIsCurrent(token) || historyVirtualState !== virtualState) return;
-  renderHistoryVirtualWindow(virtualState, 0, {
+  renderHistoryVirtualWindow(virtualState, initialFocusPosition, {
     force: true,
-    targetPosition: 0
+    targetPosition: initialFocusPosition
   });
   versionHistoryViewDidRender();
+  if (virtualState.firstChangedPosition >= 0) {
+    focusHistoryChangePosition(virtualState, virtualState.firstChangedPosition);
+  }
 }
 
 function renderDraftVersionHistoryProgressively(draft, token, label) {
@@ -8234,6 +8458,7 @@ function renderChangesVisibility() {
 }
 
 function render() {
+  flushPendingEditorSync();
   saveCurrentEditorViewState();
   saveVisibleEditorScrollPositions();
   ensureDisplaySelection();
@@ -8247,22 +8472,19 @@ function render() {
 
 function syncFromInputs() {
   if (!state) return;
+  flushPendingEditorSync();
   saveCurrentEditorViewState();
   saveVisibleEditorScrollPositions();
 
   els.pageCanvas.querySelectorAll("[data-title-draft-id]").forEach(input => {
     syncDraftTitleInput(input);
   });
-
-  els.pageCanvas.querySelectorAll("[data-editor-key]").forEach(editorEl => {
-    const page = pageForEditorKey(editorEl.dataset.editorKey);
-    if (page) syncRichPage(page, editorEl);
-  });
 }
 
 function syncPageFromDom(pageKey) {
   if (!state || !pageKey) return;
   syncViewStateFromDom();
+  const didFlushPendingSync = flushPendingEditorSync(pageKey);
 
   const parsed = parseDraftPageKey(pageKey);
   if (parsed?.type === "content") {
@@ -8272,11 +8494,12 @@ function syncPageFromDom(pageKey) {
 
   const editorEl = editorElementForKey(pageKey);
   const page = editorEl ? pageForEditorKey(pageKey) : null;
-  if (page && editorEl) syncRichPage(page, editorEl);
+  if (page && editorEl && !didFlushPendingSync) syncRichPage(page, editorEl);
 }
 
 function syncViewStateFromDom() {
   if (!state) return;
+  flushPendingEditorSync();
   saveCurrentEditorViewState();
   saveVisibleEditorScrollPositions();
 }
@@ -12135,6 +12358,7 @@ async function savePendingPagesNow() {
     const responseMatchesCurrentState = requestRevision === stateRevision;
     if (responseMatchesCurrentState && latestPayload?.state) {
       state = migrateLegacyDefaultFonts(latestPayload.state);
+      primePageFieldNormalizationCache(state);
     }
 
     isSaving = false;
@@ -12219,7 +12443,10 @@ async function saveNow(options = {}) {
     }
 
     const responseMatchesCurrentState = requestRevision === stateRevision;
-    if (responseMatchesCurrentState) state = payload.state;
+    if (responseMatchesCurrentState) {
+      state = payload.state;
+      primePageFieldNormalizationCache(state);
+    }
 
     updateStoragePathsFromPayload(payload);
     isSaving = false;
@@ -13161,8 +13388,7 @@ els.pageCanvas.addEventListener("input", event => {
   const editorEl = closestElement(event.target, "[data-editor-key]");
   const titleInput = closestElement(event.target, "[data-title-draft-id]");
   if (editorEl) {
-    const page = pageForEditorKey(editorEl.dataset.editorKey);
-    if (page) syncRichPage(page, editorEl);
+    scheduleEditorSync(editorEl);
     queueDraftVersionCaptureForEditor(editorEl);
     queueDraftNoteStatsRefresh(editorEl);
     window.requestAnimationFrame(() => saveEditorViewState(editorEl));
@@ -13569,6 +13795,11 @@ els.historyVersionFilter?.addEventListener(
 els.diffOutput.addEventListener("dblclick", event => {
   if (!(event.target instanceof Element)) return;
 
+  if (historyChangeClickTimer !== null) {
+    window.clearTimeout(historyChangeClickTimer);
+    historyChangeClickTimer = null;
+  }
+
   const sourceToken = event.target.closest("[data-scroll-target-page-id][data-scroll-target-token-index]");
   if (!sourceToken || !els.diffOutput.contains(sourceToken)) return;
 
@@ -13580,6 +13811,18 @@ els.diffOutput.addEventListener("scroll", scheduleHistoryVirtualWindowUpdate, { 
 
 els.diffOutput.addEventListener("click", event => {
   if (!(event.target instanceof Element)) return;
+
+  const historyChangeToken = event.target.closest('[data-history-change-token="true"]');
+  if (
+    historyChangeToken &&
+    versionHistoryDraftId &&
+    historyVirtualState &&
+    els.diffOutput.contains(historyChangeToken)
+  ) {
+    event.preventDefault();
+    queueHistoryChangeAdvance(historyChangeToken);
+    return;
+  }
 
   const projectNotesRestoreButton = event.target.closest("[data-restore-project-notes-version-id]");
   if (projectNotesRestoreButton && els.diffOutput.contains(projectNotesRestoreButton)) {
