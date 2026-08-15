@@ -17,6 +17,7 @@ const baseLines = Array.from(
 );
 const firstChangeLines = [...baseLines];
 firstChangeLines[54] = "The first saved change appears well below the version header.";
+firstChangeLines[64] = "A second saved change appears farther down the same version.";
 const secondChangeLines = [...firstChangeLines];
 secondChangeLines[69] = "The second saved change appears after the first one.";
 
@@ -154,6 +155,72 @@ async function run() {
       Math.abs(initialFocus.tokenOffsetFromBodyTop) < 14,
       `first change should be at the top of the version body, got ${initialFocus.tokenOffsetFromBodyTop}px`
     );
+
+    const changeCounters = await window.webContents.executeJavaScript(`
+      (() => {
+        const page = document.querySelector('[data-history-position="1"]');
+        return {
+          added: page.querySelector('[data-history-change-type="added"]')?.innerText || "",
+          removed: page.querySelector('[data-history-change-type="removed"]')?.innerText || "",
+          addedButtons: page.querySelectorAll('[data-history-change-type="added"]').length,
+          removedButtons: page.querySelectorAll('[data-history-change-type="removed"]').length
+        };
+      })()
+    `);
+    assert.equal(changeCounters.addedButtons, 1);
+    assert.equal(changeCounters.removedButtons, 1);
+    assert.match(changeCounters.added, /\+2\s+added/u);
+    assert.match(changeCounters.removed, /-2\s+deleted/u);
+
+    await window.webContents.executeJavaScript(`
+      document.querySelector('[data-history-position="1"] [data-history-change-type="added"]').click()
+    `);
+    await waitFor(
+      window,
+      'document.querySelector(`[data-history-position="1"] .compare-target-highlight.added`)',
+      "first added change from counter"
+    );
+    const firstAddedText = await window.webContents.executeJavaScript(
+      'document.querySelector(`[data-history-position="1"] .compare-target-highlight.added`).innerText'
+    );
+
+    await window.webContents.executeJavaScript(`
+      document.querySelector('[data-history-position="1"] [data-history-change-type="added"]').click()
+    `);
+    await waitFor(
+      window,
+      'document.querySelector(`[data-history-position="1"] .compare-target-highlight.added`)',
+      "second added change from counter"
+    );
+    const secondAddedText = await window.webContents.executeJavaScript(
+      'document.querySelector(`[data-history-position="1"] .compare-target-highlight.added`).innerText'
+    );
+    assert.notEqual(secondAddedText, firstAddedText);
+
+    await window.webContents.executeJavaScript(`
+      document.querySelector('[data-history-position="1"] [data-history-change-type="removed"]').click()
+    `);
+    await waitFor(
+      window,
+      'document.querySelector(`[data-history-position="1"] .compare-target-highlight.removed`)',
+      "first deleted change from counter"
+    );
+    const firstRemovedText = await window.webContents.executeJavaScript(
+      'document.querySelector(`[data-history-position="1"] .compare-target-highlight.removed`).innerText'
+    );
+
+    await window.webContents.executeJavaScript(`
+      document.querySelector('[data-history-position="1"] [data-history-change-type="removed"]').click()
+    `);
+    await waitFor(
+      window,
+      'document.querySelector(`[data-history-position="1"] .compare-target-highlight.removed`)',
+      "second deleted change from counter"
+    );
+    const secondRemovedText = await window.webContents.executeJavaScript(
+      'document.querySelector(`[data-history-position="1"] .compare-target-highlight.removed`).innerText'
+    );
+    assert.notEqual(secondRemovedText, firstRemovedText);
 
     await window.webContents.executeJavaScript(`
       document.querySelector('[data-history-position="1"] [data-history-change-token="true"]').click()

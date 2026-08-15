@@ -5409,6 +5409,26 @@ textarea {
   color: var(--diff-del);
 }
 
+.version-history-strip .compare-page-header .change-nav-stat {
+  appearance: none;
+  border: 0;
+  padding: 0;
+  background: transparent;
+  color: var(--fg-muted);
+  font: inherit;
+  cursor: pointer;
+}
+
+.version-history-strip .compare-page-header .change-nav-stat:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.version-history-strip .compare-page-header .change-nav-stat:disabled {
+  cursor: default;
+  opacity: 0.58;
+}
+
 .compare-page-body {
   flex: 1;
   min-height: 0;

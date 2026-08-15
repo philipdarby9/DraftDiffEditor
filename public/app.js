@@ -273,6 +273,7 @@ let historyVirtualScrollFrame = null;
 let historyVirtualScrollSuppressed = false;
 let historyVirtualRevision = 0;
 let historyChangeClickTimer = null;
+let historyChangeNavigationIndexes = new Map();
 let searchRefreshTimer = null;
 let spellcheckMenu = null;
 let spellcheckRange = null;
@@ -7099,12 +7100,21 @@ function normalizedDiffResult(diffResult) {
     : diffResult;
 }
 
-function compareStatsHtml(diffResult) {
+function compareStatsHtml(diffResult, options = {}) {
   const stats = diffSegmentStats(diffResult.parts);
+  const interactive = options.interactiveChanges === true;
+  const statHtml = (type, className, count, label) => {
+    const tagName = interactive ? "button" : "span";
+    const interactiveAttributes = interactive
+      ? ` type="button" data-history-change-type="${type}" aria-label="Show each ${label} in this version"${count ? "" : " disabled"}`
+      : "";
+    return `<${tagName} class="stat ${className}${interactive ? " change-nav-stat" : ""}"${interactiveAttributes}><span class="num">${type === "added" ? "+" : "-"}${count}</span> ${label}</${tagName}>`;
+  };
+
   return `
     <div class="compare-stats">
-      <span class="stat add"><span class="num">+${stats.adds}</span> added</span>
-      <span class="stat del"><span class="num">-${stats.dels}</span> deleted</span>
+      ${statHtml("added", "add", stats.adds, "added")}
+      ${statHtml("removed", "del", stats.dels, "deleted")}
     </div>
   `;
 }
@@ -7475,7 +7485,7 @@ function versionComparePageHtml(draft, version, index, previousVersion = null, p
         <div class="meta version-page-meta">
           <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
           ${versionCoalescedMetaHtml(options.coalescedVersionCount)}
-          ${compareStatsHtml(diffResult)}
+          ${compareStatsHtml(diffResult, { interactiveChanges: true })}
         </div>
         <button
           class="version-restore-button"
@@ -7519,7 +7529,7 @@ function draftNotesVersionComparePageHtml(draft, version, index, previousVersion
         <div class="meta version-page-meta">
           <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
           ${versionCoalescedMetaHtml(options.coalescedVersionCount)}
-          ${compareStatsHtml(diffResult)}
+          ${compareStatsHtml(diffResult, { interactiveChanges: true })}
         </div>
         <button
           class="version-restore-button"
@@ -7563,7 +7573,7 @@ function projectNotesVersionComparePageHtml(version, index, previousVersion = nu
         <div class="meta version-page-meta">
           <div class="version-recorded" title="Recorded: ${escapeHtml(fullRecordedText)}">Recorded ${escapeHtml(recordedText)}</div>
           ${versionCoalescedMetaHtml(options.coalescedVersionCount)}
-          ${compareStatsHtml(diffResult)}
+          ${compareStatsHtml(diffResult, { interactiveChanges: true })}
         </div>
         <button
           class="version-restore-button"
@@ -7668,6 +7678,7 @@ function clearHistoryVirtualState() {
     window.clearTimeout(historyChangeClickTimer);
     historyChangeClickTimer = null;
   }
+  historyChangeNavigationIndexes.clear();
   historyVirtualScrollSuppressed = false;
   historyVirtualState = null;
 }
@@ -7893,6 +7904,31 @@ function historyChangeTokenForPage(page) {
   return page?.querySelector(
     '[data-history-change-token="true"]'
   ) || null;
+}
+
+function historyChangeTokensForPage(page, type) {
+  const className = type === "added" ? "added" : type === "removed" ? "removed" : "";
+  if (!page || !className) return [];
+  return Array.from(page.querySelectorAll(
+    `[data-history-change-token="true"].${className}`
+  ));
+}
+
+function focusHistoryChangeType(button) {
+  const type = button?.dataset?.historyChangeType;
+  const page = button?.closest?.("[data-history-position]");
+  const tokens = historyChangeTokensForPage(page, type);
+  if (!tokens.length) return null;
+
+  const pagePosition = page.dataset.historyPosition;
+  const key = `${historyVirtualState?.revision || 0}:${pagePosition}:${type}`;
+  const currentIndex = historyChangeNavigationIndexes.get(key);
+  const nextIndex = ((Number.isInteger(currentIndex) ? currentIndex : -1) + 1) % tokens.length;
+  const token = tokens[nextIndex];
+  historyChangeNavigationIndexes.set(key, nextIndex);
+  scrollHistoryChangeTokenToTop(token, "smooth");
+  highlightCompareTarget(token);
+  return token;
 }
 
 function scrollHistoryChangeTokenToTop(token, behavior = "auto") {
@@ -13811,6 +13847,18 @@ els.diffOutput.addEventListener("scroll", scheduleHistoryVirtualWindowUpdate, { 
 
 els.diffOutput.addEventListener("click", event => {
   if (!(event.target instanceof Element)) return;
+
+  const historyChangeNavigator = event.target.closest("[data-history-change-type]");
+  if (
+    historyChangeNavigator &&
+    versionHistoryDraftId &&
+    historyVirtualState &&
+    els.diffOutput.contains(historyChangeNavigator)
+  ) {
+    event.preventDefault();
+    focusHistoryChangeType(historyChangeNavigator);
+    return;
+  }
 
   const historyChangeToken = event.target.closest('[data-history-change-token="true"]');
   if (
