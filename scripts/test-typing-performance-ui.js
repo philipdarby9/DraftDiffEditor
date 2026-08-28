@@ -93,13 +93,10 @@ async function run() {
         render();
         await new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)));
 
-        const editor = editorElementForKey(activeEditorKey);
-        const selection = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(editor);
-        range.collapse(false);
-        selection.removeAllRanges();
-        selection.addRange(range);
+        let editor = editorElementForKey(activeEditorKey);
+        const initialEditorTag = editor.tagName;
+        editor.focus();
+        editor.setSelectionRange(editor.value.length, editor.value.length);
         editor.focus();
         recordPageUndoSnapshot(activeEditorKey);
 
@@ -115,22 +112,57 @@ async function run() {
         document.addEventListener("beforeinput", onBeforeInput, true);
         document.addEventListener("input", onInput);
 
-        document.execCommand("insertText", false, " typed");
+        editor.dispatchEvent(new InputEvent("beforeinput", {
+          bubbles: true,
+          cancelable: true,
+          inputType: "insertText",
+          data: " typed"
+        }));
+        editor.value = editor.value + " typed";
+        editor.setSelectionRange(editor.value.length, editor.value.length);
+        editor.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          inputType: "insertText",
+          data: " typed"
+        }));
         const immediate = {
           inputDuration,
           pendingSync: pendingEditorSyncKeys.has(activeEditorKey),
-          stateStillBeforeInput: !draft.content.endsWith(" typed")
+          stateStillBeforeInput: !draft.content.endsWith(" typed"),
+          editorTag: editor.tagName
         };
 
         await new Promise(resolve => setTimeout(resolve, EDITOR_SYNC_DEBOUNCE_MS + 80));
         const synced = draft.content.endsWith(" typed");
         undoProjectChange();
         const undone = !state.drafts[0].content.endsWith(" typed")
-          && !editorElementForKey(activeEditorKey).innerText.endsWith(" typed");
+          && !editorElementForKey(activeEditorKey).value.endsWith(" typed");
+
+        editor = editorElementForKey(activeEditorKey);
+        editor.focus();
+        editor.setSelectionRange(0, 0);
+        const beforeTab = editor.value;
+        const tabEvent = new KeyboardEvent("keydown", {
+          bubbles: true,
+          cancelable: true,
+          key: "Tab"
+        });
+        editor.dispatchEvent(tabEvent);
+        const tabInserted = editor.value === "\\t" + beforeTab;
+
+        undoProjectChange();
+        editor = editorElementForKey(activeEditorKey);
+        editor.focus();
+        editor.setSelectionRange(0, 5);
+        runEditorCommand(activeEditorKey, "bold");
+        editor = editorElementForKey(activeEditorKey);
+        const convertedToRich = editor.tagName === "DIV"
+          && editor.getAttribute("contenteditable") === "true"
+          && state.drafts[0].contentHtml.includes("<strong>");
 
         document.removeEventListener("beforeinput", onBeforeInput, true);
         document.removeEventListener("input", onInput);
-        return { immediate, synced, undone };
+        return { immediate, synced, undone, initialEditorTag, tabInserted, convertedToRich };
       })()
     `);
 
@@ -138,6 +170,10 @@ async function run() {
     assert.equal(result.immediate.stateStillBeforeInput, true, "the model may lag until the coalesced sync");
     assert.equal(result.synced, true, "the queued editor sync should update the model");
     assert.equal(result.undone, true, "undo should still restore the pre-typing content");
+    assert.equal(result.initialEditorTag, "TEXTAREA", "large plain documents should use the textarea editor");
+    assert.equal(result.immediate.editorTag, "TEXTAREA", "typing should stay in plain-text mode");
+    assert.equal(result.tabInserted, true, "Tab should insert a literal tab in plain-text mode");
+    assert.equal(result.convertedToRich, true, "rich formatting should promote the editor on demand");
     assert.ok(
       result.immediate.inputDuration === null || result.immediate.inputDuration < 50,
       `large-document input handler took ${result.immediate.inputDuration}ms`

@@ -9392,7 +9392,7 @@ function recoverCorruptProjectState(error) {
   return writeAll(defaultState());
 }
 
-function readState() {
+function readState(options = {}) {
   ensureDataDir();
   recoverPersistenceTransaction();
   if (!fs.existsSync(STATE_FILE)) {
@@ -9410,10 +9410,21 @@ function readState() {
     filePath: readTextFileLink() || EXPORT_FILE,
     promotePages: false
   }).state;
-  writeTransactionalTextFiles([{
-    filePath: EXPORT_FILE,
-    content: formatExport(normalized)
-  }]);
+  if (options.syncExport !== false) {
+    const exportText = formatExport(normalized);
+    let existingExportText = null;
+    try {
+      existingExportText = fs.readFileSync(EXPORT_FILE, "utf8");
+    } catch (error) {
+      if (error.code !== "ENOENT") throw error;
+    }
+    if (existingExportText !== exportText) {
+      writeTransactionalTextFiles([{
+        filePath: EXPORT_FILE,
+        content: exportText
+      }]);
+    }
+  }
   return normalized;
 }
 
@@ -10693,7 +10704,7 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req);
     const payload = body ? JSON.parse(body) : {};
     const key = asText(payload.key);
-    const state = readState();
+    const state = readState({ syncExport: false });
 
     if (!applyPagePayload(state, key, payload.page)) {
       sendJson(res, 404, { error: "Page not found" });
@@ -10701,7 +10712,8 @@ async function handleApi(req, res, pathname) {
     }
 
     const savedState = writeAll(state, {
-      allowLinkedTextFileFailure: true
+      allowLinkedTextFileFailure: true,
+      skipVersionHistory: payload.skipVersionHistory === true
     });
     sendJson(res, 200, {
       ok: true,
@@ -10716,7 +10728,7 @@ async function handleApi(req, res, pathname) {
     const body = await readBody(req);
     const payload = body ? JSON.parse(body) : {};
     const key = asText(payload.key || payload.unitKey);
-    const state = readState();
+    const state = readState({ syncExport: false });
 
     if (!applyUnitPayload(state, key, payload)) {
       sendJson(res, 404, { error: "Panel unit not found" });
@@ -10724,7 +10736,8 @@ async function handleApi(req, res, pathname) {
     }
 
     const savedState = writeAll(state, {
-      allowLinkedTextFileFailure: true
+      allowLinkedTextFileFailure: true,
+      skipVersionHistory: payload.skipVersionHistory === true
     });
     sendJson(res, 200, {
       ok: true,

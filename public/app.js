@@ -162,6 +162,8 @@ const MAX_SAVE_RETRIES = 3;
 const AUTOSAVE_DELAY_MS = 2000;
 const WORD_COUNT_REFRESH_DELAY_MS = 350;
 const EDITOR_SYNC_DEBOUNCE_MS = 300;
+const EDITOR_VIEW_STATE_SAVE_DELAY_MS = 250;
+const PLAIN_TEXT_EDITOR_THRESHOLD = 25_000;
 const UNDO_TYPING_GROUP_WINDOW_MS = 1200;
 const UNDO_TYPING_GROUP_MAX_MS = 5000;
 const DRAFT_VERSION_CAPTURE_DELAY_MS = 2500;
@@ -228,6 +230,7 @@ let isSavingViewState = false;
 let viewStateSaveQueued = false;
 let typingUndoGroup = null;
 let pendingEditorSyncTimer = null;
+let editorViewStateSaveTimer = null;
 let draftNoteStatsTimers = new Map();
 let draftVersionTimers = new Map();
 let notesHeadingDensityFrame = null;
@@ -236,6 +239,7 @@ let draftHeadingDensityFrame = null;
 let draftHeadingResizeObserver = null;
 
 const pendingEditorSyncKeys = new Set();
+const pendingEditorViewStateEditors = new Set();
 const pageFieldNormalizationCache = new WeakMap();
 
 let fileViewStates = readStoredFileViewStates();
@@ -1182,6 +1186,23 @@ function flushPendingEditorSync(pageKey = "") {
   return synced;
 }
 
+function queueEditorViewStateSave(editorEl, delay = EDITOR_VIEW_STATE_SAVE_DELAY_MS) {
+  if (!editorEl?.dataset?.editorKey) return;
+
+  pendingEditorViewStateEditors.add(editorEl);
+  window.clearTimeout(editorViewStateSaveTimer);
+  editorViewStateSaveTimer = window.setTimeout(() => {
+    editorViewStateSaveTimer = null;
+    const editors = Array.from(pendingEditorViewStateEditors);
+    pendingEditorViewStateEditors.clear();
+
+    editors.forEach(pendingEditor => {
+      if (!pendingEditor?.isConnected || !els.pageCanvas.contains(pendingEditor)) return;
+      saveEditorViewState(pendingEditor);
+    });
+  }, delay);
+}
+
 function queueSave(delay = AUTOSAVE_DELAY_MS) {
   if (isOpeningTextProject) {
     saveQueued = true;
@@ -1231,7 +1252,8 @@ function pageSavePayload(pageKey, options = {}) {
 
   return {
     key: pageKey,
-    page: payloadPage
+    page: payloadPage,
+    skipVersionHistory: !options.includeVersionHistory
   };
 }
 
@@ -3228,10 +3250,14 @@ function normalizeStoredEditorSelection(selection) {
   if (!selection || typeof selection !== "object" || Array.isArray(selection)) return null;
 
   const normalized = {};
-  ["startOffset", "endOffset", "startTextOffset", "endTextOffset", "scrollTop", "scrollLeft"].forEach(field => {
+  ["startOffset", "endOffset", "startTextOffset", "endTextOffset", "selectionStart", "selectionEnd", "scrollTop", "scrollLeft"].forEach(field => {
     const value = Number(selection[field]);
     if (Number.isFinite(value)) normalized[field] = Math.max(0, value);
   });
+
+  if (["forward", "backward", "none"].includes(selection.selectionDirection)) {
+    normalized.selectionDirection = selection.selectionDirection;
+  }
 
   ["startPath", "endPath"].forEach(field => {
     if (!Array.isArray(selection[field])) return;
@@ -3799,6 +3825,37 @@ function editorElementForKey(editorKey) {
     .find(editor => editor.dataset.editorKey === editorKey);
 }
 
+const RICH_TEXT_MARKUP_PATTERN = /<(?:b|strong|i|em|u|s|strike|del|span|div|p|blockquote|ul|ol|li)(?:\s|>)/i;
+const RICH_TEXT_COMMANDS = new Set([
+  "bold",
+  "italic",
+  "underline",
+  "strikeThrough",
+  "insertUnorderedList",
+  "insertOrderedList",
+  "outdent",
+  "indent",
+  "justifyLeft",
+  "justifyCenter",
+  "justifyRight"
+]);
+
+function isPlainTextEditor(editorEl) {
+  return editorEl?.tagName === "TEXTAREA" && editorEl.matches("[data-editor-key]");
+}
+
+function pageHasRichTextMarkup(page) {
+  return RICH_TEXT_MARKUP_PATTERN.test(String(page?.contentHtml || ""));
+}
+
+function shouldUsePlainTextEditor(page) {
+  return Boolean(
+    page
+    && !pageHasRichTextMarkup(page)
+    && String(page.content || "").length >= PLAIN_TEXT_EDITOR_THRESHOLD
+  );
+}
+
 function nodeOffsetLimit(node) {
   return node.nodeType === Node.TEXT_NODE ? node.nodeValue.length : node.childNodes.length;
 }
@@ -3872,11 +3929,33 @@ function rangeFromTextOffsets(root, startOffset, endOffset) {
 
 function saveEditorSelection(editorEl) {
   if (!editorEl) return;
+
+  if (isPlainTextEditor(editorEl)) {
+    const selectionStart = Number(editorEl.selectionStart);
+    const selectionEnd = Number(editorEl.selectionEnd);
+    if (!Number.isFinite(selectionStart) || !Number.isFinite(selectionEnd)) return;
+
+    editorSelections[editorEl.dataset.editorKey] = {
+      ...editorSelections[editorEl.dataset.editorKey],
+      selectionStart,
+      selectionEnd,
+      selectionDirection: editorEl.selectionDirection || "none",
+      startTextOffset: selectionStart,
+      endTextOffset: selectionEnd
+    };
+    return;
+  }
+
   const selection = window.getSelection();
   if (!selection?.rangeCount) return;
 
   const range = selection.getRangeAt(0);
   if (!editorEl.contains(range.startContainer) || !editorEl.contains(range.endContainer)) return;
+
+  const startTextOffset = textOffsetForRangeBoundary(editorEl, range.startContainer, range.startOffset);
+  const endTextOffset = range.collapsed
+    ? startTextOffset
+    : textOffsetForRangeBoundary(editorEl, range.endContainer, range.endOffset);
 
   editorSelections[editorEl.dataset.editorKey] = {
     ...editorSelections[editorEl.dataset.editorKey],
@@ -3884,8 +3963,8 @@ function saveEditorSelection(editorEl) {
     startOffset: range.startOffset,
     endPath: nodePathFromRoot(editorEl, range.endContainer),
     endOffset: range.endOffset,
-    startTextOffset: textOffsetForRangeBoundary(editorEl, range.startContainer, range.startOffset),
-    endTextOffset: textOffsetForRangeBoundary(editorEl, range.endContainer, range.endOffset)
+    startTextOffset,
+    endTextOffset
   };
 }
 
@@ -3908,17 +3987,30 @@ function saveVisibleEditorScrollPositions() {
 }
 
 function saveCurrentEditorSelection() {
+  const activeEditor = document.activeElement?.closest?.("[data-editor-key]");
+  if (isPlainTextEditor(activeEditor) && els.pageCanvas.contains(activeEditor)) {
+    queueEditorViewStateSave(activeEditor);
+    queueViewStateSave(1000);
+    return;
+  }
+
   const selection = window.getSelection();
   const anchor = selection?.anchorNode;
   const anchorElement = anchor?.nodeType === Node.ELEMENT_NODE ? anchor : anchor?.parentElement;
   const editorEl = anchorElement?.closest?.("[data-editor-key]");
   if (editorEl && els.pageCanvas.contains(editorEl)) {
-    saveEditorSelection(editorEl);
+    queueEditorViewStateSave(editorEl);
     queueViewStateSave(1000);
   }
 }
 
 function saveCurrentEditorViewState() {
+  const activeEditor = document.activeElement?.closest?.("[data-editor-key]");
+  if (isPlainTextEditor(activeEditor) && els.pageCanvas.contains(activeEditor)) {
+    saveEditorViewState(activeEditor);
+    return;
+  }
+
   const selection = window.getSelection();
   const anchor = selection?.anchorNode;
   const anchorElement = anchor?.nodeType === Node.ELEMENT_NODE ? anchor : anchor?.parentElement;
@@ -3938,6 +4030,18 @@ function restoreEditorSelection(editorEl) {
   const saved = editorSelections[editorEl?.dataset.editorKey];
   if (!editorEl || !saved) return false;
   if (saved.startTextOffset === undefined || saved.endTextOffset === undefined) return false;
+
+  if (isPlainTextEditor(editorEl)) {
+    const valueLength = editorEl.value.length;
+    const start = Math.min(valueLength, Math.max(0, Number(saved.startTextOffset) || 0));
+    const end = Math.min(valueLength, Math.max(start, Number(saved.endTextOffset) || 0));
+    try {
+      editorEl.setSelectionRange(start, end, saved.selectionDirection || "none");
+    } catch {
+      editorEl.setSelectionRange(start, end);
+    }
+    return true;
+  }
 
   const startNode = nodeFromPath(editorEl, saved.startPath);
   const endNode = nodeFromPath(editorEl, saved.endPath);
@@ -4844,6 +4948,19 @@ function syncEditorDomMutation(editorEl, beforeEntry = null) {
   return true;
 }
 
+function insertTextIntoPlainEditor(editorEl, text) {
+  if (!isPlainTextEditor(editorEl)) return false;
+
+  const value = editorEl.value || "";
+  const start = Number.isFinite(editorEl.selectionStart) ? editorEl.selectionStart : value.length;
+  const end = Number.isFinite(editorEl.selectionEnd) ? editorEl.selectionEnd : start;
+  const nextValue = `${value.slice(0, start)}${text}${value.slice(end)}`;
+  const nextOffset = start + String(text).length;
+  editorEl.value = nextValue;
+  editorEl.setSelectionRange(nextOffset, nextOffset);
+  return true;
+}
+
 function deleteSelectedContent(editorEl) {
   const selection = window.getSelection();
   if (!selection?.rangeCount) return false;
@@ -5059,6 +5176,7 @@ async function handleEditorContextMenu(event) {
   const target = event.target instanceof Element ? event.target : event.target?.parentElement;
   const editorEl = target?.closest?.("[data-editor-key]");
   if (!editorEl) return;
+  if (isPlainTextEditor(editorEl)) return;
 
   const caretRange = caretRangeFromPoint(event.clientX, event.clientY);
   const selectionRange = selectedRangeAtContextPoint(editorEl, caretRange, event.clientX, event.clientY);
@@ -5218,6 +5336,7 @@ function plainTextFromNode(root) {
 }
 
 function editorPlainText(editorEl) {
+  if (isPlainTextEditor(editorEl)) return editorEl.value;
   return plainTextFromNode(editorEl).trimEnd();
 }
 
@@ -5482,6 +5601,34 @@ function setEditorHtml(editorEl, html) {
   if (editorEl.innerHTML !== sanitized) editorEl.innerHTML = sanitized;
 }
 
+function convertPlainTextEditorToRich(editorEl) {
+  if (!isPlainTextEditor(editorEl)) return editorEl;
+
+  const editorKey = editorEl.dataset.editorKey;
+  const page = pageForEditorKey(editorKey);
+  if (!page) return editorEl;
+
+  saveEditorViewState(editorEl);
+  syncRichPage(page, editorEl);
+  pendingEditorViewStateEditors.delete(editorEl);
+
+  const richEditor = document.createElement("div");
+  Array.from(editorEl.attributes).forEach(attribute => {
+    if (attribute.name !== "placeholder") richEditor.setAttribute(attribute.name, attribute.value);
+  });
+  richEditor.classList.remove("plain-text-editor");
+  richEditor.classList.add("rich-editor");
+  richEditor.setAttribute("contenteditable", "true");
+  richEditor.setAttribute("spellcheck", "true");
+  richEditor.removeAttribute("placeholder");
+  richEditor.innerHTML = sanitizeRichHtml(page.contentHtml || textToHtml(page.content || ""));
+  applyEditorFormat(richEditor, page.format);
+  editorEl.replaceWith(richEditor);
+  restoreEditorSelection(richEditor);
+  restoreEditorScrollPosition(richEditor);
+  return richEditor;
+}
+
 function applyEditorFormat(editorEl, format) {
   const normalized = normalizeFormat(format);
   editorEl.style.fontFamily = normalized.fontFamily;
@@ -5558,8 +5705,10 @@ function syncGlobalFormatControls() {
 function syncRichPage(page, editorEl) {
   ensurePageFields(page);
   clearPendingEditorSync(editorEl?.dataset?.editorKey);
-  const nextContentHtml = sanitizeRichHtml(editorEl.innerHTML);
   const nextContent = editorPlainText(editorEl);
+  const nextContentHtml = isPlainTextEditor(editorEl)
+    ? textToHtml(nextContent)
+    : sanitizeRichHtml(editorEl.innerHTML);
   const nextFormat = normalizeFormat(page.format);
   if (
     page.contentHtml !== nextContentHtml ||
@@ -6637,6 +6786,7 @@ function formatRibbonHtml(pageKey, label, options = {}) {
 
 function editorPanelHtml(item, options = {}) {
   const page = ensurePageFields(item.page);
+  const usePlainTextEditor = shouldUsePlainTextEditor(page);
   const isNotesPanel = Boolean(options.notesDraftId);
   const notesHeaderStats = isNotesPanel && item.draft
     ? `
@@ -6755,6 +6905,27 @@ function editorPanelHtml(item, options = {}) {
   `;
   const editorShell = options.collapsed
     ? ""
+    : usePlainTextEditor
+    ? `
+      <div class="page-search-bar" data-search-bar-for="${escapeHtml(item.key)}" hidden>
+        <span class="page-search-count" data-search-count>No matches</span>
+        <span class="page-search-position" data-search-position></span>
+        <button type="button" data-search-page-prev="${escapeHtml(item.key)}" aria-label="Previous match in ${escapeHtml(item.title)}">Prev</button>
+        <button type="button" data-search-page-next="${escapeHtml(item.key)}" aria-label="Next match in ${escapeHtml(item.title)}">Next</button>
+      </div>
+      <div class="rich-editor-shell">
+        <textarea
+          class="rich-editor plain-text-editor"
+          role="textbox"
+          aria-multiline="true"
+          spellcheck="true"
+          aria-label="${escapeHtml(item.ariaLabel)}"
+          data-editor-key="${escapeHtml(item.key)}"
+          data-empty="${escapeHtml(placeholder)}"
+          placeholder="${escapeHtml(placeholder)}"
+        ></textarea>
+      </div>
+    `
     : `
       <div class="page-search-bar" data-search-bar-for="${escapeHtml(item.key)}" hidden>
         <span class="page-search-count" data-search-count>No matches</span>
@@ -6788,7 +6959,11 @@ function hydrateVisibleEditors(items) {
   items.forEach(item => {
     const editorEl = editorElementForKey(item.key);
     if (!editorEl) return;
-    setEditorHtml(editorEl, item.page.contentHtml);
+    if (isPlainTextEditor(editorEl)) {
+      if (editorEl.value !== item.page.content) editorEl.value = item.page.content;
+    } else {
+      setEditorHtml(editorEl, item.page.contentHtml);
+    }
     applyEditorFormat(editorEl, item.page.format);
     syncToolbarValues(item.key);
     restoreEditorScrollPosition(editorEl);
@@ -12766,6 +12941,10 @@ function applyUniversalFormat(field, value) {
   scheduleSave();
 }
 
+function commandRequiresRichEditor(command) {
+  return RICH_TEXT_COMMANDS.has(command);
+}
+
 function runEditorCommand(editorKey, command) {
   if (command === "undo") {
     undoProjectChange();
@@ -12777,10 +12956,13 @@ function runEditorCommand(editorKey, command) {
     return;
   }
 
-  const editorEl = editorElementForKey(editorKey);
+  let editorEl = editorElementForKey(editorKey);
   if (!editorEl) return;
   activeEditorKey = editorKey;
   const beforeEntry = pageHistoryEntryForKey(editorKey);
+  if (commandRequiresRichEditor(command)) {
+    editorEl = convertPlainTextEditorToRich(editorEl);
+  }
   execRichTextCommand(command, { document, editor: editorEl });
   syncEditorDomMutation(editorEl, beforeEntry);
 }
@@ -13397,6 +13579,7 @@ els.pageCanvas.addEventListener("focusin", event => {
 els.pageCanvas.addEventListener("focusout", event => {
   const editorEl = event.target.closest("[data-editor-key]");
   if (editorEl) {
+    pendingEditorViewStateEditors.delete(editorEl);
     saveEditorViewState(editorEl);
     queueViewStateSave(250);
   }
@@ -13427,7 +13610,7 @@ els.pageCanvas.addEventListener("input", event => {
     scheduleEditorSync(editorEl);
     queueDraftVersionCaptureForEditor(editorEl);
     queueDraftNoteStatsRefresh(editorEl);
-    window.requestAnimationFrame(() => saveEditorViewState(editorEl));
+    queueEditorViewStateSave(editorEl);
   }
 
   const titlePageKey = titleInput ? syncDraftTitleInput(titleInput) : "";
@@ -13452,7 +13635,7 @@ els.pageCanvas.addEventListener("input", event => {
 els.pageCanvas.addEventListener("keyup", event => {
   const editorEl = closestElement(event.target, "[data-editor-key]");
   if (editorEl) {
-    saveEditorViewState(editorEl);
+    queueEditorViewStateSave(editorEl);
     queueViewStateSave(750);
   }
 });
@@ -13460,7 +13643,7 @@ els.pageCanvas.addEventListener("keyup", event => {
 els.pageCanvas.addEventListener("pointerup", event => {
   const editorEl = closestElement(event.target, "[data-editor-key]");
   if (editorEl) {
-    saveEditorViewState(editorEl);
+    queueEditorViewStateSave(editorEl);
     queueViewStateSave(750);
   }
 });
@@ -13499,7 +13682,11 @@ els.pageCanvas.addEventListener("keydown", event => {
   event.preventDefault();
   activeEditorKey = editorEl.dataset.editorKey;
   recordPageUndoSnapshot(editorEl.dataset.editorKey);
-  insertPlainText("\t", { document });
+  if (isPlainTextEditor(editorEl)) {
+    insertTextIntoPlainEditor(editorEl, "\t");
+  } else {
+    insertPlainText("\t", { document, editor: editorEl });
+  }
   const page = pageForEditorKey(editorEl.dataset.editorKey);
   if (page) syncRichPage(page, editorEl);
   queueDraftVersionCaptureForEditor(editorEl);
@@ -13515,6 +13702,7 @@ els.pageCanvas.addEventListener("keydown", event => {
 els.pageCanvas.addEventListener("paste", event => {
   const editorEl = closestElement(event.target, "[data-editor-key]");
   if (!editorEl) return;
+  if (isPlainTextEditor(editorEl)) return;
 
   event.preventDefault();
   activeEditorKey = editorEl.dataset.editorKey;
