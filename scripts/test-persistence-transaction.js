@@ -198,19 +198,31 @@ try {
   const historyBackupsDir = path.join(historyDir, "version history JSON backups");
   const backupsBefore = fs.existsSync(historyBackupsDir) ? fs.readdirSync(historyBackupsDir).length : 0;
   t.writeTextFileLink(linkedPath);
+  const normalEditState = fixtureState("Epsilon normal edit");
+  t.writeAll(normalEditState, {
+    filePath: linkedPath,
+    fileName: "linked.txt"
+  });
+  assert.equal(
+    fs.existsSync(historyBackupsDir) ? fs.readdirSync(historyBackupsDir).length : 0,
+    backupsBefore,
+    "normal version-history sidecar saves should not create immutable JSON backups"
+  );
+  assert.match(readText(sidecarPath), /Epsilon normal edit/, "normal saves should still update the canonical version-history sidecar");
   const epsilonState = fixtureState("Epsilon");
   t.writeAll(epsilonState, {
     filePath: linkedPath,
-    fileName: "linked.txt"
+    fileName: "linked.txt",
+    backupVersionHistoryJson: true
   });
   const backupFiles = fs.existsSync(historyBackupsDir) ? fs.readdirSync(historyBackupsDir) : [];
   assert.equal(
     backupFiles.length > backupsBefore,
     true,
-    "overwriting a version-history JSON should keep a permanent backup copy"
+    "a close-time version-history save should keep an immutable JSON backup copy"
   );
   assert.equal(
-    backupFiles.some(fileName => readText(path.join(historyBackupsDir, fileName)).includes("Gamma")),
+    backupFiles.some(fileName => readText(path.join(historyBackupsDir, fileName)).includes("Epsilon normal edit")),
     true,
     "version-history backup should contain the previous JSON contents"
   );
@@ -242,7 +254,8 @@ try {
   const backupsBeforeIdChange = new Set(fs.readdirSync(historyBackupsDir));
   t.writeAll(epsilonState, {
     filePath: linkedPath,
-    fileName: "linked.txt"
+    fileName: "linked.txt",
+    backupVersionHistoryJson: true
   });
   const backupsAfterIdChange = fs.readdirSync(historyBackupsDir);
   assert.equal(
@@ -262,6 +275,7 @@ try {
   const failedHistoryChange = () => t.writeAll(fixtureState("Zpsilon"), {
     filePath: linkedPath,
     fileName: "linked.txt",
+    backupVersionHistoryJson: true,
     testFailWritePath: sidecarPath
   });
   assert.throws(failedHistoryChange, /Injected transaction write failure/);

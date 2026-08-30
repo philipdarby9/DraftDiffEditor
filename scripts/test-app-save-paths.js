@@ -183,6 +183,15 @@ assert.match(importProgressSource, /skipLinkedTextFileWrite: Boolean\(options\.s
 const saveNowSource = sourceBetween("async function saveNow", "async function loadState");
 assert.match(saveNowSource, /const skipInputSync = Boolean\(options\.skipInputSync\);/u, "saveNow should support an explicit import fast path");
 assert.match(saveNowSource, /saveCurrentViewState\(\{ syncDom: false \}\)/u, "import fast-path saves should keep view state without a full DOM sync");
+assert.doesNotMatch(saveNowSource, /skipVersionHistory: true/u, "normal full saves should continue persisting the canonical version-history sidecar");
+
+const pageSavePayloadSource = sourceBetween("function pageSavePayload", "function pageKeyForTitleInput");
+assert.match(pageSavePayloadSource, /options\.includeVersionHistory && Array\.isArray\(page\.versionHistory\)/u, "history-bearing page saves should include captured version-history entries");
+assert.match(pageSavePayloadSource, /skipVersionHistory: !options\.includeVersionHistory/u, "ordinary page saves should skip the sidecar until a history capture is ready");
+
+const versionCaptureSource = sourceBetween("function scheduleVersionHistoryPageSave", "function flushDraftVersionCaptures");
+assert.match(versionCaptureSource, /schedulePageSave\(/u, "version-history capture should schedule the canonical sidecar save during editing");
+assert.match(versionCaptureSource, /includeVersionHistory: true/u, "version-history capture should send the captured entries to the server");
 
 [
   ["open file", "async function openTextProject()", "async function recentOpenErrorFromResponse"],

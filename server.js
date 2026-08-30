@@ -4449,8 +4449,14 @@ function versionHistoryTransactionWrite(state, options = {}) {
   const previousFilePayload = previousContent === null ? null : parseVersionHistoryJson(previousContent);
   if (previousFilePayload) stabilizeVersionHistoryPayloadMetadata(previousFilePayload, nextPayload);
   const content = `${JSON.stringify(nextPayload, null, 2)}\n`;
-  if (previousContent !== null && previousContent !== content) {
-    backupExistingVersionHistoryJson(rootFolderPath, source, filePath, previousBuffer);
+  if (options.backupVersionHistoryJson === true) {
+    // Keep the live sidecar current during editing, but retain one close-time snapshot.
+    backupExistingVersionHistoryJson(
+      rootFolderPath,
+      source,
+      filePath,
+      previousBuffer === null ? Buffer.from(content, "utf8") : previousBuffer
+    );
   }
   return {
     filePath,
@@ -7663,7 +7669,8 @@ function writeAll(state, options = {}) {
       const versionHistoryWrite = versionHistoryTransactionWrite(normalized, {
         filePath: options.filePath || linkedTextPath || (options.fileName ? "" : EXPORT_FILE),
         fileName: options.fileName,
-        mergeExisting: options.mergeExisting
+        mergeExisting: options.mergeExisting,
+        backupVersionHistoryJson: options.backupVersionHistoryJson === true
       });
       if (versionHistoryWrite) {
         normalized = versionHistoryWrite.state || normalized;
@@ -9634,7 +9641,7 @@ function statePathPayload(options = {}) {
   };
 }
 
-function writeBackupFromRequestBody(body) {
+function writeBackupFromRequestBody(body, options = {}) {
   if (body) {
     const payload = parseStatePayload(body);
     return writeAllWithBackup(payload.state, {
@@ -9644,11 +9651,14 @@ function writeBackupFromRequestBody(body) {
       skipSummary: payload.skipSummary,
       allowMissingVersionHistoryFolder: Boolean(payload.allowMissingVersionHistoryFolder),
       allowLinkedTextFileFailure: Boolean(payload.allowLinkedTextFileFailure),
+      backupVersionHistoryJson: options.backupVersionHistoryJson === true,
       skipLinkedTextFileWrite: Boolean(payload.skipLinkedTextFileWrite)
     });
   }
 
-  return writeAllWithBackup(readState());
+  return writeAllWithBackup(readState(), {
+    backupVersionHistoryJson: options.backupVersionHistoryJson === true
+  });
 }
 
 function writeStateFromRequestBody(body) {
@@ -10767,7 +10777,7 @@ async function handleApi(req, res, pathname) {
   if (req.method === "POST" && pathname === "/api/close") {
     markClientActive();
     const body = await readBody(req);
-    const result = writeBackupFromRequestBody(body);
+    const result = writeBackupFromRequestBody(body, { backupVersionHistoryJson: true });
     sendJson(res, 200, { ok: true, backup: result?.backup || null });
     return;
   }
@@ -10782,7 +10792,7 @@ async function handleApi(req, res, pathname) {
 
   if (req.method === "POST" && pathname === "/api/shutdown") {
     const body = await readBody(req);
-    const result = writeBackupFromRequestBody(body);
+    const result = writeBackupFromRequestBody(body, { backupVersionHistoryJson: true });
 
     sendJson(res, 200, { ok: true, backup: result?.backup || null });
     setTimeout(() => {
@@ -11016,7 +11026,10 @@ function createHttpServer() {
 
 function flushOnExit() {
   try {
-    writeAllWithBackup(readState(), { skipSummary: true });
+    writeAllWithBackup(readState(), {
+      skipSummary: true,
+      backupVersionHistoryJson: true
+    });
   } catch (error) {
     console.error(error);
   }

@@ -614,7 +614,8 @@ async function quitAfterServerWork() {
               skipSummary: true,
               allowMissingVersionHistoryFolder: true,
               allowLinkedTextFileFailure: true
-            })
+            }),
+            { backupVersionHistoryJson: true }
           );
         } catch (error) {
           console.error(error);
